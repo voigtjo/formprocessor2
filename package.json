@@ -1,0 +1,10 @@
+{
+  "name": "formprocessor2",
+  "private": true,
+  "workspaces": ["erp-sim", "app", "tests"],
+  "scripts": {
+    "dev:erp": "npm --workspace erp-sim run dev",
+    "dev:app": "npm --workspace app run dev",
+    "test": "npm --workspace erp-sim test && npm --workspace app test && npm --workspace tests test"
+  }
+}
