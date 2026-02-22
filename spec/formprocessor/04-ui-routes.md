@@ -1,42 +1,53 @@
-# FormProcessor – UI & API Routes (P0)
+# FormProcessor – UI Routes (P0)
 
-Base: `http://localhost:<FP_PORT>`
+Base: `http://localhost:<FP_PORT>` (default `3000`)
 
-## Server-side rendered UI (EJS + HTMX)
+UI is server-rendered with EJS + HTMX (no React).
 
-### Pages
+## Health
+- `GET /health` -> `{ "ok": true }`
 
-- `GET /` → redirect to `/templates`
+## Root
+- `GET /` -> redirect to `/templates`
 
-#### Templates
-- `GET /templates` – list templates
-- `GET /templates/new` – new template form
-- `POST /templates` – create template (JSON)
-- `GET /templates/:id` – template detail (JSON editor + preview)
-- `POST /templates/:id` – update template JSON
-- `POST /templates/:id/delete` – delete
+## Templates
+- `GET /templates`
+  - lists active templates
+- `GET /templates/new`
+  - create form (metadata + raw `template_json` textarea)
+- `POST /templates`
+  - create template
+- `GET /templates/:id/edit`
+  - edit metadata + raw `template_json`
+- `POST /templates/:id`
+  - update template
+- `GET /templates/:id/preview`
+  - preview form rendering based on layout nodes
 
-Preview:
-- `GET /templates/:id/preview` – renders a preview form based on template (no persistence)
+## Documents
+- `GET /documents`
+  - list recent documents (latest first) with status/template/snapshot preview
+- `GET /documents/new?templateId=<uuid>`
+  - start form from template
+- `POST /documents`
+  - create document:
+    - `status = workflow.initial`
+    - stores editable values in `data_json`
+    - stores lookup IDs in `external_refs_json`
+    - stores lookup labels in `snapshots_json`
+    - if `fields.erp_customer_order_id` is a `system` field, app calls ERP-Sim `POST /api/customer-orders` and stores:
+      - `external_refs_json.customer_order_id`
+      - `snapshots_json.customer_order_id`
+      - `data_json.erp_customer_order_id`
+- `GET /documents/:id`
+  - document detail, rendered via node-based layout renderer
+- `POST /documents/:id/save`
+  - saves only editable fields for current workflow state
+- `POST /documents/:id/action/:controlKey`
+  - executes action engine using control -> action mapping
 
-#### Documents
-- `GET /documents` – list documents
-- `GET /documents/new?template_id=<id>` – start document wizard (lookups)
-- `POST /documents` – create document instance
-- `GET /documents/:id` – document detail (form + workflow buttons)
-- `POST /documents/:id/save` – save editable fields
-- `POST /documents/:id/action/:actionKey` – execute workflow action and persist changes
-
-## JSON endpoints (used by HTMX)
-
-- `GET /api/templates` → `{ items: [...] }`
-- `GET /api/templates/:id` → `{ item: ... }`
-- `GET /api/documents` → `{ items: [...] }`
-- `GET /api/documents/:id` → `{ item: ... }`
-
-Lookup proxy:
-- `GET /api/lookup?template_id=<id>&field=<fieldKey>&document_id=<optional>`
-  - resolves endpoint from template field lookup config
-  - calls ERP-Sim and returns `{ items: [...] }`
-
-P0: SSR pages can call JSON endpoints directly (internal function call), but HTTP separation is acceptable.
+## HTMX lookup endpoint
+- `GET /api/lookup?templateId=<uuid>&fieldKey=<fieldKey>[&lookup:<depField>=<id>]`
+  - resolves lookup source from template field
+  - calls ERP-Sim and returns HTML `<option>` list (not JSON)
+  - never hard-fails with 500 for expected lookup errors; returns fallback option text

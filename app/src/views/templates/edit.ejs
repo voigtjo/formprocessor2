@@ -1,0 +1,45 @@
+<h1>Edit Template</h1>
+<p class="muted">Template ID: <code><%= template.id %></code></p>
+
+<% if (errorMessage) { %>
+  <div class="card" style="border-color:#d9534f; background:#fff5f5;">
+    <strong>Save failed:</strong> <%= errorMessage %>
+  </div>
+<% } %>
+
+<form method="post" action="/templates/<%= template.id %>">
+  <div class="row">
+    <label for="key">Key</label>
+    <input id="key" name="key" type="text" value="<%= form?.key ?? '' %>" required />
+  </div>
+
+  <div class="row">
+    <label for="name">Name</label>
+    <input id="name" name="name" type="text" value="<%= form?.name ?? '' %>" required />
+  </div>
+
+  <div class="row">
+    <label for="description">Description</label>
+    <input id="description" name="description" type="text" value="<%= form?.description ?? '' %>" />
+  </div>
+
+  <div class="row">
+    <label for="state">State</label>
+    <input id="state" name="state" type="text" value="<%= form?.state ?? 'active' %>" required />
+  </div>
+
+  <div class="row">
+    <label for="template_json">template_json</label>
+    <textarea id="template_json" name="template_json" rows="22" style="max-width:900px"><%= form?.template_json ?? '' %></textarea>
+  </div>
+
+  <button type="submit">Save Template</button>
+</form>
+
+<p>
+  <a href="/templates/<%= template.id %>/preview">Preview</a>
+  ·
+  <a href="/documents/new?templateId=<%= template.id %>">New Document</a>
+  ·
+  <a href="/templates">Back to Templates</a>
+</p>

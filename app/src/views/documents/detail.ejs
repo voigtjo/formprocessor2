@@ -1,27 +1,34 @@
 <h1>Document <code><%= document.id %></code></h1>
 <p>Status: <strong><%= document.status %></strong></p>
 <p class="muted">Template: <%= template.name %> (<code><%= template.key %></code>)</p>
+<% if (dataJson.erp_customer_order_id || snapshotsJson.customer_order_id) { %>
+  <p>ERP Order Number: <strong><%= dataJson.erp_customer_order_id || snapshotsJson.customer_order_id %></strong></p>
+<% } %>
+<% if (errorMessage) { %>
+  <div class="card" style="border-color:#d9534f; background:#fff5f5;">
+    <strong>Action failed:</strong> <%= errorMessage %>
+  </div>
+<% } %>
 
-<% sections.forEach((section) => { %>
-  <div class="card">
-    <h2><%= section.title || 'Section' %></h2>
-    <% section.fields.forEach((fieldKey) => {
-      const field = templateJson.fields[fieldKey] || {};
-      const snapshotValue = snapshotsJson[fieldKey];
-      const externalValue = externalRefsJson[fieldKey];
-      const dataValue = dataJson[fieldKey];
+<form method="post" action="/documents/<%= document.id %>/save">
+  <%- layoutHtml %>
+  <div class="row" style="margin-top: 1rem;">
+    <% (buttonKeys || []).forEach((controlKey) => {
+      const control = (templateJson.controls || {})[controlKey] || {};
+      const label = control.label || controlKey;
     %>
-      <div class="row">
-        <label><%= field.label || fieldKey %> (<code><%= field.kind || 'unknown' %></code>)</label>
-        <% if (field.kind === 'lookup') { %>
-          <div><strong><%= snapshotValue ?? '-' %></strong></div>
-          <div class="muted">ID: <%= externalValue ?? '-' %></div>
-        <% } else { %>
-          <div><%= dataValue ?? '-' %></div>
-        <% } %>
-      </div>
+      <button
+        type="submit"
+        formaction="/documents/<%= document.id %>/action/<%= controlKey %>"
+        formmethod="post"
+        style="margin-right:0.5rem;"
+      ><%= label %></button>
     <% }) %>
   </div>
-<% }) %>
+</form>
 
-<p><a href="/templates">Back to Templates</a></p>
+<p>
+  <a href="/documents">Back to Documents</a>
+  ·
+  <a href="/templates">Templates</a>
+</p>

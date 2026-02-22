@@ -1,133 +1,85 @@
 # ERP Simulator – HTTP API (P0)
 
-Base: `http://localhost:<ERP_PORT>`
+Base: `http://localhost:<ERP_SIM_PORT>` (default `3001`)
 
 ## Conventions
 
-- JSON only
+- JSON API
 - `200` success
-- `400` bad query params/body
+- `400` invalid query/body
 - `404` missing entity
-- `409` invalid status transition
+- `409` invalid transition
 
-## Endpoints
+## Service routes
 
-### Health
-- `GET /health` → `{ ok: true }`
+- `GET /` -> `{ "ok": true, "service": "erp-sim" }`
+- `GET /health` -> `{ "ok": true }`
 
-### Master data lists
+## Master lists
 
-#### Products
-- `GET /api/products?valid=true`
-  - If `valid=true` → return only valid products
-  - Always sort by `name` ascending
+- `GET /api/products?valid=true|false`
+  - sorted by name
+  - response items include: `id,name,valid,product_type`
 
-Response:
+- `GET /api/customers?valid=true|false`
+  - sorted by name
+  - response items include: `id,name,valid`
+
+## Movement lists
+
+- `GET /api/batches?product_id=<uuid>&status=<ordered|produced|validated>`
+  - gated by product validity + `product_type=batch`
+
+- `GET /api/serial-instances?product_id=<uuid>&status=<ordered|produced|validated>`
+  - gated by product validity + `product_type=serial`
+
+- `GET /api/customer-orders?customer_id=<uuid>&status=<received|offer_created|completed>`
+  - gated by customer validity
+
+## Create customer order
+
+- `POST /api/customer-orders`
+- body (optional): `{ "customer_id": "<uuid>" }`
+
+Behavior:
+- creates one `customer_orders` row with:
+  - `status = "received"`
+  - generated `order_number` (`O-...`)
+- if `customer_id` omitted, uses first valid customer as fallback
+- returns created order object:
+
 ```json
-{ "items": [ { "id": "...", "name": "...", "valid": true, "product_type": "batch" } ] }
+{
+  "id": "...",
+  "customer_id": "...",
+  "order_number": "O-ABC123",
+  "status": "received",
+  "created_at": "..."
+}
 ```
 
-#### Customers
-- `GET /api/customers?valid=true`
-  - If `valid=true` → return only valid customers
-  - Always sort by `name` ascending
-
-Response:
-```json
-{ "items": [ { "id": "...", "name": "...", "valid": true } ] }
-```
-
-### Movement lists
-
-#### Batches
-- `GET /api/batches?status=ordered&product_id=<uuid>`
-
-Rules:
-- Only return items where:
-  - batch.status matches
-  - `products.valid=true`
-  - `products.product_type='batch'`
-
-Response:
-```json
-{ "items": [ { "id":"...", "product_id":"...", "batch_number":"B-0001", "status":"ordered", "created_at":"..." } ] }
-```
-
-#### Serial instances
-- `GET /api/serial-instances?status=ordered&product_id=<uuid>`
-
-Rules:
-- Only return items where:
-  - status matches
-  - `products.valid=true`
-  - `products.product_type='serial'`
-
-Response:
-```json
-{ "items": [ { "id":"...", "product_id":"...", "serial_number":"S-0001", "status":"ordered", "created_at":"..." } ] }
-```
-
-#### Customer orders
-- `GET /api/customer-orders?status=received&customer_id=<uuid>`
-
-Rules:
-- Only return items where:
-  - status matches
-  - `customers.valid=true`
-
-Response:
-```json
-{ "items": [ { "id":"...", "customer_id":"...", "order_number":"O-0001", "status":"received", "created_at":"..." } ] }
-```
-
-### Randomize / seed
+## Randomize
 
 - `POST /api/randomize`
+  - creates additional valid master + movement data
 
-Creates additional random **valid** master data and associated movement data in initial statuses.
+## Patch validity
 
-Response:
-```json
-{ "ok": true, "created": { "products": 3, "customers": 3, "batches": 6, "serial_instances": 6, "customer_orders": 6 } }
-```
+- `PATCH /api/products/:id` body `{ "valid": boolean }`
+- `PATCH /api/customers/:id` body `{ "valid": boolean }`
 
-### Patch validity
-
-- `PATCH /api/products/:id`
-
-Body:
-```json
-{ "valid": true }
-```
-
-- `PATCH /api/customers/:id`
-
-Body:
-```json
-{ "valid": false }
-```
-
-Response:
-```json
-{ "ok": true }
-```
-
-### Patch movement status
+## Patch movement status (monotonic)
 
 - `PATCH /api/batches/:id/status`
 - `PATCH /api/serial-instances/:id/status`
 - `PATCH /api/customer-orders/:id/status`
 
 Body:
+
 ```json
-{ "status": "produced" }
+{ "status": "..." }
 ```
 
-Rules:
-- Enforce monotonic forward transitions only
-- 409 on invalid transition
-
-Response:
-```json
-{ "ok": true }
-```
+Transitions:
+- movement: `ordered -> produced -> validated`
+- customer orders: `received -> offer_created -> completed`

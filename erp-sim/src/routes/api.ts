@@ -38,6 +38,7 @@ const listCustomerOrdersQuerySchema = z.object({
 const patchValidityBodySchema = z.object({ valid: z.boolean() });
 const patchMovementStatusBodySchema = z.object({ status: z.enum(movementStatusEnum.enumValues) });
 const patchCustomerOrderStatusBodySchema = z.object({ status: z.enum(customerOrderStatusEnum.enumValues) });
+const createCustomerOrderBodySchema = z.object({ customer_id: z.string().uuid().optional() }).optional();
 const idParamSchema = z.object({ id: z.string().uuid() });
 
 const movementOrder: MovementStatus[] = ['ordered', 'produced', 'validated'];
@@ -68,6 +69,11 @@ function canAdvance<T extends string>(order: T[], from: T, to: T) {
 
 function randomSuffix() {
   return `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+}
+
+function generateOrderNumber() {
+  const random = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `O-${random}`;
 }
 
 function toProductResponse(item: Awaited<ReturnType<ApiRepo['listProducts']>>[number]) {
@@ -190,6 +196,19 @@ export function createDrizzleRepo(db: ErpDb) {
 
     async setCustomerOrderStatus(id: string, status: CustomerOrderStatus) {
       await db.update(customerOrders).set({ status }).where(eq(customerOrders.id, id));
+    },
+
+    async createCustomerOrder(customerId: string) {
+      const orderNumber = generateOrderNumber();
+      const inserted = await db
+        .insert(customerOrders)
+        .values({
+          customerId,
+          orderNumber,
+          status: 'received'
+        })
+        .returning();
+      return inserted[0];
     },
 
     async randomize(): Promise<CreatedCounts> {
@@ -328,6 +347,30 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiRoutesOptions = {
 
     const items = await repo.listCustomerOrders(parsed.data.customer_id, parsed.data.status);
     return { items: items.map(toCustomerOrderResponse) };
+  });
+
+  app.post('/api/customer-orders', async (request, reply) => {
+    const parsed = createCustomerOrderBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid body' });
+    }
+
+    let customerId = parsed.data?.customer_id;
+    if (!customerId) {
+      const fallbackCustomer = (await repo.listCustomers(true))[0];
+      if (!fallbackCustomer) {
+        return reply.status(400).send({ message: 'No valid customer available' });
+      }
+      customerId = fallbackCustomer.id;
+    } else {
+      const customer = await repo.getCustomerById(customerId);
+      if (!customer) {
+        return reply.status(404).send({ message: 'Customer not found' });
+      }
+    }
+
+    const created = await repo.createCustomerOrder(customerId);
+    return toCustomerOrderResponse(created);
   });
 
   app.post('/api/randomize', async () => {

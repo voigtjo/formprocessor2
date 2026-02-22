@@ -1,23 +1,24 @@
-# ERP Simulator – Tests (P0)
+# ERP Simulator – Tests (Current P0)
 
-## Unit tests (next to code)
+## Unit tests (erp-sim)
 
-- `src/routes/*.test.ts`:
-  - list endpoints filter correctly by `valid` and `status`
-  - invalid transition returns 409
+Location: `erp-sim/src/routes/*.test.ts`
 
-## E2E tests (root /tests)
+Current key scenarios:
+- `erp-sim/src/routes/health.test.ts`
+  - `/health` returns `{ ok: true }`
+- `erp-sim/src/routes/api.test.ts`
+  - products `valid=true` filtering + sorting
+  - batches gating behavior (invalid/wrong-type/invalid-product)
+  - basic route wiring via Fastify inject
 
-- `tests/e2e/smoke.test.ts`:
-  - `GET /health` on both services returns `{ok:true}`
-  - basic ERP list calls return `200`
+## Cross-service E2E smoke (root tests workspace)
 
-## Test data strategy
+Location: `tests/e2e/smoke.test.ts`
 
-E2E assumes ERP-Sim is seeded on startup.
+Covers:
+- ERP-Sim `/health`
+- ERP-Sim `/api/products?valid=true` non-empty
+- app + ERP connectivity basics
 
-For transition tests, E2E may:
-
-1) fetch an `ordered` movement item
-2) patch to `produced`
-3) patch to `validated`
+Prerequisite: both services running and seeded DB.

@@ -1,11 +1,26 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Documents</title>
-</head>
-<body>
-  <h1>Documents (P0 scaffold)</h1>
-  <p>This page will list documents from DB in Run 2.</p>
-</body>
-</html>
+<h1>Documents</h1>
+
+<% if (!documents || documents.length === 0) { %>
+  <p>No documents yet.</p>
+<% } %>
+
+<% (documents || []).forEach((doc) => { %>
+  <div class="card">
+    <div>
+      <strong><a href="/documents/<%= doc.id %>">Document</a></strong>
+      <span class="muted">· <%= new Date(doc.createdAt).toLocaleString() %></span>
+    </div>
+    <div>
+      Status: <strong><%= doc.status %></strong>
+      · Template: <code><%= doc.templateKey %></code> (<%= doc.templateName %>)
+    </div>
+    <% if (doc.snapshotPreview && doc.snapshotPreview.length > 0) { %>
+      <div class="muted">Snapshots: <%= doc.snapshotPreview.join(' · ') %></div>
+    <% } %>
+    <div class="row">
+      <a href="/documents/<%= doc.id %>">Open</a>
+    </div>
+  </div>
+<% }) %>
+
+<p><a href="/templates">Back to Templates</a></p>

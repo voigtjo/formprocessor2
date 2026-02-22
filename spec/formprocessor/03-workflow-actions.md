@@ -1,38 +1,84 @@
 # FormProcessor – Workflow & Actions (P0)
 
-## Workflow engine (P0)
+## Control -> Action mapping
 
-- A template defines `workflow.initial` and `workflow.states`.
-- A document has `status`.
-- The UI renders buttons listed in `workflow.states[status].buttons`.
-- Field rules are evaluated per field:
-  - `visible` (default true)
-  - `readonly` (default false)
+1. UI renders buttons from `workflow.states[document.status].buttons`.
+2. Each button key resolves via `controls[controlKey].action` to `actionKey`.
+3. `actions[actionKey]` is loaded and executed.
 
-## Action engine (P0)
+If a control is not allowed in current state, or mapping is missing, UI shows a non-500 error message on document detail.
 
-Actions are executed by name (from control/button mapping).
+## Action definition shapes
 
-### Action types
+Supported P0 forms:
+- single step object (e.g. `{ "type": "setStatus", "to": "..." }`)
+- object with `steps` array
+- composite:
 
-#### noop
-Does nothing (used for Save because persistence is handled by API).
+```json
+{
+  "type": "composite",
+  "steps": [ ... ]
+}
+```
 
-#### composite
-Executes steps in order.
+## Supported step types
 
-#### setStatus
-- updates document status
+### `setStatus`
+- shape: `{ "type": "setStatus", "to": "new_status" }`
+- `status` is also accepted as fallback key.
+- updates in-memory doc status for later steps.
 
-#### setField
-- sets a value into `data_json` (or in P0 also allow writing into `snapshots_json`)
+### `setField`
+- shape: `{ "type": "setField", "key": "fieldKey", "value": ... }`
+- writes into `data_json[key]`.
+- `value` supports interpolation.
 
-#### callExternal
-- performs an HTTP request to ERP-Sim
-- supports templating:
-  - `{{external.<key>}}` resolves from `external_refs_json`.
+### `callExternal`
+- shape:
 
-### Error handling
+```json
+{
+  "type": "callExternal",
+  "service": "erp-sim",
+  "method": "PATCH",
+  "path": "/api/customer-orders/{{external.customer_order_id}}/status",
+  "body": { "status": "completed" }
+}
+```
 
-- If any step fails, the action fails and the document is not persisted (transactional behavior in FormProcessor service).
-- External call failures return 502 with the upstream status/body included (sanitized).
+- currently only `service: "erp-sim"` is supported.
+- base URL: `ERP_SIM_BASE_URL`.
+- request uses JSON headers/body (when body is present).
+- non-2xx responses fail the action with a clear message.
+
+## Interpolation
+
+Interpolation is supported in path/body strings:
+- `{{doc.id}}`
+- `{{doc.status}}`
+- `{{data.<key>}}`
+- `{{external.<key>}}`
+- `{{snapshot.<key>}}`
+
+Behavior:
+- interpolation is recursive in objects/arrays.
+- missing or empty interpolation value throws a clear error.
+  - example: missing `external.customer_order_id` fails action cleanly.
+
+## Transactional behavior and errors
+
+Execution model:
+1. load document + template
+2. run all steps sequentially in memory
+3. persist document changes only after all steps succeed
+
+Persistence in P0 action route:
+- updates `status`
+- updates `data_json`
+- does not mutate `external_refs_json`/`snapshots_json` during action execution
+
+On any failure:
+- no document changes are persisted
+- document detail page is re-rendered with an error message
+- no unhandled 500 is returned for expected action errors

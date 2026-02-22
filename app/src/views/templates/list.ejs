@@ -1,4 +1,6 @@
 <h1>Templates</h1>
+<p><a href="/documents">View Documents</a></p>
+<p><a href="/templates/new">Create Template</a></p>
 
 <% if (!templates || templates.length === 0) { %>
   <p>No active templates found.</p>
@@ -13,6 +15,7 @@
     <% } %>
     <div class="row">
       <a href="/templates/<%= tpl.id %>/preview">Preview</a>
+      <a href="/templates/<%= tpl.id %>/edit">Edit JSON</a>
       <a href="/documents/new?templateId=<%= tpl.id %>">New Document</a>
     </div>
   </div>

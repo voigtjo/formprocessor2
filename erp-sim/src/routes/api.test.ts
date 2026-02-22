@@ -21,6 +21,13 @@ function createRepo(overrides: Partial<ApiRepo> = {}): ApiRepo {
     setSerialInstanceStatus: async () => {},
     getCustomerOrderById: async () => undefined,
     setCustomerOrderStatus: async () => {},
+    createCustomerOrder: async (customerId) => ({
+      id: 'co-1',
+      customerId,
+      orderNumber: 'O-TEST01',
+      status: 'received',
+      createdAt: new Date()
+    }),
     randomize: async () => ({
       products: 0,
       customers: 0,
