@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title><%= (typeof title !== 'undefined' && title) ? title : 'FormProcessor' %></title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; }
+    nav a { margin-right: 1rem; }
+    .card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .row { margin: 0.5rem 0; }
+    label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+    input, textarea, select { width: 100%; max-width: 560px; padding: 0.4rem; }
+    .muted { color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/templates">Templates</a>
+  </nav>
+  <hr />
+  <%- content %>
+</body>
+</html>

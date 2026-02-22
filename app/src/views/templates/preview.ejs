@@ -1,0 +1,26 @@
+<h1>Template Preview: <%= template.name %></h1>
+<p class="muted"><code><%= template.key %></code></p>
+
+<% sections.forEach((section) => { %>
+  <div class="card">
+    <h2><%= section.title || 'Section' %></h2>
+    <% section.fields.forEach((fieldKey) => {
+      const field = templateJson.fields[fieldKey] || {};
+    %>
+      <div class="row">
+        <label><%= field.label || fieldKey %> (<code><%= field.kind || 'unknown' %></code>)</label>
+        <% if (field.kind === 'lookup') { %>
+          <select disabled>
+            <option>Lookup field</option>
+          </select>
+        <% } else if (field.multiline) { %>
+          <textarea rows="3" disabled placeholder="Preview"></textarea>
+        <% } else { %>
+          <input type="text" disabled placeholder="Preview" />
+        <% } %>
+      </div>
+    <% }) %>
+  </div>
+<% }) %>
+
+<p><a href="/documents/new?templateId=<%= template.id %>">Start New Document</a></p>

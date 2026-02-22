@@ -1,0 +1,41 @@
+<h1>New Document: <%= template.name %></h1>
+
+<form id="doc-form" method="post" action="/documents">
+  <input type="hidden" name="templateId" value="<%= template.id %>" />
+
+  <% sections.forEach((section) => { %>
+    <div class="card">
+      <h2><%= section.title || 'Section' %></h2>
+      <% section.fields.forEach((fieldKey) => {
+        const field = templateJson.fields[fieldKey] || {};
+      %>
+        <div class="row">
+          <label for="field-<%= fieldKey %>"><%= field.label || fieldKey %></label>
+
+          <% if (field.kind === 'lookup') { %>
+            <select
+              id="field-<%= fieldKey %>"
+              name="lookup:<%= fieldKey %>"
+              hx-get="/api/lookup"
+              hx-target="this"
+              hx-swap="innerHTML"
+              hx-include="#doc-form"
+              hx-trigger="load, change from:#doc-form"
+              hx-vals='{"templateId":"<%= template.id %>","fieldKey":"<%= fieldKey %>"}'
+            >
+              <option value="">Loading...</option>
+            </select>
+          <% } else if (field.kind === 'editable' && field.multiline) { %>
+            <textarea id="field-<%= fieldKey %>" name="data:<%= fieldKey %>" rows="4"></textarea>
+          <% } else if (field.kind === 'editable') { %>
+            <input id="field-<%= fieldKey %>" name="data:<%= fieldKey %>" type="text" />
+          <% } else { %>
+            <input id="field-<%= fieldKey %>" type="text" disabled value="(system field)" />
+          <% } %>
+        </div>
+      <% }) %>
+    </div>
+  <% }) %>
+
+  <button type="submit">Create Document</button>
+</form>

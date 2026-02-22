@@ -1,0 +1,19 @@
+<h1>Templates</h1>
+
+<% if (!templates || templates.length === 0) { %>
+  <p>No active templates found.</p>
+<% } %>
+
+<% (templates || []).forEach((tpl) => { %>
+  <div class="card">
+    <div><strong><%= tpl.name %></strong> (<code><%= tpl.key %></code>)</div>
+    <div class="muted">Version <%= tpl.version %> · State <%= tpl.state %></div>
+    <% if (tpl.description) { %>
+      <div class="muted"><%= tpl.description %></div>
+    <% } %>
+    <div class="row">
+      <a href="/templates/<%= tpl.id %>/preview">Preview</a>
+      <a href="/documents/new?templateId=<%= tpl.id %>">New Document</a>
+    </div>
+  </div>
+<% }); %>

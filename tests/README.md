@@ -1,17 +1,21 @@
 # tests
 
-E2E tests call both services via HTTP.
+HTTP smoke tests for running `erp-sim` + `app` instances.
 
-## Required env
+## Prerequisites
 
-- `FP_BASE_URL` (default: http://localhost:4000)
-- `ERP_BASE_URL` (default: http://localhost:4001)
+- Node.js 20+
+- Services are already running:
+  - ERP-Sim: `http://localhost:3001`
+  - App: `http://localhost:3000`
+- Optional overrides:
+  - `ERP_BASE_URL`
+  - `FP_BASE_URL`
 
 ## Run
 
-1) Start both services in separate terminals:
-   - `npm run dev:app`
-   - `npm run dev:erp`
-
-2) Run e2e:
-   - `npm --workspace tests test`
+```bash
+cd /Users/jvoigt/Projects/_formapps/formprocessor2/tests
+npm i
+npm test
+```

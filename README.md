@@ -10,6 +10,7 @@ Two services + shared E2E tests.
 
 - Export env vars:
   - `export ERP_DATABASE_URL=postgres://.../erp_sim`
+  - `export ERP_SIM_PORT=3001` (optional)
   - `export FP_DATABASE_URL=postgres://.../formprocessor2`
 
 ## Install
@@ -29,7 +30,7 @@ npm run dev:app
 
 Default ports:
 - FormProcessor: 4000
-- ERP-Sim: 4001
+- ERP-Sim: 3001
 
 ## Tests
 

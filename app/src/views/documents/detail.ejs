@@ -1,0 +1,27 @@
+<h1>Document <code><%= document.id %></code></h1>
+<p>Status: <strong><%= document.status %></strong></p>
+<p class="muted">Template: <%= template.name %> (<code><%= template.key %></code>)</p>
+
+<% sections.forEach((section) => { %>
+  <div class="card">
+    <h2><%= section.title || 'Section' %></h2>
+    <% section.fields.forEach((fieldKey) => {
+      const field = templateJson.fields[fieldKey] || {};
+      const snapshotValue = snapshotsJson[fieldKey];
+      const externalValue = externalRefsJson[fieldKey];
+      const dataValue = dataJson[fieldKey];
+    %>
+      <div class="row">
+        <label><%= field.label || fieldKey %> (<code><%= field.kind || 'unknown' %></code>)</label>
+        <% if (field.kind === 'lookup') { %>
+          <div><strong><%= snapshotValue ?? '-' %></strong></div>
+          <div class="muted">ID: <%= externalValue ?? '-' %></div>
+        <% } else { %>
+          <div><%= dataValue ?? '-' %></div>
+        <% } %>
+      </div>
+    <% }) %>
+  </div>
+<% }) %>
+
+<p><a href="/templates">Back to Templates</a></p>
