@@ -1,25 +1,22 @@
-# FormProcessor – Template JSON (P0)
+# FormProcessor – Template JSON Contract
 
-This document describes the currently implemented P0 `template_json` contract used by the app.
+This file defines the current P0 contract and planned extensions.
 
-## Top-level shape
+## Top-level
 
-`template_json` is stored in `fp_templates.template_json` and must contain:
+`template_json` must include:
 
 ```json
 {
   "fields": {},
   "layout": [],
-  "workflow": {
-    "initial": "received",
-    "states": {}
-  },
+  "workflow": { "initial": "...", "states": {} },
   "controls": {},
   "actions": {}
 }
 ```
 
-Validation in app (P0) is intentionally minimal:
+Minimal validation (current):
 - `fields`: object
 - `layout`: array
 - `workflow.initial`: string
@@ -27,37 +24,32 @@ Validation in app (P0) is intentionally minimal:
 - `controls`: object
 - `actions`: object
 
-## Fields
+## fields
 
-`fields` is a map keyed by `fieldKey`.
+`fields` is a map by `fieldKey`.
 
-Supported field kinds in P0:
-- `lookup`
-- `editable`
-- `system`
+Supported/target kinds:
+- `editable` (user input)
+- `lookup` (ERP-backed choices)
+- `system` (computed/system value)
+- `workflow` (planned: process-controlled fields such as status)
 
-Common field properties used by renderer:
-- `label` (optional)
-- `multiline` (editable only, optional)
+Common field props in use:
+- `label`
+- `multiline` (editable)
 
-Lookup source forms accepted:
-- `source` style:
-  - `source.path`
-  - `source.query`
-  - label/value key config via either
-    - `valueField`/`labelField`, or
-    - `valueKey`/`labelKey`
-- `lookup.endpoint` style (legacy-compatible)
+Lookup source compatibility:
+- `source.path` + `source.query`
+- optional value/label mapping via either:
+  - `valueField` / `labelField`
+  - `valueKey` / `labelKey`
+- legacy-compatible `lookup.endpoint` is supported.
 
-Lookup values are stored on document creation as:
-- selected ID: `external_refs_json[fieldKey]`
-- selected label snapshot: `snapshots_json[fieldKey]`
-
-## Layout (Renderer v2)
+## layout nodes (Renderer v2)
 
 `layout` is an array of nodes rendered recursively.
 
-Supported node types now:
+Supported now:
 - `h1`: `{ "type": "h1", "text": "..." }`
 - `h2`: `{ "type": "h2", "text": "..." }`
 - `text`: `{ "type": "text", "text": "..." }`
@@ -68,42 +60,67 @@ Supported node types now:
 - `row`: `{ "type": "row", "children": [...] }`
 - `col`: `{ "type": "col", "width": 1, "children": [...] }`
 
-Behavior:
-- Unknown node types are ignored safely.
-- In non-production (`NODE_ENV != production`), unknown nodes render a small muted warning.
-- Legacy layout support remains:
-  - `{ "sections": [{ "title": "...", "fields": ["..."] }] }`
-  - Fallback to all field keys if layout is missing/empty.
+Planned extension:
+- `button`: `{ "type": "button", "key": "reloadCustomers", "label": "Reload" }`
+  - `key` refers to a control/action key
+  - used for in-form actions (e.g. load/reload lookup options)
 
-## Workflow
+Behavior:
+- unknown node types are ignored safely
+- non-production may render a small warning
+- legacy section layout remains accepted as fallback
+
+## workflow
 
 ```json
 {
-  "initial": "received",
+  "initial": "Assigned",
   "states": {
-    "received": {
-      "editable": ["comment"],
-      "readonly": ["erp_customer_order_id"],
-      "buttons": ["complete"]
+    "Assigned": {
+      "editable": ["..."],
+      "readonly": ["..."],
+      "buttons": ["assign", "start", "save"]
     }
   }
 }
 ```
 
-- Document starts in `workflow.initial`.
-- Detail/save uses `states[document.status].editable` and `readonly`.
-- Action buttons shown from `states[document.status].buttons`.
+- `editable[]`: fields that can be changed
+- `readonly[]`: fields shown read-only
+- `buttons[]`: workflow/process button keys for current state
 
-## Controls
+## controls
 
-`controls` maps UI button key to action key:
+Maps button key -> action key:
 
 ```json
 {
-  "complete": { "label": "Complete", "action": "complete_process" }
+  "save": { "label": "Save", "action": "save" },
+  "submit": { "label": "Submit", "action": "submit_case" }
 }
 ```
 
-## Actions
+This mapping is shared by workflow bar buttons and planned layout button nodes.
 
-`actions` maps action key to an action definition (see `03-workflow-actions.md`).
+## actions
+
+Two supported definition forms:
+
+1. Declarative/composite:
+```json
+{ "type": "composite", "steps": [ ... ] }
+```
+
+2. Macro action:
+```json
+{ "type": "macro", "name": "assign", "params": {} }
+```
+
+Planned macro names include:
+- `assign`, `start`, `save`, `submit`, `approve`, `reject`
+
+Interpolation tokens usable in action path/body strings:
+- `{{doc.*}}`
+- `{{data.*}}`
+- `{{external.*}}`
+- `{{snapshot.*}}`

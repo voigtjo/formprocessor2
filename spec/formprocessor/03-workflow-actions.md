@@ -1,84 +1,73 @@
-# FormProcessor – Workflow & Actions (P0)
+# FormProcessor – Workflow & Action Engine
 
-## Control -> Action mapping
+## Canonical process statuses
 
-1. UI renders buttons from `workflow.states[document.status].buttons`.
-2. Each button key resolves via `controls[controlKey].action` to `actionKey`.
-3. `actions[actionKey]` is loaded and executed.
+For process field `status` (planned canonical set):
+- `Assigned`
+- `Started`
+- `Submitted`
+- `Approved`
+- `Rejected`
 
-If a control is not allowed in current state, or mapping is missing, UI shows a non-500 error message on document detail.
+Workflow states may use the same strings; this is the recommended convention.
 
-## Action definition shapes
+## Button resolution
 
-Supported P0 forms:
-- single step object (e.g. `{ "type": "setStatus", "to": "..." }`)
-- object with `steps` array
-- composite:
+1. Determine current state: `workflow.states[document.status]`
+2. Read allowed button keys: `state.buttons[]`
+3. Resolve each via `controls[buttonKey].action` to `actionKey`
+4. Execute `actions[actionKey]`
 
-```json
-{
-  "type": "composite",
-  "steps": [ ... ]
-}
-```
+Both workflow bar buttons and planned in-layout `button` nodes use this same action engine.
 
-## Supported step types
+## Action definition types
 
-### `setStatus`
-- shape: `{ "type": "setStatus", "to": "new_status" }`
-- `status` is also accepted as fallback key.
-- updates in-memory doc status for later steps.
+### Declarative
 
-### `setField`
-- shape: `{ "type": "setField", "key": "fieldKey", "value": ... }`
-- writes into `data_json[key]`.
-- `value` supports interpolation.
+- single step object, or
+- `{ "steps": [...] }`, or
+- `{ "type": "composite", "steps": [...] }`
 
-### `callExternal`
-- shape:
+Supported step types:
+- `setStatus` (`to` or `status`)
+- `setField` (`key`, `value`)
+- `callExternal` (`service`, `method`, `path`, `body`)
+
+### Macro (planned extension)
 
 ```json
-{
-  "type": "callExternal",
-  "service": "erp-sim",
-  "method": "PATCH",
-  "path": "/api/customer-orders/{{external.customer_order_id}}/status",
-  "body": { "status": "completed" }
-}
+{ "type": "macro", "name": "assign", "params": {} }
 ```
 
-- currently only `service: "erp-sim"` is supported.
-- base URL: `ERP_SIM_BASE_URL`.
-- request uses JSON headers/body (when body is present).
-- non-2xx responses fail the action with a clear message.
+Macro registry concept:
+- TypeScript functions keyed by macro name
+- invoked by the action engine
+- can perform domain logic, API calls, and transitions
 
 ## Interpolation
 
-Interpolation is supported in path/body strings:
-- `{{doc.id}}`
-- `{{doc.status}}`
+Supported in string path/body values (recursive in objects/arrays):
+- `{{doc.id}}`, `{{doc.status}}`
 - `{{data.<key>}}`
 - `{{external.<key>}}`
 - `{{snapshot.<key>}}`
 
-Behavior:
-- interpolation is recursive in objects/arrays.
-- missing or empty interpolation value throws a clear error.
-  - example: missing `external.customer_order_id` fails action cleanly.
+Missing interpolation values must fail with a clear error (no crash).
 
-## Transactional behavior and errors
+## callExternal rules
 
-Execution model:
+- service `erp-sim` targets `ERP_SIM_BASE_URL`
+- JSON request/response conventions
+- non-2xx must fail action with clear message (include status)
+
+## Transactionality and errors
+
+Execution semantics:
 1. load document + template
-2. run all steps sequentially in memory
-3. persist document changes only after all steps succeed
+2. execute action steps sequentially in memory
+3. persist document changes only if all steps succeed
 
-Persistence in P0 action route:
-- updates `status`
-- updates `data_json`
-- does not mutate `external_refs_json`/`snapshots_json` during action execution
-
-On any failure:
-- no document changes are persisted
-- document detail page is re-rendered with an error message
-- no unhandled 500 is returned for expected action errors
+On failure:
+- no partial document update
+- render detail page with error message
+- avoid unhandled 500 for expected business/action errors

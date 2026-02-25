@@ -1,32 +1,31 @@
-# FormProcessor – Tests (Current P0)
+# FormProcessor – Test Strategy
 
-## Unit tests (app)
+## Unit/component tests (current location)
 
-Location: `app/src/**/*.test.ts`
+- `app/src/**/*.test.ts`
 
-Current key scenarios:
-- `app/src/routes/health.test.ts`
-  - `/health` returns `{ ok: true }`
-- `app/src/lookup.test.ts`
-  - lookup URL building, query normalization, option mapping
-- `app/src/routes/ui.save.test.ts`
-  - save updates only allowed editable fields
-- `app/src/actions.test.ts`
-  - interpolation
-  - action execution order / `setStatus` + `setField`
-  - clear failure on missing interpolation data
-- `app/src/routes/ui.create.test.ts`
-  - document creation enrichment sets `external.customer_order_id`
-- `app/src/render/layout.test.ts`
-  - Renderer v2 structure rendering (`group/row/field`)
+Current covered areas include:
+- health route
+- lookup URL/mapping behavior
+- save-only-editable field merge
+- action interpolation and action-step execution behavior
+- document-create ERP enrichment
+- renderer v2 layout structure rendering
 
-## Cross-service E2E smoke (root tests workspace)
+## Cross-service smoke tests
 
-Location: `tests/e2e/smoke.test.ts`
+- location: `tests/e2e/smoke.test.ts`
+- verifies both running services over HTTP (health + basic list/pages)
 
-Covers running services over HTTP:
-- ERP-Sim health + valid products list
-- App health + templates page
-- optional `/documents/new` reachability via parsed templateId
+## Golden-path E2E scenario (required next)
 
-Prerequisite: services already running.
+Recommended scenario to add/maintain:
+1. open templates page and select template
+2. start new document
+3. load lookup options (customer/product/etc.)
+4. create document and verify snapshots shown
+5. Save via workflow button
+6. run workflow transitions (Assign/Start/Submit/Approve or Reject)
+7. verify external calls and final status
+
+Prerequisite for E2E: both services running and seeded DBs.

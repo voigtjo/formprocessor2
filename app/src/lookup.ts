@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const templateTokenRegex = /\{\{external\.([a-zA-Z0-9_]+)\}\}/g;
+const templateTokenDetectRegex = /\{\{external\.[a-zA-Z0-9_]+\}\}/;
 
 const sourceSchema = z.object({
   path: z.string(),
@@ -29,11 +30,23 @@ function substituteTokens(value: string, externalRefs: Record<string, string>) {
   return value.replace(templateTokenRegex, (_match, key: string) => externalRefs[key] ?? '');
 }
 
+function hasExternalPlaceholder(value: string) {
+  return templateTokenDetectRegex.test(value);
+}
+
 export function buildLookupUrl(baseUrl: string, source: LookupSource, externalRefs: Record<string, string>) {
   const url = new URL(substituteTokens(source.path, externalRefs), baseUrl);
 
   for (const [key, rawValue] of Object.entries(source.query ?? {})) {
-    url.searchParams.set(key, substituteTokens(String(rawValue), externalRefs));
+    const stringValue = String(rawValue);
+    const containsPlaceholder = hasExternalPlaceholder(stringValue);
+    const resolved = substituteTokens(stringValue, externalRefs).trim();
+
+    if (containsPlaceholder && resolved.length === 0) {
+      continue;
+    }
+
+    url.searchParams.set(key, resolved);
   }
 
   return url.toString();

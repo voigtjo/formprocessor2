@@ -349,6 +349,20 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiRoutesOptions = {
     return { items: items.map(toCustomerOrderResponse) };
   });
 
+  app.get('/api/customer-orders/:id', async (request, reply) => {
+    const parsed = idParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid request' });
+    }
+
+    const order = await repo.getCustomerOrderById(parsed.data.id);
+    if (!order) {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+
+    return toCustomerOrderResponse(order);
+  });
+
   app.post('/api/customer-orders', async (request, reply) => {
     const parsed = createCustomerOrderBodySchema.safeParse(request.body);
     if (!parsed.success) {

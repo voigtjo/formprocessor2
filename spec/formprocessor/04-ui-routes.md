@@ -1,53 +1,47 @@
-# FormProcessor – UI Routes (P0)
+# FormProcessor – UI & Endpoint Routes
 
 Base: `http://localhost:<FP_PORT>` (default `3000`)
 
-UI is server-rendered with EJS + HTMX (no React).
+UI stack: EJS + HTMX (SSR).
 
-## Health
+## Core pages
+
+- `GET /` -> redirect `/templates`
 - `GET /health` -> `{ "ok": true }`
 
-## Root
-- `GET /` -> redirect to `/templates`
+## Template pages
 
-## Templates
 - `GET /templates`
-  - lists active templates
 - `GET /templates/new`
-  - create form (metadata + raw `template_json` textarea)
 - `POST /templates`
-  - create template
 - `GET /templates/:id/edit`
-  - edit metadata + raw `template_json`
 - `POST /templates/:id`
-  - update template
 - `GET /templates/:id/preview`
-  - preview form rendering based on layout nodes
 
-## Documents
+## Document pages
+
 - `GET /documents`
-  - list recent documents (latest first) with status/template/snapshot preview
 - `GET /documents/new?templateId=<uuid>`
-  - start form from template
 - `POST /documents`
-  - create document:
-    - `status = workflow.initial`
-    - stores editable values in `data_json`
-    - stores lookup IDs in `external_refs_json`
-    - stores lookup labels in `snapshots_json`
-    - if `fields.erp_customer_order_id` is a `system` field, app calls ERP-Sim `POST /api/customer-orders` and stores:
-      - `external_refs_json.customer_order_id`
-      - `snapshots_json.customer_order_id`
-      - `data_json.erp_customer_order_id`
 - `GET /documents/:id`
-  - document detail, rendered via node-based layout renderer
 - `POST /documents/:id/save`
-  - saves only editable fields for current workflow state
 - `POST /documents/:id/action/:controlKey`
-  - executes action engine using control -> action mapping
 
-## HTMX lookup endpoint
+## Lookup endpoint
+
 - `GET /api/lookup?templateId=<uuid>&fieldKey=<fieldKey>[&lookup:<depField>=<id>]`
-  - resolves lookup source from template field
-  - calls ERP-Sim and returns HTML `<option>` list (not JSON)
-  - never hard-fails with 500 for expected lookup errors; returns fallback option text
+- returns HTML `<option>` entries for HTMX select replacement
+
+## Button execution model
+
+Two button surfaces (same action engine):
+1. Workflow/process bar buttons (`workflow.states[state].buttons`)
+2. Planned in-layout buttons (`layout` node `type: "button"`)
+
+Both resolve through `controls` -> `actions` and execute via the same action route semantics.
+
+## Current P0 behavior notes
+
+- document create stores `data_json`, `external_refs_json`, `snapshots_json`
+- if `erp_customer_order_id` system field exists, app creates ERP customer order and stores its refs/snapshot
+- action errors re-render detail with message (no expected hard 500)

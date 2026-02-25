@@ -1,5 +1,4 @@
 import Fastify from 'fastify';
-import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { apiRoutes, type ApiRepo } from './api.js';
 import { healthRoutes } from './health.js';
@@ -51,9 +50,9 @@ async function createApp(repo: ApiRepo) {
 describe('ERP API', () => {
   it('GET /health returns ok', async () => {
     const app = await createApp(createRepo());
-    const res = await request(app.server).get('/health');
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true });
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
     await app.close();
   });
 
@@ -73,10 +72,14 @@ describe('ERP API', () => {
       })
     );
 
-    const res = await request(app.server).get('/api/products').query({ valid: 'true' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/products',
+      query: { valid: 'true' }
+    });
 
-    expect(res.status).toBe(200);
-    expect(res.body.items).toEqual([
+    expect(res.statusCode).toBe(200);
+    expect(res.json().items).toEqual([
       { id: 'p-3', name: 'Bravo', valid: true, product_type: 'serial' },
       { id: 'p-2', name: 'Zeta', valid: true, product_type: 'batch' }
     ]);
@@ -86,9 +89,13 @@ describe('ERP API', () => {
 
   it('GET /api/batches gating rejects invalid product_id format', async () => {
     const app = await createApp(createRepo());
-    const res = await request(app.server).get('/api/batches').query({ product_id: 'not-a-uuid', status: 'ordered' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/batches',
+      query: { product_id: 'not-a-uuid', status: 'ordered' }
+    });
 
-    expect(res.status).toBe(400);
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 
@@ -107,19 +114,98 @@ describe('ERP API', () => {
       })
     );
 
-    const wrongType = await request(app.server)
-      .get('/api/batches')
-      .query({ product_id: '00000000-0000-0000-0000-000000000001', status: 'ordered' });
+    const wrongType = await app.inject({
+      method: 'GET',
+      url: '/api/batches',
+      query: { product_id: '00000000-0000-0000-0000-000000000001', status: 'ordered' }
+    });
 
-    const invalidProduct = await request(app.server)
-      .get('/api/batches')
-      .query({ product_id: '00000000-0000-0000-0000-000000000002', status: 'ordered' });
+    const invalidProduct = await app.inject({
+      method: 'GET',
+      url: '/api/batches',
+      query: { product_id: '00000000-0000-0000-0000-000000000002', status: 'ordered' }
+    });
 
-    expect(wrongType.status).toBe(200);
-    expect(wrongType.body).toEqual({ items: [] });
+    expect(wrongType.statusCode).toBe(200);
+    expect(wrongType.json()).toEqual({ items: [] });
 
-    expect(invalidProduct.status).toBe(200);
-    expect(invalidProduct.body).toEqual({ items: [] });
+    expect(invalidProduct.statusCode).toBe(200);
+    expect(invalidProduct.json()).toEqual({ items: [] });
+
+    await app.close();
+  });
+
+  it('POST /api/customer-orders creates a received order and returns it', async () => {
+    const customerId = '00000000-0000-0000-0000-000000000010';
+    const createdAt = new Date('2026-01-01T00:00:00.000Z');
+
+    const app = await createApp(
+      createRepo({
+        getCustomerById: async (id) => (id === customerId ? { id, name: 'Acme', valid: true } : undefined),
+        createCustomerOrder: async (id) => ({
+          id: '00000000-0000-0000-0000-000000000020',
+          customerId: id,
+          orderNumber: 'O-ABC123',
+          status: 'received',
+          createdAt
+        })
+      })
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/customer-orders',
+      payload: { customer_id: customerId }
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      id: '00000000-0000-0000-0000-000000000020',
+      customer_id: customerId,
+      order_number: 'O-ABC123',
+      status: 'received',
+      created_at: createdAt.toISOString()
+    });
+
+    await app.close();
+  });
+
+  it('GET /api/customer-orders/:id returns the row or 404', async () => {
+    const existingId = '00000000-0000-0000-0000-000000000030';
+    const createdAt = new Date('2026-01-02T00:00:00.000Z');
+    const app = await createApp(
+      createRepo({
+        getCustomerOrderById: async (id) => {
+          if (id !== existingId) return undefined;
+          return {
+            id,
+            customerId: '00000000-0000-0000-0000-000000000040',
+            orderNumber: 'O-DEF456',
+            status: 'offer_created',
+            createdAt
+          };
+        }
+      })
+    );
+
+    const ok = await app.inject({
+      method: 'GET',
+      url: `/api/customer-orders/${existingId}`
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({
+      id: existingId,
+      customer_id: '00000000-0000-0000-0000-000000000040',
+      order_number: 'O-DEF456',
+      status: 'offer_created',
+      created_at: createdAt.toISOString()
+    });
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/api/customer-orders/00000000-0000-0000-0000-000000000099'
+    });
+    expect(missing.statusCode).toBe(404);
 
     await app.close();
   });

@@ -1,6 +1,17 @@
 <h1>Document <code><%= document.id %></code></h1>
 <p>Status: <strong><%= document.status %></strong></p>
 <p class="muted">Template: <%= template.name %> (<code><%= template.key %></code>)</p>
+<%
+  const productSnapshot = snapshotsJson.product_id || snapshotsJson.product_name || snapshotsJson.product || null;
+  const customerSnapshot = snapshotsJson.customer_id || snapshotsJson.customer_name || snapshotsJson.customer || null;
+%>
+<% if (productSnapshot || customerSnapshot) { %>
+  <p>
+    <% if (productSnapshot) { %>Product: <strong><%= productSnapshot %></strong><% } %>
+    <% if (productSnapshot && customerSnapshot) { %> · <% } %>
+    <% if (customerSnapshot) { %>Customer: <strong><%= customerSnapshot %></strong><% } %>
+  </p>
+<% } %>
 <% if (dataJson.erp_customer_order_id || snapshotsJson.customer_order_id) { %>
   <p>ERP Order Number: <strong><%= dataJson.erp_customer_order_id || snapshotsJson.customer_order_id %></strong></p>
 <% } %>

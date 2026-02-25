@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { executeActionDefinition, interpolateString } from './actions.js';
+import { executeActionDefinition, interpolateString } from './actions/index.js';
 
 describe('action engine', () => {
   it('interpolates supported tokens', () => {
@@ -71,5 +71,133 @@ describe('action engine', () => {
     ).rejects.toThrow('Missing interpolation value for external.customer_order_id');
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('macro ensureErpCustomerOrder creates external ref and snapshot when missing', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-11', order_number: 'O-11ABC' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'composite',
+        steps: [{ type: 'macro', name: 'ensureErpCustomerOrder' }]
+      },
+      context: {
+        doc: { id: 'doc-4', status: 'received' },
+        data: {},
+        external: { customer_id: '11111111-1111-1111-1111-111111111111' },
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      macroContext: {
+        db: {},
+        templateJson: {},
+        document: { id: 'doc-4', status: 'received' }
+      }
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(result.externalRefsJson.customer_order_id).toBe('co-11');
+    expect(result.snapshotsJson.customer_order_id).toBe('O-11ABC');
+    expect(result.dataJson.erp_customer_order_id).toBe('O-11ABC');
+    expect(result.dataJson.erp_customer_order_ref).toBe('co-11');
+  });
+
+  it('returns a friendly error for unknown macro name', async () => {
+    await expect(
+      executeActionDefinition({
+        actionDef: { type: 'macro', name: 'doesNotExist' },
+        context: {
+          doc: { id: 'doc-5', status: 'received' },
+          data: {},
+          external: {},
+          snapshot: {}
+        },
+        erpBaseUrl: 'http://localhost:3001',
+        macroContext: {
+          db: {},
+          templateJson: {},
+          document: { id: 'doc-5', status: 'received' }
+        }
+      })
+    ).rejects.toThrow('Unknown macro: doesNotExist');
+  });
+
+  it('normalizes customer-order transition for submit flow to avoid ERP 409', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'composite',
+        steps: [
+          { type: 'setStatus', to: 'Submitted' },
+          {
+            type: 'callExternal',
+            service: 'erp-sim',
+            method: 'PATCH',
+            path: '/api/customer-orders/{{external.customer_order_id}}/status',
+            body: { status: '{{doc.status}}' }
+          }
+        ]
+      },
+      context: {
+        doc: { id: 'doc-6', status: 'Started' },
+        data: {},
+        external: { customer_order_id: 'co-22' },
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch
+    });
+
+    const requestInit = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
+    const sentBody = JSON.parse(String(requestInit?.body ?? '{}')) as { status: string };
+
+    expect(sentBody.status).toBe('offer_created');
+    expect(result.status).toBe('Submitted');
+  });
+
+  it('aborts action on callExternal failure and keeps original context status unchanged', async () => {
+    const fetchMock = vi.fn(async () => new Response('Invalid transition', { status: 409 }));
+    const context = {
+      doc: { id: 'doc-7', status: 'Started' },
+      data: { note: 'before' },
+      external: { customer_order_id: 'co-33' },
+      snapshot: {}
+    };
+
+    await expect(
+      executeActionDefinition({
+        actionDef: {
+          type: 'composite',
+          steps: [
+            { type: 'setStatus', to: 'Approved' },
+            {
+              type: 'callExternal',
+              service: 'erp-sim',
+              method: 'PATCH',
+              path: '/api/customer-orders/{{external.customer_order_id}}/status',
+              body: { status: '{{doc.status}}' }
+            }
+          ]
+        },
+        context,
+        erpBaseUrl: 'http://localhost:3001',
+        fetchImpl: fetchMock as unknown as typeof fetch
+      })
+    ).rejects.toThrow('External call failed (409)');
+
+    expect(context.doc.status).toBe('Started');
+    expect(context.data.note).toBe('before');
   });
 });

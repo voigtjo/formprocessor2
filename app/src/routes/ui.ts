@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { FpDb } from '../db/index.js';
 import { fpDocuments, fpTemplates } from '../db/schema.js';
 import { fetchLookupOptions, normalizeLookupSource } from '../lookup.js';
-import { executeActionDefinition } from '../actions.js';
+import { ExternalCallError, executeActionDefinition } from '../actions/index.js';
 import { renderLayout } from '../render/layout.js';
 
 type UiRouteOptions = {
@@ -166,7 +166,12 @@ export async function ensureErpCustomerOrderReference(params: {
   fetchImpl?: typeof fetch;
 }) {
   const erpField = params.templateJson.fields['erp_customer_order_id'] as TemplateField | undefined;
-  if (!erpField || erpField.kind !== 'system') {
+  const hasOrderField = !!erpField && (erpField.kind === 'system' || erpField.kind === 'workflow');
+  const actionsRequireOrderRef = JSON.stringify((params.templateJson as any).actions ?? {}).includes(
+    '{{external.customer_order_id}}'
+  );
+
+  if (!hasOrderField && !actionsRequireOrderRef) {
     return;
   }
 
@@ -382,6 +387,7 @@ async function renderDocumentDetailPage(params: {
     mode: 'detail',
     templateJson,
     templateId: params.template.id,
+    documentId: params.document.id,
     dataJson: (params.document.dataJson ?? {}) as Record<string, unknown>,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
     snapshotsJson: (params.document.snapshotsJson ?? {}) as Record<string, unknown>,
@@ -854,7 +860,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           external: ((document.externalRefsJson ?? {}) as Record<string, unknown>) ?? {},
           snapshot: ((document.snapshotsJson ?? {}) as Record<string, unknown>) ?? {}
         },
-        erpBaseUrl
+        erpBaseUrl,
+        macroContext: {
+          db,
+          templateJson,
+          document: { id: document.id, status: document.status },
+          form
+        }
       });
 
       await db.transaction(async (tx) => {
@@ -862,7 +874,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           .update(fpDocuments)
           .set({
             status: result.status,
-            dataJson: result.dataJson
+            dataJson: result.dataJson,
+            externalRefsJson: result.externalRefsJson,
+            snapshotsJson: result.snapshotsJson
           })
           .where(eq(fpDocuments.id, document.id));
       });
@@ -870,7 +884,10 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       reply.code(303);
       return reply.redirect(`/documents/${document.id}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Action execution failed.';
+      let message = error instanceof Error ? error.message : 'Action execution failed.';
+      if (error instanceof ExternalCallError && error.status === 409) {
+        message = `Action "${actionKey}" is not valid for current document status "${document.status}" (ERP transition rejected with 409).`;
+      }
       await renderDocumentDetailPage({
         reply,
         template,

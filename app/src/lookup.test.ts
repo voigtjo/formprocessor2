@@ -60,4 +60,40 @@ describe('lookup url handling', () => {
     const options = await fetchLookupOptions('http://localhost:3001', source, {}, 'id', 'name');
     expect(options).toEqual([{ value: 'p-2', label: 'Product Two' }]);
   });
+
+  it('interpolates external placeholder in query and keeps fixed params', () => {
+    const url = buildLookupUrl(
+      'http://localhost:3001',
+      {
+        path: '/api/batches',
+        query: {
+          product_id: '{{external.product_id}}',
+          status: 'ordered'
+        }
+      },
+      { product_id: 'abc' }
+    );
+
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get('product_id')).toBe('abc');
+    expect(parsed.searchParams.get('status')).toBe('ordered');
+  });
+
+  it('omits query param when external placeholder resolves empty', () => {
+    const url = buildLookupUrl(
+      'http://localhost:3001',
+      {
+        path: '/api/batches',
+        query: {
+          product_id: '{{external.product_id}}',
+          status: 'ordered'
+        }
+      },
+      {}
+    );
+
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get('product_id')).toBeNull();
+    expect(parsed.searchParams.get('status')).toBe('ordered');
+  });
 });
