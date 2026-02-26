@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { index, integer, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const fpTemplates = pgTable(
   'fp_templates',
@@ -32,4 +32,57 @@ export const fpDocuments = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [index('idx_fp_documents_template_status').on(table.templateId, table.status)]
+);
+
+export const fpUsers = pgTable(
+  'fp_users',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    username: text('username').notNull(),
+    displayName: text('display_name').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [uniqueIndex('ux_fp_users_username').on(table.username)]
+);
+
+export const fpGroups = pgTable(
+  'fp_groups',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    key: text('key').notNull(),
+    name: text('name').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [uniqueIndex('ux_fp_groups_key').on(table.key)]
+);
+
+export const fpGroupMembers = pgTable(
+  'fp_group_members',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    groupId: uuid('group_id')
+      .notNull()
+      .references(() => fpGroups.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => fpUsers.id, { onDelete: 'cascade' }),
+    rights: text('rights').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [uniqueIndex('ux_fp_group_members_group_user').on(table.groupId, table.userId)]
+);
+
+export const fpTemplateAssignments = pgTable(
+  'fp_template_assignments',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    templateId: uuid('template_id')
+      .notNull()
+      .references(() => fpTemplates.id, { onDelete: 'cascade' }),
+    groupId: uuid('group_id')
+      .notNull()
+      .references(() => fpGroups.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [uniqueIndex('ux_fp_template_assignments_template_group').on(table.templateId, table.groupId)]
 );

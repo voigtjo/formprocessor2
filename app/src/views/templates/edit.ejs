@@ -36,6 +36,39 @@
   <button type="submit">Save Template</button>
 </form>
 
+<div class="card">
+  <h3>Group Assignments</h3>
+  <% if (!hasGroups) { %>
+    <p class="muted">Create groups via seed</p>
+  <% } %>
+  <% if (assignedGroups && assignedGroups.length > 0) { %>
+    <ul>
+      <% assignedGroups.forEach((item) => { %>
+        <li>
+          <strong><%= item.groupName %></strong> (<code><%= item.groupKey %></code>)
+          <form method="post" action="/templates/<%= template.id %>/assignments/<%= item.assignmentId %>/delete" style="display:inline">
+            <button type="submit">Remove</button>
+          </form>
+        </li>
+      <% }) %>
+    </ul>
+  <% } else { %>
+    <p class="muted">No group assignments.</p>
+  <% } %>
+
+  <% if (hasGroups && assignableGroups && assignableGroups.length > 0) { %>
+    <form method="post" action="/templates/<%= template.id %>/assignments">
+      <label for="groupId">Assign Group</label>
+      <select id="groupId" name="groupId">
+        <% assignableGroups.forEach((group) => { %>
+          <option value="<%= group.id %>"><%= group.name %> (<%= group.key %>)</option>
+        <% }) %>
+      </select>
+      <button type="submit">Assign</button>
+    </form>
+  <% } %>
+</div>
+
 <p>
   <a href="/templates/<%= template.id %>/preview">Preview</a>
   ·

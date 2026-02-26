@@ -12,7 +12,8 @@ This file defines the current P0 contract and planned extensions.
   "layout": [],
   "workflow": { "initial": "...", "states": {} },
   "controls": {},
-  "actions": {}
+  "actions": {},
+  "permissions": {}
 }
 ```
 
@@ -23,6 +24,7 @@ Minimal validation (current):
 - `workflow.states`: object
 - `controls`: object
 - `actions`: object
+- `permissions`: optional object
 
 ## fields
 
@@ -124,3 +126,33 @@ Interpolation tokens usable in action path/body strings:
 - `{{data.*}}`
 - `{{external.*}}`
 - `{{snapshot.*}}`
+
+## permissions (P0 RBAC)
+
+Optional action permission map:
+
+```json
+{
+  "permissions": {
+    "actions": {
+      "approve": { "requires": ["execute"] },
+      "approveAction": { "requires": ["execute"] }
+    }
+  }
+}
+```
+
+Resolution order for required rights:
+1. `permissions.actions[controlKey]`
+2. `permissions.actions[actionKey]`
+3. default allow
+
+Supported requirement values:
+- `read`
+- `write`
+- `execute`
+
+Rights mapping to group membership rights string:
+- `read` -> `r`
+- `write` -> `w`
+- `execute` -> `x`

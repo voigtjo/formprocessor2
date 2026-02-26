@@ -1,8 +1,15 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { FpDb } from '../db/index.js';
-import { fpDocuments, fpTemplates } from '../db/schema.js';
+import {
+  fpDocuments,
+  fpGroupMembers,
+  fpGroups,
+  fpTemplateAssignments,
+  fpTemplates,
+  fpUsers
+} from '../db/schema.js';
 import { fetchLookupOptions, normalizeLookupSource } from '../lookup.js';
 import { ExternalCallError, executeActionDefinition } from '../actions/index.js';
 import { renderLayout } from '../render/layout.js';
@@ -33,7 +40,18 @@ const templateJsonSchema = z.object({
     states: z.record(z.any()).optional()
   }),
   controls: z.record(z.any()).optional(),
-  actions: z.record(z.any()).optional()
+  actions: z.record(z.any()).optional(),
+  permissions: z
+    .object({
+      actions: z
+        .record(
+          z.object({
+            requires: z.array(z.enum(['read', 'write', 'execute'])).optional()
+          })
+        )
+        .optional()
+    })
+    .optional()
 });
 
 const templateEditorJsonSchema = z.object({
@@ -44,7 +62,18 @@ const templateEditorJsonSchema = z.object({
     states: z.record(z.any())
   }),
   controls: z.record(z.any()),
-  actions: z.record(z.any())
+  actions: z.record(z.any()),
+  permissions: z
+    .object({
+      actions: z
+        .record(
+          z.object({
+            requires: z.array(z.enum(['read', 'write', 'execute'])).optional()
+          })
+        )
+        .optional()
+    })
+    .optional()
 });
 
 const templateFormSchema = z.object({
@@ -66,6 +95,15 @@ const lookupQuerySchema = z.object({
 
 const templateIdParamSchema = z.object({
   id: z.string().uuid()
+});
+
+const assignmentParamSchema = z.object({
+  id: z.string().uuid(),
+  assignmentId: z.string().uuid()
+});
+
+const assignmentBodySchema = z.object({
+  groupId: z.string().uuid()
 });
 
 const documentIdParamSchema = z.object({
@@ -99,6 +137,9 @@ type TemplateField = {
     labelKey?: string;
   };
 };
+
+type PermissionName = 'read' | 'write' | 'execute';
+type CurrentUser = { id: string; username: string; displayName: string };
 
 const starterTemplate = {
   fields: {
@@ -155,6 +196,72 @@ function parseTemplateEditorJson(raw: string) {
   }
 
   return validated.data;
+}
+
+function buildUserCookie(userId: string) {
+  return `fp_user=${encodeURIComponent(userId)}; Path=/; HttpOnly; SameSite=Lax`;
+}
+
+function compactRequiredRights(requires: PermissionName[]) {
+  const map: Record<PermissionName, string> = {
+    read: 'r',
+    write: 'w',
+    execute: 'x'
+  };
+  const rights = new Set<string>();
+  for (const item of requires) rights.add(map[item]);
+  return Array.from(rights).sort().join('');
+}
+
+function hasRequiredRights(userRights: string, requires: PermissionName[]) {
+  const normalized = new Set(userRights.split(''));
+  const map: Record<PermissionName, string> = {
+    read: 'r',
+    write: 'w',
+    execute: 'x'
+  };
+  return requires.every((item) => normalized.has(map[item]));
+}
+
+function resolveActionPermissionRequirements(templateJson: TemplateJson, controlKey: string, actionKey: string) {
+  const byActionMap = ((templateJson as any).permissions?.actions ?? {}) as Record<string, { requires?: unknown }>;
+  const controlRequires = byActionMap[controlKey]?.requires;
+  const actionRequires = byActionMap[actionKey]?.requires;
+  const source = Array.isArray(controlRequires) ? controlRequires : Array.isArray(actionRequires) ? actionRequires : [];
+  return source.filter((item): item is PermissionName => item === 'read' || item === 'write' || item === 'execute');
+}
+
+async function loadTemplateAssignmentView(db: FpDb, templateId: string) {
+  const allGroups = await db
+    .select({
+      id: fpGroups.id,
+      key: fpGroups.key,
+      name: fpGroups.name
+    })
+    .from(fpGroups)
+    .orderBy(asc(fpGroups.name));
+
+  const assignments = await db.query.fpTemplateAssignments.findMany({
+    where: eq(fpTemplateAssignments.templateId, templateId)
+  });
+
+  const assignedGroups = assignments
+    .map((item) => {
+      const group = allGroups.find((g) => g.id === item.groupId);
+      if (!group) return undefined;
+      return {
+        assignmentId: item.id,
+        groupId: group.id,
+        groupKey: group.key,
+        groupName: group.name
+      };
+    })
+    .filter((item): item is { assignmentId: string; groupId: string; groupKey: string; groupName: string } => !!item);
+
+  const assignedGroupIds = new Set(assignedGroups.map((item) => item.groupId));
+  const assignableGroups = allGroups.filter((item) => !assignedGroupIds.has(item.id));
+
+  return { assignedGroups, assignableGroups, hasGroups: allGroups.length > 0 };
 }
 
 export async function ensureErpCustomerOrderReference(params: {
@@ -415,6 +522,38 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     return reply.redirect('/templates');
   });
 
+  app.get('/users/options', async (_request, reply) => {
+    const users = await db
+      .select({
+        id: fpUsers.id,
+        username: fpUsers.username,
+        displayName: fpUsers.displayName
+      })
+      .from(fpUsers)
+      .orderBy(asc(fpUsers.username));
+    return { items: users };
+  });
+
+  app.get('/users/switch', async (request, reply) => {
+    const query = toFormRecord(request.query);
+    const userId = getFormString(query, 'userId');
+    const next = getFormString(query, 'next');
+    if (!z.string().uuid().safeParse(userId).success) {
+      return reply.status(400).send({ message: 'Invalid userId' });
+    }
+
+    const user = await db.query.fpUsers.findFirst({ where: eq(fpUsers.id, userId) });
+    if (!user) {
+      return reply.status(404).send({ message: 'User not found' });
+    }
+
+    reply.header('set-cookie', buildUserCookie(user.id));
+    const referer = request.headers.referer ?? '/templates';
+    const redirectTo = next || referer || '/templates';
+    reply.code(303);
+    return reply.redirect(redirectTo);
+  });
+
   app.get('/templates', async (_req, reply) => {
     const templates = await db
       .select({
@@ -434,6 +573,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
   app.get('/templates/new', async (_request, reply) => {
     await reply.renderPage('templates/new.ejs', {
+      errorMessage: '',
       form: {
         key: '',
         name: '',
@@ -489,6 +629,14 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       })
       .returning({ id: fpTemplates.id });
 
+    const opsGroup = await db.query.fpGroups.findFirst({ where: eq(fpGroups.key, 'ops') });
+    if (opsGroup) {
+      await db
+        .insert(fpTemplateAssignments)
+        .values({ templateId: inserted[0].id, groupId: opsGroup.id })
+        .onConflictDoNothing();
+    }
+
     reply.code(303);
     return reply.redirect(`/templates/${inserted[0].id}/edit`);
   });
@@ -504,9 +652,14 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(404).send({ message: 'Template not found' });
     }
 
+    const assignmentView = await loadTemplateAssignmentView(db, template.id);
+
     await reply.renderPage('templates/edit.ejs', {
       template,
       errorMessage: '',
+      assignedGroups: assignmentView.assignedGroups,
+      assignableGroups: assignmentView.assignableGroups,
+      hasGroups: assignmentView.hasGroups,
       form: {
         key: template.key,
         name: template.name,
@@ -527,6 +680,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!template) {
       return reply.status(404).send({ message: 'Template not found' });
     }
+    const assignmentView = await loadTemplateAssignmentView(db, template.id);
 
     const form = toFormRecord(request.body);
     const parsed = templateFormSchema.safeParse({
@@ -541,6 +695,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).renderPage('templates/edit.ejs', {
         template,
         errorMessage: 'Please provide key, name, state and template_json.',
+        assignedGroups: assignmentView.assignedGroups,
+        assignableGroups: assignmentView.assignableGroups,
+        hasGroups: assignmentView.hasGroups,
         form: {
           key: getFormString(form, 'key'),
           name: getFormString(form, 'name'),
@@ -558,6 +715,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).renderPage('templates/edit.ejs', {
         template,
         errorMessage: error instanceof Error ? error.message : 'Invalid template_json',
+        assignedGroups: assignmentView.assignedGroups,
+        assignableGroups: assignmentView.assignableGroups,
+        hasGroups: assignmentView.hasGroups,
         form: parsed.data
       });
     }
@@ -572,6 +732,57 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         templateJson
       })
       .where(eq(fpTemplates.id, template.id));
+
+    reply.code(303);
+    return reply.redirect(`/templates/${template.id}/edit`);
+  });
+
+  app.post('/templates/:id/assignments', async (request, reply) => {
+    const parsedParams = templateIdParamSchema.safeParse(request.params);
+    if (!parsedParams.success) {
+      return reply.status(400).send({ message: 'Invalid template id' });
+    }
+
+    const form = toFormRecord(request.body);
+    const parsedBody = assignmentBodySchema.safeParse({
+      groupId: getFormString(form, 'groupId')
+    });
+    if (!parsedBody.success) {
+      return reply.status(400).send({ message: 'Invalid groupId' });
+    }
+
+    const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, parsedParams.data.id) });
+    if (!template) {
+      return reply.status(404).send({ message: 'Template not found' });
+    }
+    const group = await db.query.fpGroups.findFirst({ where: eq(fpGroups.id, parsedBody.data.groupId) });
+    if (!group) {
+      return reply.status(404).send({ message: 'Group not found' });
+    }
+
+    await db
+      .insert(fpTemplateAssignments)
+      .values({ templateId: template.id, groupId: group.id })
+      .onConflictDoNothing();
+
+    reply.code(303);
+    return reply.redirect(`/templates/${template.id}/edit`);
+  });
+
+  app.post('/templates/:id/assignments/:assignmentId/delete', async (request, reply) => {
+    const parsed = assignmentParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid assignment params' });
+    }
+
+    const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, parsed.data.id) });
+    if (!template) {
+      return reply.status(404).send({ message: 'Template not found' });
+    }
+
+    await db
+      .delete(fpTemplateAssignments)
+      .where(and(eq(fpTemplateAssignments.id, parsed.data.assignmentId), eq(fpTemplateAssignments.templateId, template.id)));
 
     reply.code(303);
     return reply.redirect(`/templates/${template.id}/edit`);
@@ -599,9 +810,16 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
   });
 
   app.get('/documents/new', async (request, reply) => {
-    const queryParsed = templateIdQuerySchema.safeParse(request.query);
+    const query = toFormRecord(request.query);
+    const templateId = getFormString(query, 'templateId');
+    if (!templateId) {
+      reply.code(303);
+      return reply.redirect('/templates?error=Please%20select%20a%20template%20first');
+    }
+
+    const queryParsed = templateIdQuerySchema.safeParse({ templateId });
     if (!queryParsed.success) {
-      return reply.status(400).send({ message: 'Invalid query' });
+      return reply.status(400).send({ message: 'Please start from a valid template.' });
     }
 
     const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, queryParsed.data.templateId) });
@@ -647,7 +865,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const templateId = getFormString(form, 'templateId');
 
     if (!z.string().uuid().safeParse(templateId).success) {
-      return reply.status(400).send({ message: 'Invalid templateId' });
+      return reply.status(400).send({ message: 'Please start from a template. Missing or invalid templateId.' });
     }
 
     const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, templateId) });
@@ -777,6 +995,16 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     return reply.redirect(`/documents/${document.id}`);
   });
 
+  app.get('/documents/:id/action/:controlKey', async (request, reply) => {
+    const paramsParsed = documentActionParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid action params' });
+    }
+
+    reply.code(303);
+    return reply.redirect(`/documents/${paramsParsed.data.id}`);
+  });
+
   app.post('/documents/:id/action/:controlKey', async (request, reply) => {
     const paramsParsed = documentActionParamSchema.safeParse(request.params);
     if (!paramsParsed.success) {
@@ -817,6 +1045,34 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         errorMessage: 'Control action is not configured.'
       });
       return;
+    }
+
+    const assignments = await db.query.fpTemplateAssignments.findMany({
+      where: eq(fpTemplateAssignments.templateId, template.id)
+    });
+    const assignment = assignments[0];
+    if (assignment) {
+      const currentUser = request.currentUser as CurrentUser | null;
+      if (!currentUser) {
+        return reply.status(403).send({ message: 'No active user selected' });
+      }
+
+      const groupMembers = await db.query.fpGroupMembers.findMany({
+        where: eq(fpGroupMembers.groupId, assignment.groupId)
+      });
+      const membership = groupMembers.find((item) => item.userId === currentUser.id);
+
+      if (!membership) {
+        return reply.status(403).send({ message: 'Not a member of assigned group' });
+      }
+
+      const required = resolveActionPermissionRequirements(templateJson, paramsParsed.data.controlKey, actionKey);
+      if (required.length > 0 && !hasRequiredRights(membership.rights, required)) {
+        const requiredCompact = compactRequiredRights(required);
+        return reply
+          .status(403)
+          .send({ message: `Missing rights. Required: ${requiredCompact}. User rights: ${membership.rights}` });
+      }
     }
 
     const form = toFormRecord(request.body);

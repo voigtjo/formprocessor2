@@ -21,22 +21,19 @@
   </div>
 <% } %>
 
-<form method="post" action="/documents/<%= document.id %>/save">
+<form id="document-form" method="post" action="/documents/<%= document.id %>/save">
   <%- layoutHtml %>
-  <div class="row" style="margin-top: 1rem;">
-    <% (buttonKeys || []).forEach((controlKey) => {
-      const control = (templateJson.controls || {})[controlKey] || {};
-      const label = control.label || controlKey;
-    %>
-      <button
-        type="submit"
-        formaction="/documents/<%= document.id %>/action/<%= controlKey %>"
-        formmethod="post"
-        style="margin-right:0.5rem;"
-      ><%= label %></button>
-    <% }) %>
-  </div>
 </form>
+<div class="row" style="margin-top: 1rem;">
+  <% (buttonKeys || []).forEach((controlKey) => {
+    const control = (templateJson.controls || {})[controlKey] || {};
+    const label = control.label || controlKey;
+  %>
+    <form method="post" action="/documents/<%= document.id %>/action/<%= controlKey %>" style="display:inline">
+      <button type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= controlKey %>" formmethod="post" style="margin-right:0.5rem;"><%= label %></button>
+    </form>
+  <% }) %>
+</div>
 
 <p>
   <a href="/documents">Back to Documents</a>

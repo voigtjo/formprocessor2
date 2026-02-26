@@ -42,3 +42,20 @@ A document is created from a template.
 
 ### External side effects
 Actions can call ERP-Sim endpoints (e.g. patch movement status).
+
+## RBAC (P0 minimal, no login)
+
+- Active user is selected in UI (dropdown) and stored in cookie `fp_user`.
+- Templates are assigned to groups.
+- Dev seed creates default RBAC data:
+  - group `ops`
+  - users `alice` (`rwx`) and `bob` (`r`) in `ops`
+- New templates are auto-assigned to `ops` when that group exists.
+- Users are members of groups with rights string:
+  - `r` = read
+  - `w` = write
+  - `x` = execute
+- Action execution is checked against the assigned template group:
+  - user must be member of that group
+  - required rights are resolved from `template_json.permissions.actions`
+  - if no permission rule exists, action is allowed (backward compatibility)

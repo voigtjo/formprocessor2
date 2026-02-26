@@ -18,6 +18,16 @@
 <body>
   <nav>
     <a href="/templates">Templates</a>
+    <% if (typeof users !== 'undefined' && users && users.length > 0) { %>
+      <span style="margin-left:1rem;">
+        User:
+        <select onchange="if (this.value) { window.location.href = '/users/switch?userId=' + encodeURIComponent(this.value) + '&next=' + encodeURIComponent('<%= currentPath || '/templates' %>'); }">
+          <% users.forEach((u) => { %>
+            <option value="<%= u.id %>" <%= (currentUser && currentUser.id === u.id) ? 'selected' : '' %>><%= u.displayName %> (@<%= u.username %>)</option>
+          <% }) %>
+        </select>
+      </span>
+    <% } %>
   </nav>
   <hr />
   <%- content %>
