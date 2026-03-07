@@ -61,6 +61,24 @@ describe('action engine', () => {
     expect(result.dataJson.status).toBeUndefined();
   });
 
+  it('requireField blocks with friendly message when value is missing', async () => {
+    await expect(
+      executeActionDefinition({
+        actionDef: {
+          type: 'composite',
+          steps: [{ type: 'requireField', key: 'assignee_user_id', message: 'Submit requires editor assignment first.' }]
+        },
+        context: {
+          doc: { id: 'doc-9', status: 'Assigned' },
+          data: {},
+          external: {},
+          snapshot: {}
+        },
+        erpBaseUrl: 'http://localhost:3001'
+      })
+    ).rejects.toThrow('Submit requires editor assignment first.');
+  });
+
   it('throws a clear error when required external interpolation value is missing', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
 

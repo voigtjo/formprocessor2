@@ -1,5 +1,5 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
 import { z } from 'zod';
 import type { FpDb } from '../db/index.js';
 import {
@@ -17,7 +17,14 @@ import { renderLayout } from '../render/layout.js';
 type UiRouteOptions = {
   db: FpDb;
   erpBaseUrl: string;
+  hasDocumentActorColumns?: boolean;
+  hasDocumentTemplateVersion?: boolean;
 };
+const templateStateSchema = z.enum(['draft', 'published', 'archived']);
+const permissionRequiresSchema = z.union([
+  z.enum(['read', 'write', 'execute', 'r', 'w', 'x']),
+  z.array(z.enum(['read', 'write', 'execute', 'r', 'w', 'x']))
+]);
 
 const layoutSectionsSchema = z.object({
   sections: z
@@ -37,6 +44,7 @@ const templateJsonSchema = z.object({
   layout: z.union([layoutSectionsSchema, layoutNodesSchema]).default({}),
   workflow: z.object({
     initial: z.string(),
+    order: z.array(z.string()).optional(),
     states: z.record(z.any()).optional()
   }),
   controls: z.record(z.any()).optional(),
@@ -46,7 +54,7 @@ const templateJsonSchema = z.object({
       actions: z
         .record(
           z.object({
-            requires: z.array(z.enum(['read', 'write', 'execute'])).optional()
+            requires: permissionRequiresSchema.optional()
           })
         )
         .optional()
@@ -59,6 +67,7 @@ const templateEditorJsonSchema = z.object({
   layout: z.array(z.any()),
   workflow: z.object({
     initial: z.string(),
+    order: z.array(z.string()).optional(),
     states: z.record(z.any())
   }),
   controls: z.record(z.any()),
@@ -68,7 +77,7 @@ const templateEditorJsonSchema = z.object({
       actions: z
         .record(
           z.object({
-            requires: z.array(z.enum(['read', 'write', 'execute'])).optional()
+            requires: permissionRequiresSchema.optional()
           })
         )
         .optional()
@@ -80,7 +89,7 @@ const templateFormSchema = z.object({
   key: z.string().min(1),
   name: z.string().min(1),
   description: z.string().optional(),
-  state: z.string().min(1),
+  state: templateStateSchema,
   template_json: z.string().min(1)
 });
 
@@ -106,6 +115,35 @@ const assignmentBodySchema = z.object({
   groupId: z.string().uuid()
 });
 
+const adminUserCreateSchema = z.object({
+  username: z.string().min(1),
+  displayName: z.string().min(1)
+});
+
+const adminGroupCreateSchema = z.object({
+  key: z.string().min(1),
+  name: z.string().min(1)
+});
+
+const adminMembershipCreateSchema = z.object({
+  groupId: z.string().uuid(),
+  userId: z.string().uuid(),
+  rights: z.string().min(1)
+});
+
+const adminMembershipDeleteParamSchema = z.object({
+  membershipId: z.string().uuid()
+});
+
+const adminTemplateAssignmentCreateSchema = z.object({
+  templateId: z.string().uuid(),
+  groupId: z.string().uuid()
+});
+
+const adminTemplateAssignmentDeleteParamSchema = z.object({
+  assignmentId: z.string().uuid()
+});
+
 const documentIdParamSchema = z.object({
   id: z.string().uuid()
 });
@@ -114,6 +152,12 @@ const documentActionParamSchema = z.object({
   id: z.string().uuid(),
   controlKey: z.string().min(1)
 });
+const groupIdParamSchema = z.object({
+  groupId: z.string().uuid()
+});
+const documentAssignmentBodySchema = z.object({
+  userId: z.string().uuid()
+});
 
 type TemplateJson = z.infer<typeof templateJsonSchema>;
 
@@ -121,6 +165,8 @@ type TemplateField = {
   kind?: string;
   label?: string;
   multiline?: boolean;
+  inputType?: 'text' | 'date' | 'checkbox' | 'select';
+  control?: 'text' | 'date' | 'checkbox';
   ui?: {
     input?: 'text' | 'date' | 'checkbox';
   };
@@ -144,6 +190,7 @@ type TemplateField = {
 type PermissionName = 'read' | 'write' | 'execute';
 type CurrentUser = { id: string; username: string; displayName: string };
 type LayoutButtonKind = 'ui' | 'process';
+type AdminErpTab = 'products' | 'customers' | 'batches' | 'serial-instances' | 'customer-orders';
 
 const starterTemplate = {
   fields: {
@@ -181,6 +228,62 @@ const starterTemplate = {
   controls: {},
   actions: {}
 };
+
+function resolvePublishedAtForStateChange(nextState: 'draft' | 'published' | 'archived', existing?: Date | null) {
+  if (nextState !== 'published') return null;
+  return existing ?? new Date();
+}
+
+function normalizeTemplateState(raw: unknown): 'draft' | 'published' | 'archived' {
+  if (raw === 'active') return 'published';
+  if (raw === 'draft' || raw === 'published' || raw === 'archived') return raw;
+  return 'draft';
+}
+
+async function sendUiError(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  statusCode: number,
+  message: string,
+  fallbackTitle?: string
+) {
+  const acceptsHtml = String(request.headers.accept ?? '').includes('text/html');
+  const isApi = String(request.url).startsWith('/api/');
+  const title =
+    fallbackTitle ??
+    (statusCode === 403 ? 'Forbidden' : statusCode === 404 ? 'Not Found' : statusCode === 400 ? 'Bad Request' : 'Error');
+
+  if (!isApi && acceptsHtml && typeof (reply as any).renderPage === 'function') {
+    reply.code(statusCode);
+    await reply.renderPage('error.ejs', {
+      title,
+      statusCode,
+      message,
+      backHref: request.headers.referer || '/templates'
+    });
+    return;
+  }
+
+  reply.status(statusCode).send({ message });
+}
+
+async function loadTemplateVersionsByKey(db: FpDb, key: string) {
+  return db
+    .select({
+      id: fpTemplates.id,
+      key: fpTemplates.key,
+      name: fpTemplates.name,
+      description: fpTemplates.description,
+      state: fpTemplates.state,
+      version: fpTemplates.version,
+      templateJson: fpTemplates.templateJson,
+      publishedAt: fpTemplates.publishedAt,
+      createdAt: fpTemplates.createdAt
+    })
+    .from(fpTemplates)
+    .where(eq(fpTemplates.key, key))
+    .orderBy(desc(fpTemplates.version));
+}
 
 function parseTemplateJson(raw: unknown): TemplateJson {
   return templateJsonSchema.parse(raw);
@@ -250,12 +353,49 @@ function hasRequiredRights(userRights: string, requires: PermissionName[]) {
   return requires.every((item) => normalized.has(map[item]));
 }
 
+function normalizeRequiresValue(raw: unknown): PermissionName[] {
+  const rawValues = Array.isArray(raw) ? raw : raw !== undefined && raw !== null ? [raw] : [];
+  const mapped = rawValues
+    .map((item) => String(item).trim().toLowerCase())
+    .map((item) => {
+      if (item === 'r' || item === 'read') return 'read' as const;
+      if (item === 'w' || item === 'write') return 'write' as const;
+      if (item === 'x' || item === 'execute') return 'execute' as const;
+      return null;
+    })
+    .filter((item): item is PermissionName => !!item);
+  return Array.from(new Set(mapped));
+}
+
+function resolveDefaultRequiredRights(controlKey: string, actionKey: string): PermissionName[] {
+  const combined = `${controlKey} ${actionKey}`.toLowerCase();
+  if (combined.includes('save') || combined.includes('submit')) return ['write'];
+  if (
+    combined.includes('approve') ||
+    combined.includes('reject') ||
+    combined.includes('assign') ||
+    combined.includes('start')
+  ) {
+    return ['execute'];
+  }
+  return [];
+}
+
 function resolveActionPermissionRequirements(templateJson: TemplateJson, controlKey: string, actionKey: string) {
   const byActionMap = ((templateJson as any).permissions?.actions ?? {}) as Record<string, { requires?: unknown }>;
-  const controlRequires = byActionMap[controlKey]?.requires;
-  const actionRequires = byActionMap[actionKey]?.requires;
-  const source = Array.isArray(controlRequires) ? controlRequires : Array.isArray(actionRequires) ? actionRequires : [];
-  return source.filter((item): item is PermissionName => item === 'read' || item === 'write' || item === 'execute');
+  const controls = ((templateJson as any).controls ?? {}) as Record<string, { requires?: unknown }>;
+  const actions = ((templateJson as any).actions ?? {}) as Record<string, { requires?: unknown }>;
+  const sources = [
+    byActionMap[controlKey]?.requires,
+    byActionMap[actionKey]?.requires,
+    controls[controlKey]?.requires,
+    actions[actionKey]?.requires
+  ];
+  for (const source of sources) {
+    const normalized = normalizeRequiresValue(source);
+    if (normalized.length > 0) return normalized;
+  }
+  return resolveDefaultRequiredRights(controlKey, actionKey);
 }
 
 function resolveControlKeyFromAction(templateJson: TemplateJson, action: string) {
@@ -365,7 +505,7 @@ export async function ensureErpCustomerOrderReference(params: {
   templateJson: TemplateJson;
   externalRefs: Record<string, string>;
   snapshots: Record<string, string>;
-  data: Record<string, string>;
+  data: Record<string, unknown>;
   erpBaseUrl: string;
   fetchImpl?: typeof fetch;
 }) {
@@ -487,7 +627,7 @@ function getFormString(body: Record<string, unknown>, key: string) {
 }
 
 function resolveEditableInputType(field: TemplateField): 'text' | 'date' | 'checkbox' {
-  const input = field.ui?.input;
+  const input = field.inputType ?? field.control ?? field.ui?.input;
   return input === 'date' || input === 'checkbox' ? input : 'text';
 }
 
@@ -495,7 +635,7 @@ function resolveEditableFormValue(form: Record<string, unknown>, field: Template
   const formKey = `data:${fieldKey}`;
   const inputType = resolveEditableInputType(field);
   if (inputType === 'checkbox') {
-    return Object.prototype.hasOwnProperty.call(form, formKey) ? 'true' : 'false';
+    return Object.prototype.hasOwnProperty.call(form, formKey);
   }
   return getFormString(form, formKey);
 }
@@ -555,6 +695,57 @@ function sanitizeStatusSourceOfTruthExternalRefs(externalRefs: Record<string, un
   return rest;
 }
 
+function splitDocumentActorColumns(data: Record<string, unknown>) {
+  const nextData = { ...data };
+  let editorUserId: string | null | undefined;
+  let approverUserId: string | null | undefined;
+
+  const pickUuidOrNull = (value: unknown, key: string) => {
+    if (value === undefined) return undefined;
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    if (!z.string().uuid().safeParse(raw).success) {
+      throw new Error(`Invalid ${key} (expected uuid)`);
+    }
+    return raw;
+  };
+
+  if (Object.prototype.hasOwnProperty.call(nextData, 'editor_user_id')) {
+    editorUserId = pickUuidOrNull(nextData.editor_user_id, 'editor_user_id');
+    delete nextData.editor_user_id;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextData, 'assignee_user_id')) {
+    // Backward compatibility for legacy templates/actions.
+    if (editorUserId === undefined) {
+      editorUserId = pickUuidOrNull(nextData.assignee_user_id, 'assignee_user_id');
+    }
+    delete nextData.assignee_user_id;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextData, 'approver_user_id')) {
+    approverUserId = pickUuidOrNull(nextData.approver_user_id, 'approver_user_id');
+    delete nextData.approver_user_id;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextData, 'reviewer_user_id')) {
+    // Backward compatibility for legacy templates/actions.
+    if (approverUserId === undefined) {
+      approverUserId = pickUuidOrNull(nextData.reviewer_user_id, 'reviewer_user_id');
+    }
+    delete nextData.reviewer_user_id;
+  }
+
+  return { dataJson: nextData, editorUserId, approverUserId };
+}
+
+function normalizeRightsString(input: string) {
+  const normalized = input.trim().toLowerCase();
+  if (!/^[rwx]+$/.test(normalized)) return null;
+  const chars = new Set(normalized.split(''));
+  if (chars.size === 0) return null;
+  return ['r', 'w', 'x']
+    .filter((item) => chars.has(item))
+    .join('');
+}
+
 function allEditableFieldKeys(templateJson: TemplateJson) {
   return Object.entries(templateJson.fields)
     .filter(([, field]) => (field as TemplateField)?.kind === 'editable')
@@ -608,17 +799,41 @@ function snapshotPreviewList(snapshotsJson: unknown) {
   return values.slice(0, 3);
 }
 
+function resolveWorkflowTimeline(templateJson: TemplateJson, currentStatus: string) {
+  const workflow = (templateJson.workflow ?? {}) as Record<string, unknown>;
+  const rawOrder = workflow.order;
+  const states = (workflow.states ?? {}) as Record<string, unknown>;
+  const fromOrder = Array.isArray(rawOrder)
+    ? rawOrder.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+  const fallback = Object.keys(states);
+  const ordered = fromOrder.length > 0 ? fromOrder : fallback;
+  const deduped = Array.from(new Set(ordered));
+
+  if (currentStatus && !deduped.includes(currentStatus)) {
+    deduped.push(currentStatus);
+  }
+
+  return deduped;
+}
+
 async function renderDocumentDetailPage(params: {
+  db: FpDb;
+  hasDocumentActorColumns: boolean;
   reply: FastifyReply;
   template: { id: string; key: string; name: string; templateJson: unknown };
   document: {
     id: string;
     status: string;
+    templateVersion?: number | null;
     groupId?: string | null;
+    editorUserId?: string | null;
+    approverUserId?: string | null;
     dataJson: unknown;
     externalRefsJson: unknown;
     snapshotsJson: unknown;
   };
+  assignmentGroupId?: string | null;
   groupName?: string | null;
   errorMessage?: string;
 }) {
@@ -629,37 +844,118 @@ async function renderDocumentDetailPage(params: {
   const buttonKeys = Array.isArray(stateDef?.buttons)
     ? stateDef.buttons.filter((key: unknown): key is string => typeof key === 'string')
     : [];
+  const workflowTimeline = resolveWorkflowTimeline(templateJson, params.document.status);
+  const dataJsonForRender = {
+    ...((params.document.dataJson ?? {}) as Record<string, unknown>),
+    ...(params.document.editorUserId
+      ? { editor_user_id: params.document.editorUserId, assignee_user_id: params.document.editorUserId }
+      : {}),
+    ...(params.document.approverUserId
+      ? { approver_user_id: params.document.approverUserId, reviewer_user_id: params.document.approverUserId }
+      : {})
+  };
   const layoutHtml = renderLayout({
     mode: 'detail',
     templateJson,
     templateId: params.template.id,
     documentId: params.document.id,
     documentStatus: params.document.status,
-    dataJson: (params.document.dataJson ?? {}) as Record<string, unknown>,
+    dataJson: dataJsonForRender,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
     snapshotsJson: (params.document.snapshotsJson ?? {}) as Record<string, unknown>,
     editableKeys,
     readonlyKeys
   });
 
+  let assignmentMembers: Array<{ id: string; name: string; username: string }> = [];
+  let assignmentEditorCandidates: Array<{ id: string; name: string; username: string }> = [];
+  let assignmentApproverCandidates: Array<{ id: string; name: string; username: string }> = [];
+  let assignmentEditorName = '—';
+  let assignmentApproverName = '—';
+  let assignmentEditorHint = '';
+  let assignmentApproverHint = '';
+  if (params.hasDocumentActorColumns && params.assignmentGroupId && typeof (params.db as any).select === 'function') {
+    const members = await params.db
+      .select({
+        userId: fpGroupMembers.userId,
+        rights: fpGroupMembers.rights,
+        username: fpUsers.username,
+        displayName: fpUsers.displayName
+      })
+      .from(fpGroupMembers)
+      .innerJoin(fpUsers, eq(fpUsers.id, fpGroupMembers.userId))
+      .where(eq(fpGroupMembers.groupId, params.assignmentGroupId))
+      .orderBy(asc(fpUsers.username));
+    assignmentMembers = members.map((item) => ({
+      id: item.userId,
+      name: item.displayName,
+      username: item.username
+    }));
+    assignmentEditorCandidates = members
+      .filter((item) => item.rights.includes('w'))
+      .map((item) => ({ id: item.userId, name: item.displayName, username: item.username }));
+    assignmentApproverCandidates = members
+      .filter((item) => item.rights.includes('x'))
+      .map((item) => ({ id: item.userId, name: item.displayName, username: item.username }));
+    if (assignmentEditorCandidates.length === 0) {
+      assignmentEditorHint = 'No eligible users with write rights';
+    }
+    if (assignmentApproverCandidates.length === 0) {
+      assignmentApproverHint = 'No eligible users with execute rights';
+    }
+    const membersById = new Map(assignmentMembers.map((item) => [item.id, item]));
+    if (params.document.editorUserId) {
+      const editor = membersById.get(params.document.editorUserId);
+      assignmentEditorName = editor ? editor.name : params.document.editorUserId;
+    }
+    if (params.document.approverUserId) {
+      const approver = membersById.get(params.document.approverUserId);
+      assignmentApproverName = approver ? approver.name : params.document.approverUserId;
+    }
+  } else {
+    if (params.document.editorUserId) assignmentEditorName = params.document.editorUserId;
+    if (params.document.approverUserId) assignmentApproverName = params.document.approverUserId;
+  }
+
   await params.reply.renderPage('documents/detail.ejs', {
     template: params.template,
     templateJson,
     layoutHtml,
+    workflowTimeline,
     buttonKeys,
     groupName: params.groupName ?? null,
+    assignmentGroupId: params.assignmentGroupId ?? null,
+    hasDocumentActorColumns: params.hasDocumentActorColumns,
+    assignmentMembers,
+    assignmentEditorCandidates,
+    assignmentApproverCandidates,
+    assignmentEditorName,
+    assignmentApproverName,
+    assignmentEditorHint,
+    assignmentApproverHint,
     errorMessage: params.errorMessage,
     document: params.document,
-    dataJson: (params.document.dataJson ?? {}) as Record<string, unknown>,
+    dataJson: dataJsonForRender,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
     snapshotsJson: (params.document.snapshotsJson ?? {}) as Record<string, unknown>
   });
 }
 
+function classifyStatusBucket(status: string): 'Open' | 'In Progress' | 'Done' {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === 'approved') return 'Done';
+  if (normalized === 'assigned' || normalized === 'submitted') return 'In Progress';
+  if (normalized === 'created') return 'Open';
+  return 'Open';
+}
+
 async function resolveTemplateAssignmentContext(db: FpDb, templateId: string) {
-  const assignments = await db.query.fpTemplateAssignments.findMany({
-    where: eq(fpTemplateAssignments.templateId, templateId)
-  });
+  const assignments =
+    typeof (db as any).query?.fpTemplateAssignments?.findMany === 'function'
+      ? await db.query.fpTemplateAssignments.findMany({
+          where: eq(fpTemplateAssignments.templateId, templateId)
+        })
+      : [];
   const chosenGroupId = assignments[0]?.groupId ?? null;
   const hasMultipleAssignments = assignments.length > 1;
   const chosenGroupName = chosenGroupId ? await resolveGroupName(db, chosenGroupId) : null;
@@ -678,8 +974,111 @@ async function resolveGroupName(db: FpDb, groupId?: string | null) {
   return group?.name ?? null;
 }
 
+async function resolveDocumentRbacGroupId(
+  db: FpDb,
+  document: { groupId?: string | null; templateId: string }
+): Promise<string | null> {
+  if (document.groupId) return document.groupId;
+  const assignment = await resolveTemplateAssignmentContext(db, document.templateId);
+  return assignment.chosenGroupId;
+}
+
+async function loadDocumentById(db: FpDb, id: string, withActorColumns: boolean, withTemplateVersion: boolean) {
+  if (withActorColumns && withTemplateVersion && typeof (db as any).query?.fpDocuments?.findFirst === 'function') {
+    const legacy = await (db as any).query?.fpDocuments?.findFirst?.({ where: eq(fpDocuments.id, id) });
+    if (!legacy) return null;
+    return {
+      ...legacy,
+      templateVersion: withTemplateVersion ? legacy.templateVersion ?? 1 : 1,
+      editorUserId: withActorColumns ? legacy.editorUserId ?? legacy.assigneeUserId ?? null : null,
+      approverUserId: withActorColumns ? legacy.approverUserId ?? legacy.reviewerUserId ?? null : null
+    };
+  }
+
+  if (typeof (db as any).select !== 'function') {
+    return null;
+  }
+
+  const rows = await db
+    .select({
+      id: fpDocuments.id,
+      templateId: fpDocuments.templateId,
+      status: fpDocuments.status,
+      ...(withTemplateVersion ? { templateVersion: fpDocuments.templateVersion } : {}),
+      groupId: fpDocuments.groupId,
+      ...(withActorColumns
+        ? {
+            editorUserId: fpDocuments.editorUserId,
+            approverUserId: fpDocuments.approverUserId,
+            assigneeUserId: fpDocuments.assigneeUserId,
+            reviewerUserId: fpDocuments.reviewerUserId
+          }
+        : {}),
+      dataJson: fpDocuments.dataJson,
+      externalRefsJson: fpDocuments.externalRefsJson,
+      snapshotsJson: fpDocuments.snapshotsJson,
+      createdAt: fpDocuments.createdAt,
+      updatedAt: fpDocuments.updatedAt
+    })
+    .from(fpDocuments)
+    .where(eq(fpDocuments.id, id))
+    .limit(1);
+
+  const doc = rows[0];
+  if (!doc) return null;
+  return {
+    ...doc,
+    templateVersion: withTemplateVersion ? (doc as any).templateVersion ?? 1 : 1,
+    editorUserId: withActorColumns ? (doc as any).editorUserId ?? (doc as any).assigneeUserId ?? null : null,
+    approverUserId: withActorColumns ? (doc as any).approverUserId ?? (doc as any).reviewerUserId ?? null : null
+  };
+}
+
+function normalizeAdminErpTab(raw: string): AdminErpTab {
+  const allowed: AdminErpTab[] = ['products', 'customers', 'batches', 'serial-instances', 'customer-orders'];
+  return (allowed as string[]).includes(raw) ? (raw as AdminErpTab) : 'products';
+}
+
+function normalizeOptionalFilter(raw: string) {
+  const value = raw.trim();
+  return value.length > 0 ? value : '';
+}
+
+async function fetchErpCollection(params: {
+  erpBaseUrl: string;
+  path: string;
+  query?: Record<string, string>;
+}): Promise<Record<string, unknown>[]> {
+  const url = new URL(params.path, params.erpBaseUrl);
+  for (const [key, value] of Object.entries(params.query ?? {})) {
+    if (value.trim().length > 0) {
+      url.searchParams.set(key, value);
+    }
+  }
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`ERP request failed (${response.status}) for ${url.toString()}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  if (Array.isArray(payload)) {
+    return payload.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
+  }
+  if (payload && typeof payload === 'object' && Array.isArray((payload as { items?: unknown[] }).items)) {
+    return ((payload as { items: unknown[] }).items ?? []).filter(
+      (item): item is Record<string, unknown> => !!item && typeof item === 'object'
+    );
+  }
+  return [];
+}
+
 export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
-  const { db, erpBaseUrl } = opts;
+  const { db, erpBaseUrl, hasDocumentActorColumns = true, hasDocumentTemplateVersion = true } = opts;
 
   app.get('/', async (_req, reply) => {
     return reply.redirect('/templates');
@@ -717,7 +1116,15 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     return reply.redirect(redirectTo);
   });
 
-  app.get('/admin/debug', async (request, reply) => {
+  app.get('/admin', async (_request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+
+    await reply.renderPage('admin/index.ejs');
+  });
+
+  app.get('/admin/rbac', async (request, reply) => {
     if (process.env.NODE_ENV === 'production') {
       return reply.status(404).send({ message: 'Not found' });
     }
@@ -796,6 +1203,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     const assignmentRows = assignments.map((item) => ({
       ...item,
+      groupName: groupsById.get(item.groupId)?.name ?? '—',
       groupKey: groupsById.get(item.groupId)?.key ?? '—',
       templateKey: templatesById.get(item.templateId)?.key ?? '—',
       templateName: templatesById.get(item.templateId)?.name ?? '—'
@@ -809,16 +1217,350 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     const rawCookieHeader = request.headers.cookie ?? '';
     const cookieUser = parseCookies(rawCookieHeader).fp_user ?? '';
+    const membershipRowsByGroup = groups.map((group) => {
+      const rows = membershipRows.filter((item) => item.groupId === group.id);
+      const memberUserIds = new Set(rows.map((item) => item.userId));
+      const availableUsers = users.filter((item) => !memberUserIds.has(item.id));
+      return {
+        group,
+        rows,
+        availableUsers
+      };
+    });
 
-    await reply.renderPage('admin/debug.ejs', {
+    await reply.renderPage('admin/rbac.ejs', {
       users,
       groups,
       memberships: membershipRows,
+      membershipsByGroup: membershipRowsByGroup,
       assignments: assignmentRows,
+      templates,
       latestDocuments: documentRows,
       activeUser: request.currentUser ?? null,
       activeUserCookie: cookieUser
     });
+  });
+
+  app.post('/admin/users', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+    const form = toFormRecord(request.body);
+    const parsed = adminUserCreateSchema.safeParse({
+      username: getFormString(form, 'username'),
+      displayName: getFormString(form, 'displayName')
+    });
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'username and displayName are required' });
+    }
+
+    await db
+      .insert(fpUsers)
+      .values({
+        username: parsed.data.username.trim(),
+        displayName: parsed.data.displayName.trim()
+      })
+      .onConflictDoNothing({ target: fpUsers.username });
+
+    reply.code(303);
+    return reply.redirect('/admin/rbac#users');
+  });
+
+  app.post('/admin/groups', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+    const form = toFormRecord(request.body);
+    const parsed = adminGroupCreateSchema.safeParse({
+      key: getFormString(form, 'key'),
+      name: getFormString(form, 'name')
+    });
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'key and name are required' });
+    }
+
+    await db
+      .insert(fpGroups)
+      .values({
+        key: parsed.data.key.trim(),
+        name: parsed.data.name.trim()
+      })
+      .onConflictDoNothing({ target: fpGroups.key });
+
+    reply.code(303);
+    return reply.redirect('/admin/rbac#groups');
+  });
+
+  app.post('/admin/memberships', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+    const form = toFormRecord(request.body);
+    const parsed = adminMembershipCreateSchema.safeParse({
+      groupId: getFormString(form, 'groupId'),
+      userId: getFormString(form, 'userId'),
+      rights: getFormString(form, 'rights')
+    });
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'groupId, userId and rights are required' });
+    }
+
+    const rights = normalizeRightsString(parsed.data.rights);
+    if (!rights) {
+      return reply.status(400).send({ message: "rights must contain one or more of 'r', 'w', 'x'" });
+    }
+
+    const group = await db.query.fpGroups.findFirst({ where: eq(fpGroups.id, parsed.data.groupId) });
+    if (!group) {
+      return reply.status(404).send({ message: 'Group not found' });
+    }
+    const user = await db.query.fpUsers.findFirst({ where: eq(fpUsers.id, parsed.data.userId) });
+    if (!user) {
+      return reply.status(404).send({ message: 'User not found' });
+    }
+
+    await db
+      .insert(fpGroupMembers)
+      .values({
+        groupId: parsed.data.groupId,
+        userId: parsed.data.userId,
+        rights
+      })
+      .onConflictDoUpdate({
+        target: [fpGroupMembers.groupId, fpGroupMembers.userId],
+        set: { rights }
+      });
+
+    reply.code(303);
+    return reply.redirect('/admin/rbac#memberships');
+  });
+
+  app.post('/admin/memberships/:membershipId/delete', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+    const parsed = adminMembershipDeleteParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid membershipId' });
+    }
+
+    await db.delete(fpGroupMembers).where(eq(fpGroupMembers.id, parsed.data.membershipId));
+    reply.code(303);
+    return reply.redirect('/admin/rbac#memberships');
+  });
+
+  app.post('/admin/assignments', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+    const form = toFormRecord(request.body);
+    const parsed = adminTemplateAssignmentCreateSchema.safeParse({
+      templateId: getFormString(form, 'templateId'),
+      groupId: getFormString(form, 'groupId')
+    });
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'templateId and groupId are required' });
+    }
+
+    const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, parsed.data.templateId) });
+    if (!template) {
+      return reply.status(404).send({ message: 'Template not found' });
+    }
+    const group = await db.query.fpGroups.findFirst({ where: eq(fpGroups.id, parsed.data.groupId) });
+    if (!group) {
+      return reply.status(404).send({ message: 'Group not found' });
+    }
+
+    await db
+      .insert(fpTemplateAssignments)
+      .values({ templateId: parsed.data.templateId, groupId: parsed.data.groupId })
+      .onConflictDoNothing({ target: [fpTemplateAssignments.templateId, fpTemplateAssignments.groupId] });
+
+    reply.code(303);
+    return reply.redirect('/admin/rbac#template-assignments');
+  });
+
+  app.post('/admin/assignments/:assignmentId/delete', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+    const parsed = adminTemplateAssignmentDeleteParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid assignmentId' });
+    }
+
+    await db.delete(fpTemplateAssignments).where(eq(fpTemplateAssignments.id, parsed.data.assignmentId));
+    reply.code(303);
+    return reply.redirect('/admin/rbac#template-assignments');
+  });
+
+  app.get('/erp', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+    const query = toFormRecord(request.query);
+    const selectedTab = normalizeAdminErpTab(getFormString(query, 'tab') || 'products');
+    const valid = normalizeOptionalFilter(getFormString(query, 'valid'));
+    const rawStatus = normalizeOptionalFilter(getFormString(query, 'status'));
+    const productId = normalizeOptionalFilter(getFormString(query, 'product_id'));
+    const customerId = normalizeOptionalFilter(getFormString(query, 'customer_id'));
+    const statusByTab: Record<AdminErpTab, string> = {
+      products: '',
+      customers: '',
+      batches: '',
+      'serial-instances': '',
+      'customer-orders': ''
+    };
+    const allowedStatusByTab: Record<AdminErpTab, string[]> = {
+      products: [],
+      customers: [],
+      batches: ['ordered', 'produced', 'validated'],
+      'serial-instances': ['ordered', 'produced', 'validated'],
+      'customer-orders': ['received', 'offer_created', 'completed']
+    };
+    const validStatuses = allowedStatusByTab[selectedTab];
+    const status =
+      validStatuses.length === 0
+        ? ''
+        : validStatuses.includes(rawStatus)
+          ? rawStatus
+          : statusByTab[selectedTab];
+
+    const tabConfig: Record<AdminErpTab, { path: string; title: string; columns: string[]; query: Record<string, string> }> = {
+      products: {
+        path: '/api/products',
+        title: 'Products',
+        columns: ['id', 'sku', 'name', 'product_type', 'valid'],
+        query: { valid }
+      },
+      customers: {
+        path: '/api/customers',
+        title: 'Customers',
+        columns: ['id', 'customer_no', 'name', 'country', 'valid'],
+        query: { valid }
+      },
+      batches: {
+        path: '/api/batches',
+        title: 'Batches',
+        columns: ['id', 'batch_no', 'product_id', 'status', 'qty'],
+        query: { status, product_id: productId }
+      },
+      'serial-instances': {
+        path: '/api/serial-instances',
+        title: 'Serial Instances',
+        columns: ['id', 'serial_no', 'product_id', 'status'],
+        query: { status, product_id: productId }
+      },
+      'customer-orders': {
+        path: '/api/customer-orders',
+        title: 'Customer Orders',
+        columns: ['id', 'order_number', 'customer_id', 'status'],
+        query: { status, customer_id: customerId }
+      }
+    };
+
+    const config = tabConfig[selectedTab];
+    let items: Record<string, unknown>[] = [];
+    let fetchError = '';
+    let hintMessage = '';
+    let productOptions: Array<{ id: string; name: string }> = [];
+    let customerOptions: Array<{ id: string; name: string }> = [];
+
+    if (selectedTab === 'batches' || selectedTab === 'serial-instances') {
+      try {
+        const products = await fetchErpCollection({
+          erpBaseUrl,
+          path: '/api/products',
+          query: { valid: 'true' }
+        });
+        productOptions = products
+          .map((item) => ({
+            id: String(item.id ?? ''),
+            name: String(item.name ?? item.sku ?? item.id ?? '')
+          }))
+          .filter((item) => item.id.length > 0);
+      } catch (error) {
+        fetchError = error instanceof Error ? error.message : 'ERP request failed';
+      }
+    }
+
+    if (selectedTab === 'customer-orders') {
+      try {
+        const customers = await fetchErpCollection({
+          erpBaseUrl,
+          path: '/api/customers',
+          query: { valid: 'true' }
+        });
+        customerOptions = customers
+          .map((item) => ({
+            id: String(item.id ?? ''),
+            name: String(item.name ?? item.customer_no ?? item.id ?? '')
+          }))
+          .filter((item) => item.id.length > 0);
+      } catch (error) {
+        fetchError = error instanceof Error ? error.message : 'ERP request failed';
+      }
+    }
+
+    const requiresProduct = selectedTab === 'batches' || selectedTab === 'serial-instances';
+    const requiresCustomer = selectedTab === 'customer-orders';
+    const missingRequiredFilter = (requiresProduct && !productId) || (requiresCustomer && !customerId);
+    if (missingRequiredFilter) {
+      hintMessage =
+        selectedTab === 'batches'
+          ? 'Select a product to view batches'
+          : selectedTab === 'serial-instances'
+            ? 'Select a product to view serial instances'
+            : 'Select a customer to view customer orders';
+    }
+
+    try {
+      if (!missingRequiredFilter) {
+        items = await fetchErpCollection({
+          erpBaseUrl,
+          path: config.path,
+          query: config.query
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'ERP request failed';
+      if (missingRequiredFilter && message.includes('400')) {
+        // Missing parent filters should not be presented as backend failures.
+        hintMessage =
+          hintMessage ||
+          (selectedTab === 'batches'
+            ? 'Select a product to view batches'
+            : selectedTab === 'serial-instances'
+              ? 'Select a product to view serial instances'
+              : 'Select a customer to view customer orders');
+      } else {
+        fetchError = message;
+      }
+    }
+
+    await reply.renderPage('erp/index.ejs', {
+      erpBaseUrl,
+      selectedTab,
+      selectedTitle: config.title,
+      columns: config.columns,
+      items,
+      totalCount: items.length,
+      fetchError,
+      hintMessage,
+      productOptions,
+      customerOptions,
+      filters: { valid, status, product_id: productId, customer_id: customerId }
+    });
+  });
+
+  app.get('/admin/erp', async (_request, reply) => {
+    reply.code(303);
+    return reply.redirect('/erp');
+  });
+
+  app.get('/admin/debug', async (_request, reply) => {
+    reply.code(303);
+    return reply.redirect('/admin/rbac');
   });
 
   app.get('/templates', async (_req, reply) => {
@@ -832,10 +1574,65 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         version: fpTemplates.version
       })
       .from(fpTemplates)
-      .where(eq(fpTemplates.state, 'active'))
-      .orderBy(asc(fpTemplates.name));
+      .orderBy(asc(fpTemplates.name), desc(fpTemplates.version));
+    const versionsByKey = new Map<
+      string,
+      Array<{
+        id: string;
+        key: string;
+        name: string;
+        description: string | null;
+        state: string;
+        version: number;
+      }>
+    >();
+    for (const item of templates) {
+      const next = versionsByKey.get(item.key) ?? [];
+      next.push(item);
+      versionsByKey.set(item.key, next);
+    }
+    const latestPublishedTemplates = Array.from(versionsByKey.values())
+      .map((versions) => versions.find((item) => normalizeTemplateState(item.state) === 'published'))
+      .filter((item): item is (typeof templates)[number] => !!item)
+      .sort((a, b) => a.name.localeCompare(b.name));
 
-    await reply.renderPage('templates/list.ejs', { templates });
+    const templateIds = latestPublishedTemplates.map((item) => item.id);
+    const assignmentRows =
+      templateIds.length === 0
+        ? []
+        : await db
+            .select({
+              templateId: fpTemplateAssignments.templateId,
+              groupName: fpGroups.name,
+              groupKey: fpGroups.key
+            })
+            .from(fpTemplateAssignments)
+            .innerJoin(fpGroups, eq(fpGroups.id, fpTemplateAssignments.groupId))
+            .where(inArray(fpTemplateAssignments.templateId, templateIds))
+            .orderBy(asc(fpGroups.name));
+    const groupsByTemplateId = assignmentRows.reduce(
+      (acc, row) => {
+        const next = acc.get(row.templateId) ?? [];
+        next.push({ name: row.groupName, key: row.groupKey });
+        acc.set(row.templateId, next);
+        return acc;
+      },
+      new Map<string, Array<{ name: string; key: string }>>()
+    );
+    const templatesWithGroups = latestPublishedTemplates.map((tpl) => {
+      const assignedGroups = groupsByTemplateId.get(tpl.id) ?? [];
+      const versions = versionsByKey.get(tpl.key) ?? [];
+      const latestDraft = versions.find((item) => normalizeTemplateState(item.state) === 'draft');
+      return {
+        ...tpl,
+        assignedGroups,
+        assignedGroupCount: assignedGroups.length,
+        versions,
+        latestDraftId: latestDraft?.id ?? null
+      };
+    });
+
+    await reply.renderPage('templates/list.ejs', { templates: templatesWithGroups });
   });
 
   app.get('/templates/new', async (_request, reply) => {
@@ -845,7 +1642,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         key: '',
         name: '',
         description: '',
-        state: 'active',
+        state: 'draft',
         template_json: JSON.stringify(starterTemplate, null, 2)
       }
     });
@@ -857,7 +1654,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       key: getFormString(form, 'key'),
       name: getFormString(form, 'name'),
       description: getFormString(form, 'description'),
-      state: getFormString(form, 'state') || 'active',
+      state: normalizeTemplateState(getFormString(form, 'state')),
       template_json: getFormString(form, 'template_json')
     });
 
@@ -868,7 +1665,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           key: getFormString(form, 'key'),
           name: getFormString(form, 'name'),
           description: getFormString(form, 'description'),
-          state: getFormString(form, 'state') || 'active',
+          state: normalizeTemplateState(getFormString(form, 'state')),
           template_json: getFormString(form, 'template_json')
         }
       });
@@ -891,6 +1688,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         name: parsed.data.name,
         description: parsed.data.description || null,
         state: parsed.data.state,
+        publishedAt: resolvePublishedAtForStateChange(parsed.data.state),
         templateJson,
         version: 1
       })
@@ -918,6 +1716,43 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!template) {
       return reply.status(404).send({ message: 'Template not found' });
     }
+    const templateState = normalizeTemplateState(template.state);
+    if (templateState === 'published') {
+      const versions = await loadTemplateVersionsByKey(db, template.key);
+      const existingDraft = versions.find((item) => normalizeTemplateState(item.state) === 'draft');
+      if (existingDraft) {
+        reply.code(303);
+        return reply.redirect(`/templates/${existingDraft.id}/edit`);
+      }
+
+      const nextVersion = versions.length > 0 ? Math.max(...versions.map((item) => item.version)) + 1 : template.version + 1;
+      const inserted = await db
+        .insert(fpTemplates)
+        .values({
+          key: template.key,
+          version: nextVersion,
+          name: template.name,
+          description: template.description ?? null,
+          state: 'draft',
+          publishedAt: null,
+          templateJson: template.templateJson
+        })
+        .returning({ id: fpTemplates.id });
+      const draftId = inserted[0].id;
+
+      const sourceAssignments = await db.query.fpTemplateAssignments.findMany({
+        where: eq(fpTemplateAssignments.templateId, template.id)
+      });
+      if (sourceAssignments.length > 0) {
+        await db
+          .insert(fpTemplateAssignments)
+          .values(sourceAssignments.map((item) => ({ templateId: draftId, groupId: item.groupId })))
+          .onConflictDoNothing();
+      }
+
+      reply.code(303);
+      return reply.redirect(`/templates/${draftId}/edit`);
+    }
 
     const assignmentView = await loadTemplateAssignmentView(db, template.id);
 
@@ -931,7 +1766,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         key: template.key,
         name: template.name,
         description: template.description ?? '',
-        state: template.state,
+        state: normalizeTemplateState(template.state),
         template_json: JSON.stringify(template.templateJson, null, 2)
       }
     });
@@ -954,7 +1789,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       key: getFormString(form, 'key'),
       name: getFormString(form, 'name'),
       description: getFormString(form, 'description'),
-      state: getFormString(form, 'state') || 'active',
+      state: normalizeTemplateState(getFormString(form, 'state')),
       template_json: getFormString(form, 'template_json')
     });
 
@@ -969,7 +1804,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           key: getFormString(form, 'key'),
           name: getFormString(form, 'name'),
           description: getFormString(form, 'description'),
-          state: getFormString(form, 'state') || 'active',
+          state: normalizeTemplateState(getFormString(form, 'state')),
           template_json: getFormString(form, 'template_json')
         }
       });
@@ -996,12 +1831,41 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         name: parsed.data.name,
         description: parsed.data.description || null,
         state: parsed.data.state,
+        publishedAt: resolvePublishedAtForStateChange(parsed.data.state, (template as any).publishedAt ?? null),
         templateJson
       })
       .where(eq(fpTemplates.id, template.id));
 
     reply.code(303);
     return reply.redirect(`/templates/${template.id}/edit`);
+  });
+
+  app.post('/templates/:id/publish', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid template id' });
+    }
+
+    const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, paramsParsed.data.id) });
+    if (!template) {
+      return reply.status(404).send({ message: 'Template not found' });
+    }
+    if (normalizeTemplateState(template.state) !== 'draft') {
+      return reply.status(400).send({ message: 'Only draft templates can be published.' });
+    }
+
+    await db
+      .update(fpTemplates)
+      .set({ state: 'archived', publishedAt: null })
+      .where(and(eq(fpTemplates.key, template.key), eq(fpTemplates.state, 'published')));
+
+    await db
+      .update(fpTemplates)
+      .set({ state: 'published', publishedAt: new Date() })
+      .where(eq(fpTemplates.id, template.id));
+
+    reply.code(303);
+    return reply.redirect('/templates');
   });
 
   app.post('/templates/:id/assignments', async (request, reply) => {
@@ -1078,10 +1942,20 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
   app.get('/documents/new', async (request, reply) => {
     const query = toFormRecord(request.query);
-    const templateId = getFormString(query, 'templateId');
+    let templateId = getFormString(query, 'templateId');
+    const templateKey = getFormString(query, 'templateKey');
+    if (!templateId && templateKey) {
+      const publishedByKey = await db
+        .select({ id: fpTemplates.id })
+        .from(fpTemplates)
+        .where(and(eq(fpTemplates.key, templateKey), eq(fpTemplates.state, 'published')))
+        .orderBy(desc(fpTemplates.version))
+        .limit(1);
+      templateId = publishedByKey[0]?.id ?? '';
+    }
     if (!templateId) {
       const templates = await db.query.fpTemplates.findMany({
-        where: eq(fpTemplates.state, 'active'),
+        where: eq(fpTemplates.state, 'published'),
         orderBy: asc(fpTemplates.name)
       });
 
@@ -1101,6 +1975,22 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!template) {
       return reply.status(404).send({ message: 'Template not found' });
     }
+    if (normalizeTemplateState(template.state) !== 'published') {
+      return reply.status(400).send({ message: 'Only published templates can be used to create documents.' });
+    }
+    const latestPublished =
+      typeof (db as any).select === 'function'
+        ? await db
+            .select({ id: fpTemplates.id })
+            .from(fpTemplates)
+            .where(and(eq(fpTemplates.key, template.key), eq(fpTemplates.state, 'published')))
+            .orderBy(desc(fpTemplates.version))
+        : [];
+    const latestPublishedId = latestPublished[0]?.id ?? template.id;
+    if (latestPublishedId !== template.id) {
+      reply.code(303);
+      return reply.redirect(`/documents/new?templateId=${latestPublishedId}`);
+    }
 
     const templateJson = parseTemplateJson(template.templateJson);
     const assignmentContext = await resolveTemplateAssignmentContext(db, template.id);
@@ -1118,6 +2008,10 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       templates: [],
       selectedTemplateId: template.id,
       unassignedTemplateWarning: assignmentContext.isUnassigned,
+      assignedGroupName:
+        assignmentContext.chosenGroupName && !assignmentContext.hasMultipleAssignments
+          ? assignmentContext.chosenGroupName
+          : '',
       groupChosenNote:
         assignmentContext.hasMultipleAssignments && assignmentContext.chosenGroupName
           ? `Group chosen: ${assignmentContext.chosenGroupName}`
@@ -1125,27 +2019,220 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     });
   });
 
-  app.get('/documents', async (_request, reply) => {
+  app.get('/documents', async (request, reply) => {
+    const query = toFormRecord(request.query);
+    const statusFilter = normalizeOptionalFilter(getFormString(query, 'status'));
+    const templateIdFilterRaw = normalizeOptionalFilter(getFormString(query, 'templateId'));
+    const groupIdFilterRaw = normalizeOptionalFilter(getFormString(query, 'groupId'));
+    const templateIdFilter = z.string().uuid().safeParse(templateIdFilterRaw).success ? templateIdFilterRaw : '';
+    const groupIdFilter = z.string().uuid().safeParse(groupIdFilterRaw).success ? groupIdFilterRaw : '';
+
+    const whereConditions = [];
+    if (statusFilter) whereConditions.push(eq(fpDocuments.status, statusFilter));
+    if (templateIdFilter) whereConditions.push(eq(fpDocuments.templateId, templateIdFilter));
+    if (groupIdFilter) whereConditions.push(eq(fpDocuments.groupId, groupIdFilter));
+
     const items = await db
       .select({
         id: fpDocuments.id,
         createdAt: fpDocuments.createdAt,
         status: fpDocuments.status,
+        groupId: fpDocuments.groupId,
         templateId: fpDocuments.templateId,
         snapshotsJson: fpDocuments.snapshotsJson,
+        groupName: fpGroups.name,
         templateKey: fpTemplates.key,
         templateName: fpTemplates.name
       })
       .from(fpDocuments)
       .innerJoin(fpTemplates, eq(fpTemplates.id, fpDocuments.templateId))
+      .leftJoin(fpGroups, eq(fpGroups.id, fpDocuments.groupId))
+      .where(whereConditions.length > 0 ? and(...whereConditions) : undefined)
       .orderBy(desc(fpDocuments.createdAt));
 
     const documents = items.map((item) => ({
       ...item,
       snapshotPreview: snapshotPreviewList(item.snapshotsJson)
     }));
+    const templates = await db
+      .select({ id: fpTemplates.id, name: fpTemplates.name, key: fpTemplates.key })
+      .from(fpTemplates)
+      .where(eq(fpTemplates.state, 'published'))
+      .orderBy(asc(fpTemplates.name));
+    const groups = await db
+      .select({ id: fpGroups.id, name: fpGroups.name, key: fpGroups.key })
+      .from(fpGroups)
+      .orderBy(asc(fpGroups.name));
+    const statuses = await db
+      .select({ status: fpDocuments.status })
+      .from(fpDocuments)
+      .orderBy(asc(fpDocuments.status));
+    const statusOptions = Array.from(new Set(statuses.map((item) => item.status))).filter((item) => item.trim().length > 0);
 
-    await reply.renderPage('documents/index.ejs', { documents });
+    await reply.renderPage('documents/index.ejs', {
+      documents,
+      filters: {
+        status: statusFilter,
+        templateId: templateIdFilter,
+        groupId: groupIdFilter
+      },
+      templates,
+      groups,
+      statusOptions
+    });
+  });
+
+  app.get('/workspaces/me', async (request, reply) => {
+    const currentUser = request.currentUser as CurrentUser | null;
+    if (!currentUser) {
+      return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+    }
+
+    const memberships = await db
+      .select({
+        groupId: fpGroupMembers.groupId,
+        rights: fpGroupMembers.rights,
+        groupKey: fpGroups.key,
+        groupName: fpGroups.name
+      })
+      .from(fpGroupMembers)
+      .innerJoin(fpGroups, eq(fpGroups.id, fpGroupMembers.groupId))
+      .where(eq(fpGroupMembers.userId, currentUser.id))
+      .orderBy(asc(fpGroups.name));
+    const rightsByGroupId = new Map(memberships.map((item) => [item.groupId, item.rights]));
+
+    if (!hasDocumentActorColumns) {
+      await reply.renderPage('workspaces/me.ejs', {
+        memberships,
+        tasks: [],
+        tasksUnavailableMessage:
+          'My tasks are unavailable until DB migration is applied. Run: cd app && npm run db:push'
+      });
+      return;
+    }
+
+    const rawTaskRows = await db
+      .select({
+        id: fpDocuments.id,
+        createdAt: fpDocuments.createdAt,
+        status: fpDocuments.status,
+        editorUserId: fpDocuments.editorUserId,
+        approverUserId: fpDocuments.approverUserId,
+        assigneeUserId: fpDocuments.assigneeUserId,
+        reviewerUserId: fpDocuments.reviewerUserId,
+        groupId: fpDocuments.groupId,
+        groupName: fpGroups.name,
+        templateKey: fpTemplates.key,
+        templateName: fpTemplates.name
+      })
+      .from(fpDocuments)
+      .innerJoin(fpTemplates, eq(fpTemplates.id, fpDocuments.templateId))
+      .leftJoin(fpGroups, eq(fpGroups.id, fpDocuments.groupId))
+      .where(
+        or(
+          eq(fpDocuments.editorUserId, currentUser.id),
+          eq(fpDocuments.approverUserId, currentUser.id),
+          eq(fpDocuments.assigneeUserId, currentUser.id),
+          eq(fpDocuments.reviewerUserId, currentUser.id)
+        )
+      )
+      .orderBy(desc(fpDocuments.createdAt));
+    const taskRows = rawTaskRows
+      .map((item) => {
+        const normalizedStatus = item.status.trim().toLowerCase();
+        const userGroupRights = item.groupId ? rightsByGroupId.get(item.groupId) ?? '' : '';
+        const canEditInGroup = userGroupRights.includes('w');
+        const canApproveInGroup = userGroupRights.includes('x');
+        const editorUserId = item.editorUserId ?? item.assigneeUserId;
+        const approverUserId = item.approverUserId ?? item.reviewerUserId;
+        const isEditorTask =
+          editorUserId === currentUser.id &&
+          canEditInGroup &&
+          (normalizedStatus === 'created' || normalizedStatus === 'assigned');
+        const isApproverTask =
+          approverUserId === currentUser.id && canApproveInGroup && normalizedStatus === 'submitted';
+
+        if (normalizedStatus === 'approved') return null;
+        if (isEditorTask) return { ...item, role: 'Editor' };
+        if (isApproverTask) return { ...item, role: 'Approver' };
+        return null;
+      })
+      .filter((item): item is (typeof rawTaskRows)[number] & { role: 'Editor' | 'Approver' } => !!item);
+
+    await reply.renderPage('workspaces/me.ejs', {
+      memberships,
+      tasks: taskRows,
+      tasksUnavailableMessage: ''
+    });
+  });
+
+  app.get('/workspaces/groups/:groupId', async (request, reply) => {
+    const parsed = groupIdParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid group id' });
+    }
+    const currentUser = request.currentUser as CurrentUser | null;
+    if (!currentUser) {
+      return reply.status(403).send({ message: 'No active user. Go to /admin or use the user dropdown.' });
+    }
+
+    const membership = await db.query.fpGroupMembers.findFirst({
+      where: and(eq(fpGroupMembers.groupId, parsed.data.groupId), eq(fpGroupMembers.userId, currentUser.id))
+    });
+    if (!membership) {
+      return reply.status(403).send({ message: 'Forbidden: not a member of this group workspace' });
+    }
+
+    const group = await db.query.fpGroups.findFirst({ where: eq(fpGroups.id, parsed.data.groupId) });
+    if (!group) {
+      return reply.status(404).send({ message: 'Group not found' });
+    }
+
+    const templateRows = await db
+      .select({
+        assignmentId: fpTemplateAssignments.id,
+        templateId: fpTemplates.id,
+        templateKey: fpTemplates.key,
+        templateName: fpTemplates.name,
+        templateState: fpTemplates.state
+      })
+      .from(fpTemplateAssignments)
+      .innerJoin(fpTemplates, eq(fpTemplates.id, fpTemplateAssignments.templateId))
+      .where(eq(fpTemplateAssignments.groupId, group.id))
+      .orderBy(asc(fpTemplates.name));
+
+    const docs = await db
+      .select({
+        id: fpDocuments.id,
+        createdAt: fpDocuments.createdAt,
+        status: fpDocuments.status,
+        snapshotsJson: fpDocuments.snapshotsJson,
+        templateKey: fpTemplates.key,
+        templateName: fpTemplates.name
+      })
+      .from(fpDocuments)
+      .innerJoin(fpTemplates, eq(fpTemplates.id, fpDocuments.templateId))
+      .where(eq(fpDocuments.groupId, group.id))
+      .orderBy(desc(fpDocuments.createdAt));
+
+    const documents = docs.map((doc) => ({
+      ...doc,
+      snapshotPreview: snapshotPreviewList(doc.snapshotsJson),
+      bucket: classifyStatusBucket(doc.status)
+    }));
+
+    const bucketCounts = {
+      Open: documents.filter((item) => item.bucket === 'Open').length,
+      InProgress: documents.filter((item) => item.bucket === 'In Progress').length,
+      Done: documents.filter((item) => item.bucket === 'Done').length
+    };
+
+    await reply.renderPage('workspaces/group.ejs', {
+      group,
+      templates: templateRows,
+      documents,
+      bucketCounts
+    });
   });
 
   app.post('/documents', async (request, reply) => {
@@ -1156,16 +2243,37 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).send({ message: 'Please start from a template. Missing or invalid templateId.' });
     }
 
-    const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, templateId) });
-    if (!template) {
+    const selectedTemplate = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, templateId) });
+    if (!selectedTemplate) {
       return reply.status(404).send({ message: 'Template not found' });
     }
+    if (normalizeTemplateState(selectedTemplate.state) !== 'published') {
+      return reply.status(400).send({ message: 'Only published templates can create documents.' });
+    }
+    const latestPublishedRows =
+      typeof (db as any).select === 'function'
+        ? await db
+            .select({
+              id: fpTemplates.id,
+              key: fpTemplates.key,
+              name: fpTemplates.name,
+              description: fpTemplates.description,
+              state: fpTemplates.state,
+              version: fpTemplates.version,
+              templateJson: fpTemplates.templateJson,
+              publishedAt: fpTemplates.publishedAt
+            })
+            .from(fpTemplates)
+            .where(and(eq(fpTemplates.key, selectedTemplate.key), eq(fpTemplates.state, 'published')))
+            .orderBy(desc(fpTemplates.version))
+        : [];
+    const template = latestPublishedRows[0] ?? selectedTemplate;
 
     const templateJson = parseTemplateJson(template.templateJson);
     const assignmentContext = await resolveTemplateAssignmentContext(db, template.id);
     const externalRefs: Record<string, string> = {};
     const snapshots: Record<string, string> = {};
-    const data: Record<string, string> = {};
+    const data: Record<string, unknown> = {};
 
     for (const fieldKey of orderedFieldKeys(templateJson)) {
       const field = templateJson.fields[fieldKey] as TemplateField;
@@ -1212,13 +2320,27 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(502).send({ message });
     }
 
+    const baseCreateData = sanitizeStatusSourceOfTruthData(data);
+    const splitCreate = hasDocumentActorColumns
+      ? splitDocumentActorColumns(baseCreateData)
+      : { dataJson: baseCreateData, editorUserId: undefined, approverUserId: undefined };
+
     const inserted = await db
       .insert(fpDocuments)
       .values({
-        templateId,
+        templateId: template.id,
+        ...(hasDocumentTemplateVersion ? { templateVersion: template.version ?? 1 } : {}),
         status: templateJson.workflow.initial,
         groupId: assignmentContext.chosenGroupId,
-        dataJson: data,
+        ...(hasDocumentActorColumns
+          ? {
+              editorUserId: splitCreate.editorUserId ?? null,
+              approverUserId: splitCreate.approverUserId ?? null,
+              assigneeUserId: splitCreate.editorUserId ?? null,
+              reviewerUserId: splitCreate.approverUserId ?? null
+            }
+          : {}),
+        dataJson: splitCreate.dataJson,
         externalRefsJson: externalRefs,
         snapshotsJson: snapshots
       })
@@ -1234,7 +2356,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).send({ message: 'Invalid document id' });
     }
 
-    const document = await db.query.fpDocuments.findFirst({ where: eq(fpDocuments.id, paramsParsed.data.id) });
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
     if (!document) {
       return reply.status(404).send({ message: 'Document not found' });
     }
@@ -1244,12 +2366,16 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(404).send({ message: 'Template not found' });
     }
 
-    const groupName = await resolveGroupName(db, document.groupId ?? null);
+    const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
+    const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
 
     await renderDocumentDetailPage({
+      db,
+      hasDocumentActorColumns,
       reply,
       template,
       document,
+      assignmentGroupId,
       groupName
     });
   });
@@ -1260,9 +2386,29 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).send({ message: 'Invalid document id' });
     }
 
-    const document = await db.query.fpDocuments.findFirst({ where: eq(fpDocuments.id, paramsParsed.data.id) });
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
     if (!document) {
       return reply.status(404).send({ message: 'Document not found' });
+    }
+    const rbacGroupIdForSave = await resolveDocumentRbacGroupId(db, document);
+    if (rbacGroupIdForSave) {
+      const currentUser = request.currentUser as CurrentUser | null;
+      if (!currentUser) {
+        return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+      }
+      const groupMembers = await db.query.fpGroupMembers.findMany({
+        where: eq(fpGroupMembers.groupId, rbacGroupIdForSave)
+      });
+      const membership = groupMembers.find((item) => item.userId === currentUser.id);
+      const userRights = membership?.rights ?? '';
+      if (!membership || !hasRequiredRights(userRights, ['write'])) {
+        return sendUiError(
+          request,
+          reply,
+          403,
+          `Forbidden: requires ${describeRequiredRights(['write'])}, user has ${userRights || '-'}`
+        );
+      }
     }
 
     const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, document.templateId) });
@@ -1273,18 +2419,161 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const templateJson = parseTemplateJson(template.templateJson);
     const form = toFormRecord(request.body);
     const editableKeys = resolveEditableFieldKeys(templateJson, document.status);
-    const nextDataJson = sanitizeStatusSourceOfTruthData(
+    const baseSaveData = sanitizeStatusSourceOfTruthData(
       applyEditableDataUpdate(templateJson, (document.dataJson ?? {}) as Record<string, unknown>, form, editableKeys)
     );
+    const splitSave = hasDocumentActorColumns
+      ? splitDocumentActorColumns(baseSaveData)
+      : { dataJson: baseSaveData, editorUserId: undefined, approverUserId: undefined };
 
     await db
       .update(fpDocuments)
-      .set({ dataJson: nextDataJson })
+      .set({
+        dataJson: splitSave.dataJson,
+        ...(hasDocumentActorColumns && splitSave.editorUserId !== undefined
+          ? { editorUserId: splitSave.editorUserId, assigneeUserId: splitSave.editorUserId }
+          : {}),
+        ...(hasDocumentActorColumns && splitSave.approverUserId !== undefined
+          ? { approverUserId: splitSave.approverUserId, reviewerUserId: splitSave.approverUserId }
+          : {})
+      })
       .where(eq(fpDocuments.id, document.id));
 
     reply.code(303);
     return reply.redirect(`/documents/${document.id}`);
   });
+
+  const setDocumentEditorAssignment = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!hasDocumentActorColumns) {
+      return sendUiError(
+        request,
+        reply,
+        503,
+        'Assignments unavailable: DB missing editor_user_id/approver_user_id. Run: cd app && npm run db:push'
+      );
+    }
+    const paramsParsed = documentIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid document id');
+    }
+    const form = toFormRecord(request.body);
+    const bodyParsed = documentAssignmentBodySchema.safeParse({
+      userId: getFormString(form, 'userId')
+    });
+    if (!bodyParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid userId');
+    }
+
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
+    if (!document) {
+      return sendUiError(request, reply, 404, 'Document not found');
+    }
+    const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
+    if (!assignmentGroupId) return sendUiError(request, reply, 400, 'No group assigned');
+
+    const currentUser = request.currentUser as CurrentUser | null;
+    if (!currentUser) {
+      return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+    }
+
+    const groupMembers = await db.query.fpGroupMembers.findMany({
+      where: eq(fpGroupMembers.groupId, assignmentGroupId)
+    });
+    const actorMembership = groupMembers.find((item) => item.userId === currentUser.id);
+    const actorRights = actorMembership?.rights ?? '';
+    if (!actorMembership || !hasRequiredRights(actorRights, ['execute'])) {
+      return sendUiError(
+        request,
+        reply,
+        403,
+        `Forbidden: requires ${describeRequiredRights(['execute'])}, user has ${actorRights || '-'}`
+      );
+    }
+    const targetMembership = groupMembers.find((item) => item.userId === bodyParsed.data.userId);
+    if (!targetMembership) {
+      return sendUiError(request, reply, 400, 'Selected user is not a member of the document group');
+    }
+    if (!targetMembership.rights.includes('w')) {
+      return sendUiError(request, reply, 400, 'Selected user lacks write rights for editor assignment');
+    }
+
+    await db
+      .update(fpDocuments)
+      .set({ editorUserId: bodyParsed.data.userId, assigneeUserId: bodyParsed.data.userId })
+      .where(eq(fpDocuments.id, document.id));
+
+    reply.code(303);
+    return reply.redirect(`/documents/${document.id}`);
+  };
+
+  const setDocumentApproverAssignment = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!hasDocumentActorColumns) {
+      return sendUiError(
+        request,
+        reply,
+        503,
+        'Assignments unavailable: DB missing editor_user_id/approver_user_id. Run: cd app && npm run db:push'
+      );
+    }
+    const paramsParsed = documentIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid document id');
+    }
+    const form = toFormRecord(request.body);
+    const bodyParsed = documentAssignmentBodySchema.safeParse({
+      userId: getFormString(form, 'userId')
+    });
+    if (!bodyParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid userId');
+    }
+
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
+    if (!document) {
+      return sendUiError(request, reply, 404, 'Document not found');
+    }
+    const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
+    if (!assignmentGroupId) return sendUiError(request, reply, 400, 'No group assigned');
+
+    const currentUser = request.currentUser as CurrentUser | null;
+    if (!currentUser) {
+      return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+    }
+
+    const groupMembers = await db.query.fpGroupMembers.findMany({
+      where: eq(fpGroupMembers.groupId, assignmentGroupId)
+    });
+    const actorMembership = groupMembers.find((item) => item.userId === currentUser.id);
+    const actorRights = actorMembership?.rights ?? '';
+    if (!actorMembership || !hasRequiredRights(actorRights, ['execute'])) {
+      return sendUiError(
+        request,
+        reply,
+        403,
+        `Forbidden: requires ${describeRequiredRights(['execute'])}, user has ${actorRights || '-'}`
+      );
+    }
+    const targetMembership = groupMembers.find((item) => item.userId === bodyParsed.data.userId);
+    if (!targetMembership) {
+      return sendUiError(request, reply, 400, 'Selected user is not a member of the document group');
+    }
+    if (!targetMembership.rights.includes('x')) {
+      return sendUiError(request, reply, 400, 'Selected user lacks execute rights for approver assignment');
+    }
+
+    await db
+      .update(fpDocuments)
+      .set({ approverUserId: bodyParsed.data.userId, reviewerUserId: bodyParsed.data.userId })
+      .where(eq(fpDocuments.id, document.id));
+
+    reply.code(303);
+    return reply.redirect(`/documents/${document.id}`);
+  };
+
+  app.post('/documents/:id/assign/editor', setDocumentEditorAssignment);
+  app.post('/documents/:id/assign/approver', setDocumentApproverAssignment);
+  // Backward compatibility.
+  app.post('/documents/:id/assignments/editor', setDocumentEditorAssignment);
+  app.post('/documents/:id/assignments/approver', setDocumentApproverAssignment);
 
   app.get('/documents/:id/action/:controlKey', async (request, reply) => {
     const paramsParsed = documentActionParamSchema.safeParse(request.params);
@@ -1302,7 +2591,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).send({ message: 'Invalid action params' });
     }
 
-    const document = await db.query.fpDocuments.findFirst({ where: eq(fpDocuments.id, paramsParsed.data.id) });
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
     if (!document) {
       return reply.status(404).send({ message: 'Document not found' });
     }
@@ -1313,7 +2602,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const templateJson = parseTemplateJson(template.templateJson);
-    const groupName = await resolveGroupName(db, document.groupId ?? null);
+    const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
+    const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
     const query = toFormRecord(request.query);
     const source = getFormString(query, 'source');
     const isUiButtonRequest = source === 'ui';
@@ -1332,9 +2622,12 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     if (!isUiButtonRequest && !allowedButtons.includes(paramsParsed.data.controlKey)) {
       await renderDocumentDetailPage({
+        db,
+        hasDocumentActorColumns,
         reply,
         template,
         document,
+        assignmentGroupId,
         groupName,
         errorMessage: 'Control is not allowed in the current status.'
       });
@@ -1345,9 +2638,12 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const actionKey = controls[paramsParsed.data.controlKey]?.action;
     if (!actionKey) {
       await renderDocumentDetailPage({
+        db,
+        hasDocumentActorColumns,
         reply,
         template,
         document,
+        assignmentGroupId,
         groupName,
         errorMessage: 'Control action is not configured.'
       });
@@ -1355,32 +2651,64 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const required = resolveActionPermissionRequirements(templateJson, paramsParsed.data.controlKey, actionKey);
-    if (required.length > 0) {
-      const currentUser = request.currentUser as CurrentUser | null;
-      if (!currentUser) {
-        return reply.status(403).send({ message: 'No active user. Go to /admin/debug or use the user dropdown.' });
-      }
+    const effectiveRequired: PermissionName[] = [...required];
+    const rbacGroupId = effectiveRequired.length > 0 ? await resolveDocumentRbacGroupId(db, document) : null;
+    const currentUser = request.currentUser as CurrentUser | null;
+    if (!currentUser && effectiveRequired.length > 0 && rbacGroupId) {
+      return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+    }
 
-      if (document.groupId) {
-        const groupMembers = await db.query.fpGroupMembers.findMany({
-          where: eq(fpGroupMembers.groupId, document.groupId)
-        });
-        const membership = groupMembers.find((item) => item.userId === currentUser.id);
-        const userRights = membership?.rights ?? '';
+    if (effectiveRequired.length > 0 && rbacGroupId) {
+      const groupMembers = await db.query.fpGroupMembers.findMany({
+        where: eq(fpGroupMembers.groupId, rbacGroupId)
+      });
+      const membership = groupMembers.find((item) => item.userId === currentUser!.id);
+      const userRights = membership?.rights ?? '';
 
-        if (!membership || !hasRequiredRights(userRights, required)) {
-          return reply.status(403).send({
-            message: `Forbidden: requires ${describeRequiredRights(required)}, user has ${userRights || '-'}`
-          });
-        }
+      if (!membership || !hasRequiredRights(userRights, effectiveRequired)) {
+        return sendUiError(
+          request,
+          reply,
+          403,
+          `Forbidden: requires ${describeRequiredRights(effectiveRequired)}, user has ${userRights || '-'}`
+        );
       }
+    }
+
+    const controlName = paramsParsed.data.controlKey.toLowerCase();
+    const actionName = actionKey.toLowerCase();
+    const isSubmitAction = controlName.includes('submit') || actionName.includes('submit');
+    const isApproveOrRejectAction =
+      controlName.includes('approve') ||
+      controlName.includes('reject') ||
+      actionName.includes('approve') ||
+      actionName.includes('reject');
+
+    if (isSubmitAction && document.editorUserId && currentUser && currentUser.id !== document.editorUserId) {
+      return sendUiError(request, reply, 403, 'Forbidden: submit is limited to the assigned editor.');
+    }
+    if (isApproveOrRejectAction && document.approverUserId && currentUser && currentUser.id !== document.approverUserId) {
+      return sendUiError(request, reply, 403, 'Forbidden: approve/reject is limited to the assigned approver.');
     }
 
     const form = toFormRecord(request.body);
     const editableKeys = resolveEditableFieldKeys(templateJson, document.status);
-    const nextDataJson = sanitizeStatusSourceOfTruthData(
+    const baseActionData = sanitizeStatusSourceOfTruthData(
       applyEditableDataUpdate(templateJson, (document.dataJson ?? {}) as Record<string, unknown>, form, editableKeys)
     );
+    const splitActionInput = hasDocumentActorColumns
+      ? splitDocumentActorColumns(baseActionData)
+      : { dataJson: baseActionData, editorUserId: undefined, approverUserId: undefined };
+    const nextDataJson = splitActionInput.dataJson;
+    const actionDataContext = {
+      ...nextDataJson,
+      ...(document.editorUserId
+        ? { editor_user_id: document.editorUserId, assignee_user_id: document.editorUserId }
+        : {}),
+      ...(document.approverUserId
+        ? { approver_user_id: document.approverUserId, reviewer_user_id: document.approverUserId }
+        : {})
+    };
 
     if (isUiButtonRequest && actionKey === 'save') {
       return reply.status(400).send({ message: 'UI button cannot execute process action' });
@@ -1402,9 +2730,12 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const actionDef = actions[actionKey];
     if (!actionDef) {
       await renderDocumentDetailPage({
+        db,
+        hasDocumentActorColumns,
         reply,
         template,
         document,
+        assignmentGroupId,
         groupName,
         errorMessage: `Action "${actionKey}" is not defined.`
       });
@@ -1420,7 +2751,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         actionDef: actionDef as any,
         context: {
           doc: { id: document.id, status: document.status },
-          data: nextDataJson,
+          data: actionDataContext,
           external: ((document.externalRefsJson ?? {}) as Record<string, unknown>) ?? {},
           snapshot: ((document.snapshotsJson ?? {}) as Record<string, unknown>) ?? {}
         },
@@ -1434,11 +2765,21 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       });
 
       await db.transaction(async (tx) => {
+        const baseActionResultData = sanitizeStatusSourceOfTruthData(result.dataJson);
+        const splitActionResult = hasDocumentActorColumns
+          ? splitDocumentActorColumns(baseActionResultData)
+          : { dataJson: baseActionResultData, editorUserId: undefined, approverUserId: undefined };
         await tx
           .update(fpDocuments)
           .set({
             status: result.status,
-            dataJson: sanitizeStatusSourceOfTruthData(result.dataJson),
+            dataJson: splitActionResult.dataJson,
+            ...(hasDocumentActorColumns && splitActionResult.editorUserId !== undefined
+              ? { editorUserId: splitActionResult.editorUserId, assigneeUserId: splitActionResult.editorUserId }
+              : {}),
+            ...(hasDocumentActorColumns && splitActionResult.approverUserId !== undefined
+              ? { approverUserId: splitActionResult.approverUserId, reviewerUserId: splitActionResult.approverUserId }
+              : {}),
             externalRefsJson: sanitizeStatusSourceOfTruthExternalRefs(result.externalRefsJson),
             snapshotsJson: result.snapshotsJson
           })
@@ -1453,9 +2794,12 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         message = `Action "${actionKey}" is not valid for current document status "${document.status}" (ERP transition rejected with 409).`;
       }
       await renderDocumentDetailPage({
+        db,
+        hasDocumentActorColumns,
         reply,
         template,
         document,
+        assignmentGroupId,
         groupName,
         errorMessage: message
       });

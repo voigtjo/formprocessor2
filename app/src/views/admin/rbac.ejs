@@ -1,0 +1,203 @@
+<header class="page-header">
+  <h1>Administration: Access Control</h1>
+  <p class="muted">Active user: <strong><%= activeUser?.username || '—' %></strong> · Cookie fp_user: <code><%= activeUserCookie || '—' %></code></p>
+</header>
+
+<section id="users" class="card">
+  <h3 class="card-title">Users</h3>
+  <form method="post" action="/admin/users" class="row">
+    <div class="col col-6">
+      <label for="new-username">Username</label>
+      <input id="new-username" name="username" type="text" required />
+    </div>
+    <div class="col col-6">
+      <label for="new-display-name">Display name</label>
+      <input id="new-display-name" name="displayName" type="text" required />
+    </div>
+    <div class="col">
+      <button class="btn btn-primary" type="submit">Create User</button>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr>
+        <th>Username</th>
+        <th>Display name</th>
+        <th>ID</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% users.forEach((item) => { %>
+        <tr>
+          <td><%= item.username %></td>
+          <td><%= item.displayName %></td>
+          <td><code><%= item.id %></code></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>
+
+<section id="groups" class="card">
+  <h3 class="card-title">Groups</h3>
+  <form method="post" action="/admin/groups" class="row">
+    <div class="col col-6">
+      <label for="new-group-key">Key</label>
+      <input id="new-group-key" name="key" type="text" required />
+    </div>
+    <div class="col col-6">
+      <label for="new-group-name">Name</label>
+      <input id="new-group-name" name="name" type="text" required />
+    </div>
+    <div class="col">
+      <button class="btn btn-primary" type="submit">Create Group</button>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr>
+        <th>Key</th>
+        <th>Name</th>
+        <th>ID</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% groups.forEach((item) => { %>
+        <tr>
+          <td><code><%= item.key %></code></td>
+          <td><%= item.name %></td>
+          <td><code><%= item.id %></code></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>
+
+<section id="memberships" class="card">
+  <h3 class="card-title">Memberships</h3>
+  <% membershipsByGroup.forEach((entry) => { %>
+    <div class="card">
+      <h4 class="card-title"><%= entry.group.name %> (<code><%= entry.group.key %></code>)</h4>
+      <% if (entry.rows.length === 0) { %>
+        <p class="muted">No members in this group.</p>
+      <% } else { %>
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Rights</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <% entry.rows.forEach((item) => { %>
+              <tr>
+                <td><code><%= item.username %></code></td>
+                <td><code><%= item.rights %></code></td>
+                <td>
+                  <form method="post" action="/admin/memberships/<%= item.id %>/delete">
+                    <button class="btn btn-danger" type="submit">Remove</button>
+                  </form>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      <% } %>
+
+      <% if (entry.availableUsers.length > 0) { %>
+        <form method="post" action="/admin/memberships" class="row">
+          <input type="hidden" name="groupId" value="<%= entry.group.id %>" />
+          <div class="col col-6">
+            <label for="member-user-<%= entry.group.id %>">User</label>
+            <select id="member-user-<%= entry.group.id %>" name="userId">
+              <% entry.availableUsers.forEach((user) => { %>
+                <option value="<%= user.id %>"><%= user.displayName %> (@<%= user.username %>)</option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="col col-6">
+            <label for="member-rights-<%= entry.group.id %>">Rights</label>
+            <input id="member-rights-<%= entry.group.id %>" name="rights" type="text" value="rwx" />
+          </div>
+          <div class="col">
+            <button class="btn btn-secondary" type="submit">Add Member</button>
+          </div>
+        </form>
+      <% } %>
+    </div>
+  <% }) %>
+</section>
+
+<section id="template-assignments" class="card">
+  <h3 class="card-title">Template Assignments</h3>
+  <% if (templates.length > 0 && groups.length > 0) { %>
+    <form method="post" action="/admin/assignments" class="row">
+      <div class="col col-6">
+        <label for="assignment-template">Template</label>
+        <select id="assignment-template" name="templateId">
+          <% templates.forEach((tpl) => { %>
+            <option value="<%= tpl.id %>"><%= tpl.name %> (<%= tpl.key %>)</option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col col-6">
+        <label for="assignment-group">Group</label>
+        <select id="assignment-group" name="groupId">
+          <% groups.forEach((group) => { %>
+            <option value="<%= group.id %>"><%= group.name %> (<%= group.key %>)</option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col">
+        <button class="btn btn-primary" type="submit">Assign Template</button>
+      </div>
+    </form>
+  <% } %>
+  <table>
+    <thead>
+      <tr>
+        <th>Template</th>
+        <th>Group</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% assignments.forEach((item) => { %>
+        <tr>
+          <td><%= item.templateName %> (<code><%= item.templateKey %></code>)</td>
+          <td><%= item.groupName %> (<code><%= item.groupKey %></code>)</td>
+          <td>
+            <form method="post" action="/admin/assignments/<%= item.id %>/delete">
+              <button class="btn btn-danger" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h3 class="card-title">Latest Documents</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Document</th>
+        <th>Template</th>
+        <th>Group</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% latestDocuments.forEach((item) => { %>
+        <tr>
+          <td><a href="/documents/<%= item.id %>"><code><%= String(item.id).slice(0, 8) %></code></a></td>
+          <td><code><%= item.templateKey %></code></td>
+          <td><code><%= item.groupKey %></code></td>
+          <td><span class="badge badge-status"><%= item.status %></span></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>

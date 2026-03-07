@@ -91,6 +91,7 @@ describe('documents create route', () => {
 
     templateFindSpy.mockResolvedValue({
       id: templateId,
+      state: 'published',
       templateJson: {
         fields: {},
         layout: [],
@@ -128,6 +129,7 @@ describe('documents create route', () => {
 
     templateFindSpy.mockResolvedValue({
       id: templateId,
+      state: 'published',
       templateJson: {
         fields: {},
         layout: [],
@@ -159,6 +161,193 @@ describe('documents create route', () => {
     await app.close();
   });
 
+  it('creates document with assigned group and detail header shows group from document.group_id', async () => {
+    const templateId = '00000000-0000-0000-0000-0000000000e1';
+    const groupId = '00000000-0000-0000-0000-0000000000e2';
+    const documentId = '00000000-0000-0000-0000-0000000000e3';
+    let storedDoc: any = null;
+
+    const template = {
+      id: templateId,
+      key: 'change-request',
+      name: 'Change Request',
+      state: 'published',
+      templateJson: {
+        fields: {},
+        layout: [],
+        workflow: {
+          initial: 'created',
+          states: {
+            created: { editable: [], readonly: [], buttons: [] }
+          }
+        },
+        controls: {},
+        actions: {}
+      }
+    };
+
+    const db = {
+      query: {
+        fpTemplates: {
+          findFirst: vi.fn(async () => template),
+          findMany: vi.fn(async () => [template])
+        },
+        fpTemplateAssignments: {
+          findMany: vi.fn(async () => [{ groupId }])
+        },
+        fpGroups: {
+          findFirst: vi.fn(async () => ({ id: groupId, key: 'ops', name: 'Operations' }))
+        },
+        fpDocuments: {
+          findFirst: vi.fn(async () => storedDoc)
+        }
+      },
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => ({
+          returning: vi.fn(async () => {
+            storedDoc = {
+              id: documentId,
+              templateId: values.templateId,
+              status: values.status,
+              groupId: values.groupId,
+              dataJson: values.dataJson ?? {},
+              externalRefsJson: values.externalRefsJson ?? {},
+              snapshotsJson: values.snapshotsJson ?? {}
+            };
+            return [{ id: documentId }];
+          })
+        }))
+      }))
+    };
+
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+      this.type('text/html').send(`Group: ${String(data.groupName ?? '—')}`);
+    });
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/documents',
+      payload: { templateId }
+    });
+    expect(createRes.statusCode).toBe(303);
+    expect(storedDoc.groupId).toBe(groupId);
+
+    const detailRes = await app.inject({
+      method: 'GET',
+      url: `/documents/${documentId}`
+    });
+    expect(detailRes.statusCode).toBe(200);
+    expect(detailRes.body).toContain('Group: Operations');
+
+    await app.close();
+  });
+
+  it('POST /documents rejects template when state is not published', async () => {
+    const { db, templateFindSpy, insertSpy } = createMockDb();
+    const templateId = '00000000-0000-0000-0000-0000000000ff';
+
+    templateFindSpy.mockResolvedValue({
+      id: templateId,
+      state: 'draft',
+      templateJson: {
+        fields: {},
+        layout: [],
+        workflow: { initial: 'received' }
+      }
+    });
+
+    const app = Fastify();
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents',
+      payload: { templateId }
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ message: 'Only published templates can create documents.' });
+    expect(insertSpy).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('passes workflow timeline in configured workflow.order and highlights current status context', async () => {
+    const templateId = '00000000-0000-0000-0000-0000000000f2';
+    const documentId = '00000000-0000-0000-0000-0000000000f3';
+    const template = {
+      id: templateId,
+      key: 'rbac-test',
+      name: 'RBAC Test',
+      state: 'published',
+      templateJson: {
+        fields: {},
+        layout: [],
+        workflow: {
+          initial: 'created',
+          order: ['created', 'assigned', 'submitted', 'approved'],
+          states: {
+            created: { editable: [], readonly: [], buttons: [] },
+            // Intentionally out of order to verify workflow.order precedence.
+            approved: { editable: [], readonly: [], buttons: [] },
+            submitted: { editable: [], readonly: [], buttons: [] },
+            assigned: { editable: [], readonly: [], buttons: [] }
+          }
+        },
+        controls: {},
+        actions: {}
+      }
+    };
+
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: vi.fn(async () => ({
+            id: documentId,
+            templateId,
+            status: 'submitted',
+            groupId: null,
+            dataJson: {},
+            externalRefsJson: {},
+            snapshotsJson: {}
+          }))
+        },
+        fpTemplates: {
+          findFirst: vi.fn(async () => template)
+        }
+      }
+    };
+
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+      const timeline = Array.isArray(data.workflowTimeline) ? data.workflowTimeline : [];
+      const status = String((data.document as Record<string, unknown>)?.status ?? '');
+      this.type('text/plain').send(`${timeline.join(' -> ')} | current=${status}`);
+    });
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/documents/${documentId}`
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('created -> assigned -> submitted -> approved');
+    expect(res.body).toContain('current=submitted');
+
+    await app.close();
+  });
+
   it('creates document with product lookup and renders product snapshot label in detail', async () => {
     const templateId = '00000000-0000-0000-0000-0000000000f1';
     const documentId = '00000000-0000-0000-0000-0000000000d9';
@@ -168,6 +357,7 @@ describe('documents create route', () => {
       id: templateId,
       key: 'change-request',
       name: 'Change Request',
+      state: 'published',
       templateJson: {
         fields: {
           product_id: {
@@ -273,6 +463,116 @@ describe('documents create route', () => {
     expect(detailRes.body).not.toContain('>-<');
 
     vi.unstubAllGlobals();
+    await app.close();
+  });
+
+  it('creates published document with template_version and date/checkbox roundtrip', async () => {
+    const templateId = '00000000-0000-0000-0000-000000000aa1';
+    const documentId = '00000000-0000-0000-0000-000000000dd1';
+    let storedDoc: any = null;
+
+    const template = {
+      id: templateId,
+      key: 'ops-check',
+      name: 'Ops Check',
+      state: 'published',
+      version: 2,
+      templateJson: {
+        fields: {
+          due_date: { kind: 'editable', label: 'Due date', inputType: 'date' },
+          urgent: { kind: 'editable', label: 'Urgent?', inputType: 'checkbox' }
+        },
+        layout: [{ type: 'field', key: 'due_date' }, { type: 'field', key: 'urgent' }],
+        workflow: {
+          initial: 'created',
+          states: {
+            created: { editable: ['due_date', 'urgent'], readonly: [], buttons: [] }
+          }
+        },
+        controls: {},
+        actions: {}
+      }
+    };
+
+    const db = {
+      query: {
+        fpTemplates: {
+          findFirst: vi.fn(async () => template),
+          findMany: vi.fn(async () => [template])
+        },
+        fpTemplateAssignments: { findMany: vi.fn(async () => []) },
+        fpDocuments: { findFirst: vi.fn(async () => storedDoc) }
+      },
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            orderBy: vi.fn(async () => [template])
+          }))
+        }))
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => ({
+          returning: vi.fn(async () => {
+            storedDoc = {
+              id: documentId,
+              templateId: values.templateId,
+              templateVersion: values.templateVersion,
+              status: values.status,
+              groupId: values.groupId,
+              dataJson: values.dataJson ?? {},
+              externalRefsJson: values.externalRefsJson ?? {},
+              snapshotsJson: values.snapshotsJson ?? {}
+            };
+            return [{ id: documentId }];
+          })
+        }))
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: any) => ({
+          where: vi.fn(async () => {
+            storedDoc = { ...storedDoc, ...values };
+          })
+        }))
+      }))
+    };
+
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+      this.type('text/html').send(String(data.layoutHtml ?? ''));
+    });
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001',
+      hasDocumentTemplateVersion: true
+    });
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/documents',
+      payload: { templateId, 'data:due_date': '2026-03-12', 'data:urgent': '1' }
+    });
+    expect(createRes.statusCode).toBe(303);
+    expect(storedDoc.templateVersion).toBe(2);
+    expect(storedDoc.dataJson).toMatchObject({ due_date: '2026-03-12', urgent: true });
+
+    const detailRes = await app.inject({
+      method: 'GET',
+      url: `/documents/${documentId}`
+    });
+    expect(detailRes.statusCode).toBe(200);
+    expect(detailRes.body).toContain('name="data:due_date"');
+    expect(detailRes.body).toContain('type="date"');
+    expect(detailRes.body).toContain('name="data:urgent"');
+    expect(detailRes.body).toContain('type="checkbox"');
+
+    const saveRes = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/save`,
+      payload: { 'data:due_date': '2026-03-13' }
+    });
+    expect(saveRes.statusCode).toBe(303);
+    expect(storedDoc.dataJson).toMatchObject({ due_date: '2026-03-13', urgent: false });
+
     await app.close();
   });
 });

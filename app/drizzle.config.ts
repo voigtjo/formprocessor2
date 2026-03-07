@@ -1,13 +1,11 @@
+import 'dotenv/config';
 import type { Config } from 'drizzle-kit';
-import dotenv from 'dotenv';
-import { resolve } from 'node:path';
-
-dotenv.config({ path: resolve(process.cwd(), '../.env') });
-
-const url = process.env.FP_DATABASE_URL ?? process.env.DATABASE_URL;
+const url = process.env.FP_DATABASE_URL;
 
 if (!url) {
-  throw new Error('Missing database URL. Set FP_DATABASE_URL in the repository root .env file.');
+  throw new Error(
+    'Missing FP_DATABASE_URL. Set it in the root .env or pass inline, e.g. FP_DATABASE_URL=postgres://... npm run db:push'
+  );
 }
 
 export default {

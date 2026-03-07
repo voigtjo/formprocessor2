@@ -166,6 +166,14 @@ a {
   font-size: 0.92rem;
 }
 
+.workflow-timeline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.45rem 0 0 0;
+}
+
 label {
   display: block;
   font-weight: 600;

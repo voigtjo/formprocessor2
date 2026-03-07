@@ -27,7 +27,11 @@
     </div>
     <div class="col col-6">
       <label for="state">State</label>
-      <input id="state" name="state" type="text" value="<%= form?.state ?? 'active' %>" required />
+      <select id="state" name="state" required>
+        <% ['draft', 'published', 'archived'].forEach((stateOption) => { %>
+          <option value="<%= stateOption %>" <%= (form?.state ?? 'draft') === stateOption ? 'selected' : '' %>><%= stateOption %></option>
+        <% }) %>
+      </select>
     </div>
   </div>
 

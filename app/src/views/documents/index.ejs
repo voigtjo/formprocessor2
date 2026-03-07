@@ -5,27 +5,64 @@
   <a class="btn btn-secondary" href="/templates">Back to Templates</a>
 </div>
 
-<% if (!documents || documents.length === 0) { %>
-  <div class="card">
-    <p class="muted">No documents yet.</p>
+<form method="get" action="/documents" class="row">
+  <div class="col col-6">
+    <label for="filter-status">Status</label>
+    <select id="filter-status" name="status">
+      <option value="">All</option>
+      <% (statusOptions || []).forEach((status) => { %>
+        <option value="<%= status %>" <%= filters?.status === status ? 'selected' : '' %>><%= status %></option>
+      <% }) %>
+    </select>
   </div>
-<% } %>
+  <div class="col col-6">
+    <label for="filter-template-id">Template</label>
+    <select id="filter-template-id" name="templateId">
+      <option value="">All</option>
+      <% (templates || []).forEach((tpl) => { %>
+        <option value="<%= tpl.id %>" <%= filters?.templateId === tpl.id ? 'selected' : '' %>><%= tpl.name %> (<%= tpl.key %>)</option>
+      <% }) %>
+    </select>
+  </div>
+  <div class="col col-6">
+    <label for="filter-group-id">Group</label>
+    <select id="filter-group-id" name="groupId">
+      <option value="">All</option>
+      <% (groups || []).forEach((group) => { %>
+        <option value="<%= group.id %>" <%= filters?.groupId === group.id ? 'selected' : '' %>><%= group.name %> (<%= group.key %>)</option>
+      <% }) %>
+    </select>
+  </div>
+  <div class="col">
+    <button class="btn btn-secondary" type="submit">Apply Filters</button>
+    <a class="btn btn-secondary" href="/documents">Reset</a>
+  </div>
+</form>
 
-<% (documents || []).forEach((doc) => { %>
-  <div class="card">
-    <div>
-      <strong><a href="/documents/<%= doc.id %>">Document</a></strong>
-      <span class="muted">· <%= new Date(doc.createdAt).toLocaleString() %></span>
-    </div>
-    <div>
-      Status: <span class="badge badge-status"><%= doc.status %></span>
-      · Template: <code><%= doc.templateKey %></code> (<%= doc.templateName %>)
-    </div>
-    <% if (doc.snapshotPreview && doc.snapshotPreview.length > 0) { %>
-      <div class="muted">Snapshots: <%= doc.snapshotPreview.join(' · ') %></div>
+<table>
+  <thead>
+    <tr>
+      <th>Created</th>
+      <th>Status</th>
+      <th>Group</th>
+      <th>Template</th>
+      <th>Snapshots</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!documents || documents.length === 0) { %>
+      <tr><td colspan="6" class="muted">No documents yet.</td></tr>
     <% } %>
-    <div class="actions">
-      <a class="btn btn-primary" href="/documents/<%= doc.id %>">Open</a>
-    </div>
-  </div>
-<% }) %>
+    <% (documents || []).forEach((doc) => { %>
+      <tr>
+        <td><%= new Date(doc.createdAt).toLocaleString() %></td>
+        <td><span class="badge badge-status"><%= doc.status %></span></td>
+        <td><%= doc.groupName || '—' %></td>
+        <td><%= doc.templateName %> (<code><%= doc.templateKey %></code>)</td>
+        <td><%= (doc.snapshotPreview && doc.snapshotPreview.length > 0) ? doc.snapshotPreview.join(' · ') : '—' %></td>
+        <td><a href="/documents/<%= doc.id %>">Open</a></td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>

@@ -22,13 +22,23 @@ UI stack: EJS + HTMX (SSR).
 
 - `GET /documents`
 - `GET /documents/new`
-  - without `templateId`: shows wizard template dropdown (active templates only)
+  - without `templateId`: shows wizard template dropdown (published templates only)
   - with `templateId`: shows document form for selected template
 - `POST /documents`
+  - rejects non-published templates with `400`
 - `GET /documents/:id`
 - `POST /documents/:id/save`
 - `POST /documents/:id/action/:controlKey`
   - supports `?source=ui` for layout button requests
+
+## Workplaces
+
+- `GET /workspaces/me`
+  - current user workspace
+  - shows memberships and open tasks (`assignee_user_id` or `reviewer_user_id`, status != approved)
+- `GET /workspaces/groups/:groupId`
+  - group workplace (requires membership in group; otherwise `403`)
+  - shows assigned templates and group documents (created/template/status/assignee/reviewer)
 
 ## Lookup endpoint
 

@@ -8,13 +8,14 @@ export const fpTemplates = pgTable(
     key: text('key').notNull(),
     name: text('name').notNull(),
     description: text('description'),
-    state: text('state').notNull().default('active'),
+    state: text('state').notNull().default('draft'),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
     templateJson: jsonb('template_json').notNull(),
     version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
-  (table) => [index('ux_fp_templates_key_version').on(table.key, table.version)]
+  (table) => [uniqueIndex('ux_fp_templates_key_version').on(table.key, table.version)]
 );
 
 export const fpUsers = pgTable(
@@ -78,7 +79,12 @@ export const fpDocuments = pgTable(
       .notNull()
       .references(() => fpTemplates.id, { onDelete: 'restrict' }),
     status: text('status').notNull(),
+    templateVersion: integer('template_version').notNull().default(1),
     groupId: uuid('group_id').references(() => fpGroups.id, { onDelete: 'set null' }),
+    editorUserId: uuid('editor_user_id').references(() => fpUsers.id, { onDelete: 'set null' }),
+    approverUserId: uuid('approver_user_id').references(() => fpUsers.id, { onDelete: 'set null' }),
+    assigneeUserId: uuid('assignee_user_id').references(() => fpUsers.id, { onDelete: 'set null' }),
+    reviewerUserId: uuid('reviewer_user_id').references(() => fpUsers.id, { onDelete: 'set null' }),
     dataJson: jsonb('data_json').notNull().default(sql`'{}'::jsonb`),
     externalRefsJson: jsonb('external_refs_json').notNull().default(sql`'{}'::jsonb`),
     snapshotsJson: jsonb('snapshots_json').notNull().default(sql`'{}'::jsonb`),
@@ -87,6 +93,10 @@ export const fpDocuments = pgTable(
   },
   (table) => [
     index('idx_fp_documents_template_status').on(table.templateId, table.status),
-    index('idx_fp_documents_group').on(table.groupId)
+    index('idx_fp_documents_group').on(table.groupId),
+    index('idx_fp_documents_editor').on(table.editorUserId),
+    index('idx_fp_documents_approver').on(table.approverUserId),
+    index('idx_fp_documents_assignee').on(table.assigneeUserId),
+    index('idx_fp_documents_reviewer').on(table.reviewerUserId)
   ]
 );

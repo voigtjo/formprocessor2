@@ -178,8 +178,8 @@ describe('layout renderer v2', () => {
       dataJson: { due_date: '2026-03-09', urgent: 'yes' },
       templateJson: {
         fields: {
-          due_date: { kind: 'editable', label: 'Due Date', ui: { input: 'date' } },
-          urgent: { kind: 'editable', label: 'Urgent', ui: { input: 'checkbox' } }
+          due_date: { kind: 'editable', label: 'Due Date', control: 'date' },
+          urgent: { kind: 'editable', label: 'Urgent', control: 'checkbox' }
         },
         layout: [{ type: 'field', key: 'due_date' }, { type: 'field', key: 'urgent' }]
       }
@@ -190,6 +190,7 @@ describe('layout renderer v2', () => {
     expect(html).toContain('value="2026-03-09"');
     expect(html).toContain('name="data:urgent"');
     expect(html).toContain('type="checkbox"');
+    expect(html).toContain('value="1"');
     expect(html).toContain('checked');
   });
 });

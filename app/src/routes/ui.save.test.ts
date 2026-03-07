@@ -34,29 +34,29 @@ describe('document save data merge', () => {
   it('stores checkbox as true when posted', () => {
     const templateJson = {
       fields: {
-        urgent: { kind: 'editable', ui: { input: 'checkbox' } }
+        urgent: { kind: 'editable', control: 'checkbox' }
       },
       workflow: { initial: 'created', states: { created: { editable: ['urgent'] } } }
     } as any;
-    const next = applyEditableDataUpdate(templateJson, {}, { 'data:urgent': 'true' }, ['urgent']);
-    expect(next.urgent).toBe('true');
+    const next = applyEditableDataUpdate(templateJson, {}, { 'data:urgent': '1' }, ['urgent']);
+    expect(next.urgent).toBe(true);
   });
 
   it('stores checkbox as false when missing in post', () => {
     const templateJson = {
       fields: {
-        urgent: { kind: 'editable', ui: { input: 'checkbox' } }
+        urgent: { kind: 'editable', control: 'checkbox' }
       },
       workflow: { initial: 'created', states: { created: { editable: ['urgent'] } } }
     } as any;
-    const next = applyEditableDataUpdate(templateJson, { urgent: 'true' }, {}, ['urgent']);
-    expect(next.urgent).toBe('false');
+    const next = applyEditableDataUpdate(templateJson, { urgent: true }, {}, ['urgent']);
+    expect(next.urgent).toBe(false);
   });
 
   it('roundtrips date string as submitted', () => {
     const templateJson = {
       fields: {
-        due_date: { kind: 'editable', ui: { input: 'date' } }
+        due_date: { kind: 'editable', control: 'date' }
       },
       workflow: { initial: 'created', states: { created: { editable: ['due_date'] } } }
     } as any;

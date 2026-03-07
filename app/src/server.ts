@@ -45,9 +45,78 @@ function buildUserCookie(userId: string) {
   return `fp_user=${encodeURIComponent(userId)}; Path=/; HttpOnly; SameSite=Lax`;
 }
 
+function requestWantsHtml(acceptHeader: string | undefined) {
+  if (!acceptHeader) return false;
+  return acceptHeader.includes('text/html');
+}
+
+function isApiRequest(url: string) {
+  return url.startsWith('/api/');
+}
+
+async function renderErrorDocument(params: {
+  viewsRoot: string;
+  statusCode: number;
+  title: string;
+  message: string;
+  backHref: string;
+  currentUser: { id: string; username: string; displayName: string } | null;
+  users: Array<{ id: string; username: string; displayName: string }>;
+  currentPath: string;
+}) {
+  const viewData = {
+    title: params.title,
+    statusCode: params.statusCode,
+    message: params.message,
+    backHref: params.backHref,
+    currentUser: params.currentUser,
+    users: params.users,
+    currentPath: params.currentPath
+  };
+  const content = await ejs.renderFile(path.join(params.viewsRoot, 'error.ejs'), viewData, { async: true });
+  return ejs.renderFile(path.join(params.viewsRoot, 'layout.ejs'), { ...viewData, content }, { async: true });
+}
+
+async function checkDocumentColumns(pool: { query: (sqlText: string, params?: unknown[]) => Promise<any> }) {
+  const tableCheck = await pool.query(`select to_regclass('public.fp_documents') as rel`);
+  const rel = tableCheck.rows?.[0]?.rel;
+  if (!rel) return { hasActorColumns: false, hasTemplateVersion: false };
+
+  const columnCheck = await pool.query(
+    `
+      select column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'fp_documents'
+        and column_name in ('editor_user_id', 'approver_user_id', 'template_version')
+    `
+  );
+  const names = new Set((columnCheck.rows ?? []).map((row: { column_name?: string }) => row.column_name));
+  return {
+    hasActorColumns: names.has('editor_user_id') && names.has('approver_user_id'),
+    hasTemplateVersion: names.has('template_version')
+  };
+}
+
 export async function buildApp() {
   const app = Fastify({ logger: true });
   const { db, pool } = makeDb();
+  let hasDocumentActorColumns = false;
+  let hasDocumentTemplateVersion = false;
+  try {
+    const checked = await checkDocumentColumns(pool);
+    hasDocumentActorColumns = checked.hasActorColumns;
+    hasDocumentTemplateVersion = checked.hasTemplateVersion;
+  } catch {
+    hasDocumentActorColumns = false;
+    hasDocumentTemplateVersion = false;
+  }
+  if (!hasDocumentActorColumns) {
+    app.log.warn('DB missing editor_user_id/approver_user_id. Run: cd app && npm run db:push');
+  }
+  if (!hasDocumentTemplateVersion) {
+    app.log.warn('DB missing template_version. Run: cd app && npm run db:push');
+  }
 
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
@@ -116,10 +185,77 @@ export async function buildApp() {
     this.type('text/html').send(html);
   });
 
+  app.setErrorHandler(async (error, request, reply) => {
+    const statusCode = (error as any)?.statusCode && Number((error as any).statusCode) >= 400 ? Number((error as any).statusCode) : 500;
+    const message = error instanceof Error ? error.message : 'Unexpected error';
+    if (!isApiRequest(request.url) && requestWantsHtml(request.headers.accept)) {
+      const title =
+        statusCode === 403 ? 'Forbidden' : statusCode === 404 ? 'Not Found' : statusCode === 400 ? 'Bad Request' : 'Error';
+      const backHref = request.headers.referer || '/templates';
+      const html = await renderErrorDocument({
+        viewsRoot,
+        statusCode,
+        title,
+        message,
+        backHref,
+        currentUser: request.currentUser,
+        users: request.users ?? [],
+        currentPath: request.url
+      });
+      reply.code(statusCode).type('text/html').send(html);
+      return;
+    }
+
+    reply.code(statusCode).send({ message });
+  });
+
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (reply.statusCode < 400) return payload;
+    if (isApiRequest(request.url)) return payload;
+    if (!requestWantsHtml(request.headers.accept)) return payload;
+    const contentType = String(reply.getHeader('content-type') ?? '');
+    if (!contentType.includes('application/json')) return payload;
+
+    const textPayload = typeof payload === 'string' ? payload : Buffer.isBuffer(payload) ? payload.toString('utf8') : '';
+    if (!textPayload) return payload;
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(textPayload);
+    } catch {
+      return payload;
+    }
+    const message = typeof parsed?.message === 'string' ? parsed.message : '';
+    if (!message) return payload;
+
+    const title =
+      reply.statusCode === 403
+        ? 'Forbidden'
+        : reply.statusCode === 404
+          ? 'Not Found'
+          : reply.statusCode === 400
+            ? 'Bad Request'
+            : 'Error';
+    const html = await renderErrorDocument({
+      viewsRoot,
+      statusCode: reply.statusCode,
+      title,
+      message,
+      backHref: request.headers.referer || '/templates',
+      currentUser: request.currentUser,
+      users: request.users ?? [],
+      currentPath: request.url
+    });
+    reply.type('text/html');
+    return html;
+  });
+
   await app.register(healthRoutes);
   await app.register(uiRoutes, {
     db,
-    erpBaseUrl: process.env.ERP_SIM_BASE_URL ?? 'http://localhost:3001'
+    erpBaseUrl: process.env.ERP_SIM_BASE_URL ?? 'http://localhost:3001',
+    hasDocumentActorColumns,
+    hasDocumentTemplateVersion
   });
 
   return app;

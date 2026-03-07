@@ -103,7 +103,15 @@ function createMockDb(rightsForAlice = 'rwx', rightsForBob = 'r') {
         })
       };
       await cb(tx);
-    }
+    },
+    update: () => ({
+      set: (values: { status?: string }) => {
+        updates.push(values);
+        return {
+          where: async () => {}
+        };
+      }
+    })
   };
 }
 
@@ -156,6 +164,22 @@ describe('RBAC action permissions', () => {
 
     expect(res.statusCode).toBe(403);
     expect(res.json().message).toContain('Forbidden: requires execute (x), user has r');
+    await app.close();
+  });
+
+  it('denies bob (r) for document save with 403 write requirement', async () => {
+    const app = await createApp(createMockDb('rwx', 'r'));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d1/save',
+      headers: {
+        cookie: `fp_user=${encodeURIComponent(bob.id)}`
+      },
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().message).toContain('Forbidden: requires write (w), user has r');
     await app.close();
   });
 });

@@ -11,6 +11,12 @@ Current covered areas include:
 - action interpolation and action-step execution behavior
 - document-create ERP enrichment
 - renderer v2 layout structure rendering
+- workplace routes (`/workspaces/me`, `/workspaces/groups/:groupId`) and membership deny path
+- action-based assignee/reviewer assignment to document columns (not `data_json`)
+- RBAC Test v2 workflow guards:
+  - explicit actions `assign_editor` / `assign_approver`
+  - `submit` blocked with friendly message when editor is missing
+  - `approve` blocked with friendly message when approver is missing
 
 ## Cross-service smoke tests
 

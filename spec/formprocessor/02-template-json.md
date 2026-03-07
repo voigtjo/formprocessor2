@@ -36,6 +36,13 @@ Supported/target kinds:
 - `system` (computed/system value)
 - `workflow` (planned: process-controlled fields such as status)
 
+Workplace-related workflow/system fields (P0):
+- `assignee_user_id`
+- `reviewer_user_id`
+
+Persistence rule:
+- action `setField` for these keys updates document columns, not `data_json`.
+
 Common field props in use:
 - `label`
 - `multiline` (editable)
@@ -79,6 +86,7 @@ Behavior:
 ```json
 {
   "initial": "Assigned",
+  "order": ["Created", "Assigned", "Submitted", "Approved"],
   "states": {
     "Assigned": {
       "editable": ["..."],
@@ -92,6 +100,7 @@ Behavior:
 - `editable[]`: fields that can be changed
 - `readonly[]`: fields shown read-only
 - `buttons[]`: workflow/process button keys for current state
+- `order[]` (optional): explicit workflow state order for UI timeline/progress display
 
 ## controls
 

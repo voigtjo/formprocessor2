@@ -1,0 +1,61 @@
+<header class="page-header">
+  <h1>Group Workplace: <%= group.name %></h1>
+  <p class="muted">Key: <code><%= group.key %></code></p>
+</header>
+
+<p class="muted">
+  Status buckets:
+  Open <span class="badge"><%= bucketCounts.Open %></span>
+  · In Progress <span class="badge"><%= bucketCounts.InProgress %></span>
+  · Done <span class="badge"><%= bucketCounts.Done %></span>
+</p>
+
+<h3>Assigned Templates</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Template</th>
+      <th>State</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!templates || templates.length === 0) { %>
+      <tr><td colspan="3" class="muted">No templates assigned to this group.</td></tr>
+    <% } %>
+    <% (templates || []).forEach((tpl) => { %>
+      <tr>
+        <td><%= tpl.templateName %> (<code><%= tpl.templateKey %></code>)</td>
+        <td><%= tpl.templateState %></td>
+        <td><a href="/documents/new?templateId=<%= tpl.templateId %>">New Document</a></td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>
+
+<h3>Documents</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Created</th>
+      <th>Template</th>
+      <th>Status</th>
+      <th>Snapshots</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!documents || documents.length === 0) { %>
+      <tr><td colspan="5" class="muted">No documents in this group.</td></tr>
+    <% } %>
+    <% (documents || []).forEach((doc) => { %>
+      <tr>
+        <td><%= new Date(doc.createdAt).toLocaleString() %></td>
+        <td><%= doc.templateName %> (<code><%= doc.templateKey %></code>)</td>
+        <td><span class="badge badge-status"><%= doc.status %></span> <span class="muted">(<%= doc.bucket %>)</span></td>
+        <td><%= (doc.snapshotPreview && doc.snapshotPreview.length > 0) ? doc.snapshotPreview.join(' · ') : '—' %></td>
+        <td><a href="/documents/<%= doc.id %>">Open</a></td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>

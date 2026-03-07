@@ -124,7 +124,8 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
   const field = (params.templateJson?.fields ?? {})[fieldKey] ?? {};
   const label = escapeHtml(field.label ?? fieldKey);
   const kind = String(field.kind ?? 'unknown');
-  const uiInput = field?.ui?.input === 'date' || field?.ui?.input === 'checkbox' ? field.ui.input : 'text';
+  const uiInputCandidate = field?.inputType ?? field?.control ?? field?.ui?.input;
+  const uiInput = uiInputCandidate === 'date' || uiInputCandidate === 'checkbox' ? uiInputCandidate : 'text';
   const isWorkflow = kind === 'workflow';
   const isStatusWorkflowField = isWorkflow && fieldKey === 'status';
 
@@ -190,7 +191,7 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
       }
       if (uiInput === 'checkbox') {
         const checked = isCheckedValue(dataValue) ? ' checked' : '';
-        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="true"${checked} /></div>`;
+        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked} /></div>`;
       }
       return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" /></div>`;
     }
@@ -222,7 +223,7 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
     if (uiInput === 'checkbox') {
       const checked = isCheckedValue(dataValue) ? ' checked' : '';
       const disabledAttr = isEditable ? '' : ' disabled';
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="true"${checked}${disabledAttr} /></div>`;
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked}${disabledAttr} /></div>`;
     }
     return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${roAttr} /></div>`;
   }
@@ -441,7 +442,7 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
   }
 
   if (process.env.NODE_ENV !== 'production') {
-    return `<p class="muted">Unsupported node type: ${escapeHtml(type || 'unknown')}</p>`;
+    return '';
   }
 
   return '';

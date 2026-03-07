@@ -1,0 +1,12 @@
+<header class="page-header">
+  <h1><%= title || 'Error' %></h1>
+  <p class="muted">Status: <strong><%= statusCode %></strong></p>
+</header>
+
+<section class="card error-card">
+  <p><%= message || 'An unexpected error occurred.' %></p>
+  <div class="actions">
+    <a class="btn btn-primary" href="<%= backHref %>">Back</a>
+    <a class="btn btn-secondary" href="/templates">Home</a>
+  </div>
+</section>

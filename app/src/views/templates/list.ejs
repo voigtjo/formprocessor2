@@ -6,30 +6,50 @@
   <a class="btn btn-primary" href="/templates/new">Create Template</a>
 </div>
 
-<% if (!templates || templates.length === 0) { %>
-  <div class="card">
-    <p class="muted">No active templates found.</p>
-  </div>
-<% } %>
-
-<% (templates || []).forEach((tpl) => { %>
-  <div class="card">
-    <div class="row">
-      <div class="col">
-        <strong><%= tpl.name %></strong> (<code><%= tpl.key %></code>)
-      </div>
-      <div class="col">
-        <span class="badge">Version <%= tpl.version %></span>
-        <span class="badge">State <%= tpl.state %></span>
-      </div>
-    </div>
-    <% if (tpl.description) { %>
-      <div class="muted"><%= tpl.description %></div>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Key</th>
+      <th>Published</th>
+      <th>Versions</th>
+      <th>Assigned Groups</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!templates || templates.length === 0) { %>
+      <tr><td colspan="6" class="muted">No templates found.</td></tr>
     <% } %>
-    <div class="actions">
-      <a class="btn btn-secondary" href="/templates/<%= tpl.id %>/preview">Preview</a>
-      <a class="btn btn-secondary" href="/templates/<%= tpl.id %>/edit">Edit JSON</a>
-      <a class="btn btn-primary" href="/documents/new?templateId=<%= tpl.id %>">New Document</a>
-    </div>
-  </div>
-<% }); %>
+    <% (templates || []).forEach((tpl) => { %>
+      <tr>
+        <td><%= tpl.name %></td>
+        <td><code><%= tpl.key %></code></td>
+        <td><span class="badge">v<%= tpl.version %> · <%= tpl.state %></span></td>
+        <td>
+          <% if (tpl.versions && tpl.versions.length > 0) { %>
+            <select onchange="if (this.value) { window.location.href = '/templates/' + this.value + '/edit'; }">
+              <% tpl.versions.forEach((versionItem) => { %>
+                <option value="<%= versionItem.id %>" <%= versionItem.id === tpl.id ? 'selected' : '' %>>
+                  v<%= versionItem.version %> (<%= versionItem.state %>)
+                </option>
+              <% }) %>
+            </select>
+          <% } %>
+        </td>
+        <td>
+          <% if (tpl.assignedGroups && tpl.assignedGroups.length > 0) { %>
+            <%= tpl.assignedGroups.map((g) => `${g.name} (${g.key})`).join(', ') %>
+          <% } else { %>
+            <span class="muted">0</span>
+          <% } %>
+        </td>
+        <td>
+          <a href="/templates/<%= tpl.id %>/preview">Preview</a>
+          · <a href="/templates/<%= tpl.id %>/edit">Edit JSON</a>
+          · <a href="/documents/new?templateId=<%= tpl.id %>">New Doc</a>
+        </td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>

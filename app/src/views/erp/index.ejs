@@ -1,0 +1,150 @@
+<header class="page-header">
+  <h1>ERP Master Data</h1>
+  <p class="muted">Read-only browser for ERP-Sim products, customers, stocks and orders.</p>
+</header>
+
+<section class="card">
+  <div class="actions">
+    <a class="btn <%= selectedTab === 'products' ? 'btn-primary' : 'btn-secondary' %>" href="/erp?tab=products">Products</a>
+    <a class="btn <%= selectedTab === 'customers' ? 'btn-primary' : 'btn-secondary' %>" href="/erp?tab=customers">Customers</a>
+    <a class="btn <%= selectedTab === 'batches' ? 'btn-primary' : 'btn-secondary' %>" href="/erp?tab=batches">Batches</a>
+    <a class="btn <%= selectedTab === 'serial-instances' ? 'btn-primary' : 'btn-secondary' %>" href="/erp?tab=serial-instances">Serial Instances</a>
+    <a class="btn <%= selectedTab === 'customer-orders' ? 'btn-primary' : 'btn-secondary' %>" href="/erp?tab=customer-orders">Customer Orders</a>
+  </div>
+</section>
+
+<section class="card">
+  <h3 class="card-title"><%= selectedTitle %> (<%= totalCount %>)</h3>
+  <% if (selectedTab === 'products' || selectedTab === 'customers') { %>
+    <form method="get" action="/erp" class="row">
+      <input type="hidden" name="tab" value="<%= selectedTab %>" />
+      <div class="col col-6">
+        <label for="filter-valid">valid</label>
+        <select id="filter-valid" name="valid">
+          <option value="" <%= !filters.valid ? 'selected' : '' %>>all</option>
+          <option value="true" <%= filters.valid === 'true' ? 'selected' : '' %>>true</option>
+          <option value="false" <%= filters.valid === 'false' ? 'selected' : '' %>>false</option>
+        </select>
+      </div>
+      <div class="col">
+        <button class="btn btn-secondary" type="submit">Apply Filters</button>
+      </div>
+    </form>
+  <% } %>
+
+  <% if (selectedTab === 'batches' || selectedTab === 'serial-instances') { %>
+    <form method="get" action="/erp" class="row">
+      <input type="hidden" name="tab" value="<%= selectedTab %>" />
+      <div class="col col-6">
+        <label for="filter-status">status</label>
+        <select id="filter-status" name="status">
+          <option value="ordered" <%= filters.status === 'ordered' ? 'selected' : '' %>>ordered</option>
+          <option value="produced" <%= filters.status === 'produced' ? 'selected' : '' %>>produced</option>
+          <option value="validated" <%= filters.status === 'validated' ? 'selected' : '' %>>validated</option>
+        </select>
+      </div>
+      <div class="col col-6">
+        <label for="filter-product-id">product_id</label>
+        <select id="filter-product-id" name="product_id">
+          <option value="">Select product...</option>
+          <% (productOptions || []).forEach((item) => { %>
+            <option value="<%= item.id %>" <%= filters.product_id === item.id ? 'selected' : '' %>><%= item.name %> (<%= item.id %>)</option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col">
+        <button class="btn btn-secondary" type="submit">Apply Filters</button>
+      </div>
+    </form>
+  <% } %>
+
+  <% if (selectedTab === 'customer-orders') { %>
+    <form method="get" action="/erp" class="row">
+      <input type="hidden" name="tab" value="<%= selectedTab %>" />
+      <div class="col col-6">
+        <label for="filter-status">status</label>
+        <select id="filter-status" name="status">
+          <option value="received" <%= filters.status === 'received' ? 'selected' : '' %>>received</option>
+          <option value="offer_created" <%= filters.status === 'offer_created' ? 'selected' : '' %>>offer_created</option>
+          <option value="completed" <%= filters.status === 'completed' ? 'selected' : '' %>>completed</option>
+        </select>
+      </div>
+      <div class="col col-6">
+        <label for="filter-customer-id">customer_id</label>
+        <select id="filter-customer-id" name="customer_id">
+          <option value="">Select customer...</option>
+          <% (customerOptions || []).forEach((item) => { %>
+            <option value="<%= item.id %>" <%= filters.customer_id === item.id ? 'selected' : '' %>><%= item.name %> (<%= item.id %>)</option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col">
+        <button class="btn btn-secondary" type="submit">Apply Filters</button>
+      </div>
+    </form>
+  <% } %>
+
+  <% if (fetchError) { %>
+    <div class="error-card card">
+      <strong>Failed loading ERP data:</strong> <%= fetchError %>
+    </div>
+  <% } %>
+  <% if (hintMessage) { %>
+    <div class="card">
+      <p class="muted"><%= hintMessage %></p>
+    </div>
+  <% } %>
+
+  <table>
+    <thead>
+      <tr>
+        <% columns.forEach((column) => { %>
+          <th><%= column %></th>
+        <% }) %>
+        <% if (selectedTab === 'products') { %>
+          <th>Links</th>
+        <% } %>
+      </tr>
+    </thead>
+    <tbody>
+      <% if (items.length === 0) { %>
+        <tr>
+          <td colspan="<%= columns.length + (selectedTab === 'products' ? 1 : 0) %>" class="muted">No rows.</td>
+        </tr>
+      <% } %>
+      <% items.forEach((item) => { %>
+        <tr>
+          <% columns.forEach((column) => { %>
+            <td><%= item[column] ?? '—' %></td>
+          <% }) %>
+          <% if (selectedTab === 'products') { %>
+            <td>
+              <%
+                const type = String(item.product_type || '').toLowerCase();
+                const pid = item.id ? String(item.id) : '';
+                const isBatch = type.includes('batch');
+                const isSerial = type.includes('serial');
+              %>
+              <% if (pid) { %>
+                <% if (isBatch || (!isBatch && !isSerial)) { %>
+                  <a href="/erp?tab=batches&product_id=<%= encodeURIComponent(pid) %>">batches</a>
+                <% } %>
+                <% if ((isBatch || (!isBatch && !isSerial)) && (isSerial || (!isBatch && !isSerial))) { %> · <% } %>
+                <% if (isSerial || (!isBatch && !isSerial)) { %>
+                  <a href="/erp?tab=serial-instances&product_id=<%= encodeURIComponent(pid) %>">serial instances</a>
+                <% } %>
+              <% } else { %>
+                —
+              <% } %>
+            </td>
+          <% } %>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>
+
+<div class="actions">
+  <a class="btn btn-secondary" href="/admin">Administration</a>
+  <a class="btn btn-secondary" href="<%= erpBaseUrl %>/api/products" target="_blank" rel="noreferrer">Open ERP API</a>
+</div>

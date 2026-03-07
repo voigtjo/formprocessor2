@@ -16,11 +16,19 @@ A template defines:
 
 Templates are stored as JSON and edited via a JSON editor UI (P0).
 
+Template versioning:
+- templates are versioned by `(key, version)` (unique)
+- `state` is one of `draft | published | archived`
+- `published_at` is set when a version is published
+- document creation is allowed only from `published` template versions
+
 ### Document (process instance)
 A document is created from a template.
 
 - `status` – current workflow state (**single source of truth** for process status)
 - `group_id` – optional RBAC context of the document (derived from template assignment at create time)
+- `assignee_user_id` – optional current assignee user id (workplace task context)
+- `reviewer_user_id` – optional current reviewer user id (workplace task context)
 - `data_json` – field values
 - `external_refs_json` – IDs referencing ERP entities
 - `snapshots_json` – copied display values (names/numbers) for stable display even if ERP changes
@@ -45,6 +53,17 @@ Status source-of-truth rule:
 ### Workflow rules (P0)
 - Status controls which fields are visible and/or readonly.
 - Button availability depends on current status.
+- workflow/system fields `assignee_user_id` and `reviewer_user_id` are supported for task routing.
+  - values are stored in document columns (`fp_documents.assignee_user_id`, `fp_documents.reviewer_user_id`)
+  - they are not persisted in `data_json`
+
+### Workplaces (P0)
+- Group workplace: `/workspaces/groups/:groupId`
+  - shows templates assigned to group
+  - shows documents in group with assignee/reviewer/status buckets
+- User workspace: `/workspaces/me`
+  - shows current user group memberships
+  - shows current user tasks (assignee or reviewer, excluding approved)
 
 ### External side effects
 Actions can call ERP-Sim endpoints (e.g. patch movement status).

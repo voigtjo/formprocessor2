@@ -28,6 +28,11 @@
       <strong>Unassigned template</strong>
     </div>
   <% } %>
+  <% if (assignedGroupName) { %>
+    <div class="card">
+      <p class="muted">Group: <strong><%= assignedGroupName %></strong></p>
+    </div>
+  <% } %>
   <% if (groupChosenNote) { %>
     <div class="card">
       <p class="muted"><%= groupChosenNote %></p>

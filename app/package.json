@@ -10,8 +10,8 @@
     "test": "vitest run",
     "seed": "tsx src/db/seed.ts",
     "seed:rbac": "tsx src/db/seed.ts",
-    "db:generate": "drizzle-kit generate",
-    "db:push": "drizzle-kit push"
+    "db:generate": "DOTENV_CONFIG_PATH=../.env drizzle-kit generate",
+    "db:push": "DOTENV_CONFIG_PATH=../.env drizzle-kit push"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.2",

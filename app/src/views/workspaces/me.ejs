@@ -1,0 +1,60 @@
+<header class="page-header">
+  <h1>My Workspace</h1>
+</header>
+
+<h3>My Groups</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Group</th>
+      <th>Key</th>
+      <th>Rights</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!memberships || memberships.length === 0) { %>
+      <tr><td colspan="4" class="muted">No group memberships.</td></tr>
+    <% } %>
+    <% (memberships || []).forEach((item) => { %>
+      <tr>
+        <td><%= item.groupName %></td>
+        <td><code><%= item.groupKey %></code></td>
+        <td><code><%= item.rights %></code></td>
+        <td><a href="/workspaces/groups/<%= item.groupId %>">Open Group Workspace</a></td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>
+
+<h3>My Tasks</h3>
+<% if (tasksUnavailableMessage) { %>
+  <p class="muted"><%= tasksUnavailableMessage %></p>
+<% } %>
+<table>
+  <thead>
+    <tr>
+      <th>Created</th>
+      <th>Group</th>
+      <th>Template</th>
+      <th>Status</th>
+      <th>Role</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!tasks || tasks.length === 0) { %>
+      <tr><td colspan="6" class="muted">No open tasks.</td></tr>
+    <% } %>
+    <% (tasks || []).forEach((doc) => { %>
+      <tr>
+        <td><%= new Date(doc.createdAt).toLocaleString() %></td>
+        <td><%= doc.groupName || '—' %></td>
+        <td><%= doc.templateName %> (<code><%= doc.templateKey %></code>)</td>
+        <td><span class="badge badge-status"><%= doc.status %></span></td>
+        <td><%= doc.role %></td>
+        <td><a href="/documents/<%= doc.id %>">Open</a></td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>

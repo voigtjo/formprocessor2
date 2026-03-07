@@ -32,6 +32,7 @@ Layout buttons are `ui` buttons and are restricted to UI-safe actions only.
 Supported step types:
 - `setStatus` (`to` or `status`)
 - `setField` (`key`, `value`)
+- `requireField` (`key`, optional `message`) for friendly precondition checks
 - `callExternal` (`service`, `method`, `path`, `body`)
 
 UI button restrictions:

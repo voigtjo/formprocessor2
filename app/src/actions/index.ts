@@ -10,6 +10,7 @@ export type ActionContext = {
 export type ActionStep =
   | { type: 'setStatus'; to?: string; status?: string }
   | { type: 'setField'; key: string; value: unknown }
+  | { type: 'requireField'; key: string; message?: string }
   | {
       type: 'callExternal';
       service: string;
@@ -294,6 +295,19 @@ export async function executeActionDefinition(params: {
         throw new Error('setField step is missing "key"');
       }
       nextData[step.key] = interpolateValue(step.value, actionContext);
+      continue;
+    }
+
+    if (step.type === 'requireField') {
+      if (!step.key) {
+        throw new Error('requireField step is missing "key"');
+      }
+      const value = actionContext.data[step.key];
+      const missing =
+        value === undefined || value === null || (typeof value === 'string' && value.trim().length === 0);
+      if (missing) {
+        throw new Error(step.message || `Missing required field: ${step.key}`);
+      }
       continue;
     }
 
