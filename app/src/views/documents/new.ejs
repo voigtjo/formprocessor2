@@ -1,9 +1,47 @@
-<h1>New Document: <%= template.name %></h1>
+<% if (!template) { %>
+  <header class="page-header">
+    <h1>New Document</h1>
+  </header>
+  <form method="get" action="/documents/new" class="card">
+    <div class="row">
+      <div class="col col-6">
+        <label for="templateId">Template</label>
+        <select id="templateId" name="templateId" required>
+          <option value="">Please choose...</option>
+          <% (templates || []).forEach((tpl) => { %>
+            <option value="<%= tpl.id %>" <%= selectedTemplateId === tpl.id ? 'selected' : '' %>><%= tpl.name %> (<%= tpl.key %>)</option>
+          <% }) %>
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" type="submit">Create</button>
+      <a class="btn btn-secondary" href="/templates">Back to Templates</a>
+    </div>
+  </form>
+<% } else { %>
+  <header class="page-header">
+    <h1>New Document: <%= template.name %></h1>
+  </header>
+  <% if (unassignedTemplateWarning) { %>
+    <div class="card warning-card">
+      <strong>Unassigned template</strong>
+    </div>
+  <% } %>
+  <% if (groupChosenNote) { %>
+    <div class="card">
+      <p class="muted"><%= groupChosenNote %></p>
+    </div>
+  <% } %>
 
-<form id="doc-form" method="post" action="/documents">
-  <input type="hidden" name="templateId" value="<%= template.id %>" />
+  <form id="doc-form" method="post" action="/documents" class="card">
+    <input type="hidden" name="templateId" value="<%= template.id %>" />
 
-  <%- layoutHtml %>
+    <%- layoutHtml %>
 
-  <button type="submit">Create Document</button>
-</form>
+    <div class="actions">
+      <button class="btn btn-primary" type="submit">Create Document</button>
+      <a class="btn btn-secondary" href="/templates">Back to Templates</a>
+    </div>
+  </form>
+<% } %>

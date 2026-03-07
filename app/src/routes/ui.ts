@@ -121,6 +121,9 @@ type TemplateField = {
   kind?: string;
   label?: string;
   multiline?: boolean;
+  ui?: {
+    input?: 'text' | 'date' | 'checkbox';
+  };
   source?: {
     path?: string;
     query?: Record<string, unknown>;
@@ -140,6 +143,7 @@ type TemplateField = {
 
 type PermissionName = 'read' | 'write' | 'execute';
 type CurrentUser = { id: string; username: string; displayName: string };
+type LayoutButtonKind = 'ui' | 'process';
 
 const starterTemplate = {
   fields: {
@@ -202,6 +206,23 @@ function buildUserCookie(userId: string) {
   return `fp_user=${encodeURIComponent(userId)}; Path=/; HttpOnly; SameSite=Lax`;
 }
 
+function parseCookies(cookieHeader: string | undefined) {
+  if (!cookieHeader) return {} as Record<string, string>;
+  return Object.fromEntries(
+    cookieHeader
+      .split(';')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const eqIndex = part.indexOf('=');
+        if (eqIndex === -1) return [part, ''];
+        const key = part.slice(0, eqIndex);
+        const value = decodeURIComponent(part.slice(eqIndex + 1));
+        return [key, value];
+      })
+  );
+}
+
 function compactRequiredRights(requires: PermissionName[]) {
   const map: Record<PermissionName, string> = {
     read: 'r',
@@ -211,6 +232,12 @@ function compactRequiredRights(requires: PermissionName[]) {
   const rights = new Set<string>();
   for (const item of requires) rights.add(map[item]);
   return Array.from(rights).sort().join('');
+}
+
+function describeRequiredRights(requires: PermissionName[]) {
+  const letters = compactRequiredRights(requires);
+  const names = requires.join('/');
+  return `${names} (${letters})`;
 }
 
 function hasRequiredRights(userRights: string, requires: PermissionName[]) {
@@ -229,6 +256,76 @@ function resolveActionPermissionRequirements(templateJson: TemplateJson, control
   const actionRequires = byActionMap[actionKey]?.requires;
   const source = Array.isArray(controlRequires) ? controlRequires : Array.isArray(actionRequires) ? actionRequires : [];
   return source.filter((item): item is PermissionName => item === 'read' || item === 'write' || item === 'execute');
+}
+
+function resolveControlKeyFromAction(templateJson: TemplateJson, action: string) {
+  const controls = ((templateJson as any).controls ?? {}) as Record<string, { action?: string }>;
+  if (controls[action]) return action;
+
+  for (const [controlKey, config] of Object.entries(controls)) {
+    if (config?.action === action) {
+      return controlKey;
+    }
+  }
+
+  return action;
+}
+
+function collectLayoutButtonKinds(templateJson: TemplateJson) {
+  const byControlKey = new Map<string, LayoutButtonKind>();
+
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    const n = node as Record<string, unknown>;
+
+    if (n.type === 'button') {
+      const key = typeof n.key === 'string' ? n.key : '';
+      const action = typeof n.action === 'string' ? n.action : '';
+      const kind: LayoutButtonKind = n.kind === 'process' ? 'process' : 'ui';
+      const resolvedControl = action ? resolveControlKeyFromAction(templateJson, action) : key;
+      const candidates = [key, resolvedControl].filter((item): item is string => !!item);
+      for (const candidate of candidates) {
+        if (!byControlKey.has(candidate)) {
+          byControlKey.set(candidate, kind);
+        }
+      }
+    }
+
+    if (Array.isArray(n.children)) {
+      for (const child of n.children) visit(child);
+    }
+  };
+
+  const layout = (templateJson as any).layout;
+  if (Array.isArray(layout)) {
+    for (const node of layout) visit(node);
+  }
+
+  return byControlKey;
+}
+
+function normalizeActionSteps(actionDef: unknown): Array<Record<string, unknown>> {
+  if (!actionDef || typeof actionDef !== 'object') return [];
+  const def = actionDef as Record<string, unknown>;
+  const nestedSteps = def.steps;
+  if (Array.isArray(nestedSteps)) {
+    return nestedSteps.filter((step): step is Record<string, unknown> => !!step && typeof step === 'object');
+  }
+  return [def];
+}
+
+function isUiSafeActionDefinition(actionDef: unknown) {
+  const allowedMacros = new Set(['reloadLookup', 'noop', 'showToast']);
+  const steps = normalizeActionSteps(actionDef);
+  if (steps.length === 0) return false;
+
+  for (const step of steps) {
+    if (step.type !== 'macro') return false;
+    const macroName = typeof step.name === 'string' ? step.name : '';
+    if (!allowedMacros.has(macroName)) return false;
+  }
+
+  return true;
 }
 
 async function loadTemplateAssignmentView(db: FpDb, templateId: string) {
@@ -310,12 +407,18 @@ export async function ensureErpCustomerOrderReference(params: {
 function layoutFieldKeysFromNodes(layout: unknown): string[] {
   if (!Array.isArray(layout)) return [];
   const keys: string[] = [];
-  for (const node of layout) {
-    if (node && typeof node === 'object' && (node as any).type === 'field') {
-      const key = (node as any).key;
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    const record = node as Record<string, unknown>;
+    if (record.type === 'field') {
+      const key = record.key;
       if (typeof key === 'string' && key.length > 0) keys.push(key);
     }
-  }
+    if (Array.isArray(record.children)) {
+      for (const child of record.children) visit(child);
+    }
+  };
+  for (const node of layout) visit(node);
   return keys;
 }
 
@@ -383,6 +486,20 @@ function getFormString(body: Record<string, unknown>, key: string) {
   return '';
 }
 
+function resolveEditableInputType(field: TemplateField): 'text' | 'date' | 'checkbox' {
+  const input = field.ui?.input;
+  return input === 'date' || input === 'checkbox' ? input : 'text';
+}
+
+function resolveEditableFormValue(form: Record<string, unknown>, field: TemplateField, fieldKey: string) {
+  const formKey = `data:${fieldKey}`;
+  const inputType = resolveEditableInputType(field);
+  if (inputType === 'checkbox') {
+    return Object.prototype.hasOwnProperty.call(form, formKey) ? 'true' : 'false';
+  }
+  return getFormString(form, formKey);
+}
+
 function escapeHtml(value: string) {
   return value
     .replaceAll('&', '&amp;')
@@ -426,6 +543,18 @@ function resolveLookupFieldNames(field: TemplateField) {
   return { valueField, labelField };
 }
 
+function sanitizeStatusSourceOfTruthData(data: Record<string, unknown>) {
+  if (!Object.prototype.hasOwnProperty.call(data, 'status')) return data;
+  const { status: _ignored, ...rest } = data;
+  return rest;
+}
+
+function sanitizeStatusSourceOfTruthExternalRefs(externalRefs: Record<string, unknown>) {
+  if (!Object.prototype.hasOwnProperty.call(externalRefs, 'status')) return externalRefs;
+  const { status: _ignored, ...rest } = externalRefs;
+  return rest;
+}
+
 function allEditableFieldKeys(templateJson: TemplateJson) {
   return Object.entries(templateJson.fields)
     .filter(([, field]) => (field as TemplateField)?.kind === 'editable')
@@ -443,15 +572,23 @@ export function resolveEditableFieldKeys(templateJson: TemplateJson, status: str
 }
 
 export function applyEditableDataUpdate(
+  templateJson: TemplateJson,
   currentData: Record<string, unknown>,
   form: Record<string, unknown>,
   editableKeys: string[]
 ) {
   const next = { ...currentData };
   for (const key of editableKeys) {
+    const field = templateJson.fields[key] as TemplateField | undefined;
+    if (!field || field.kind !== 'editable') continue;
     const formKey = `data:${key}`;
+    const inputType = resolveEditableInputType(field);
+    if (inputType === 'checkbox') {
+      next[key] = resolveEditableFormValue(form, field, key);
+      continue;
+    }
     if (Object.prototype.hasOwnProperty.call(form, formKey)) {
-      next[key] = getFormString(form, formKey);
+      next[key] = resolveEditableFormValue(form, field, key);
     }
   }
   return next;
@@ -477,10 +614,12 @@ async function renderDocumentDetailPage(params: {
   document: {
     id: string;
     status: string;
+    groupId?: string | null;
     dataJson: unknown;
     externalRefsJson: unknown;
     snapshotsJson: unknown;
   };
+  groupName?: string | null;
   errorMessage?: string;
 }) {
   const templateJson = parseTemplateJson(params.template.templateJson);
@@ -495,6 +634,7 @@ async function renderDocumentDetailPage(params: {
     templateJson,
     templateId: params.template.id,
     documentId: params.document.id,
+    documentStatus: params.document.status,
     dataJson: (params.document.dataJson ?? {}) as Record<string, unknown>,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
     snapshotsJson: (params.document.snapshotsJson ?? {}) as Record<string, unknown>,
@@ -507,12 +647,35 @@ async function renderDocumentDetailPage(params: {
     templateJson,
     layoutHtml,
     buttonKeys,
+    groupName: params.groupName ?? null,
     errorMessage: params.errorMessage,
     document: params.document,
     dataJson: (params.document.dataJson ?? {}) as Record<string, unknown>,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
     snapshotsJson: (params.document.snapshotsJson ?? {}) as Record<string, unknown>
   });
+}
+
+async function resolveTemplateAssignmentContext(db: FpDb, templateId: string) {
+  const assignments = await db.query.fpTemplateAssignments.findMany({
+    where: eq(fpTemplateAssignments.templateId, templateId)
+  });
+  const chosenGroupId = assignments[0]?.groupId ?? null;
+  const hasMultipleAssignments = assignments.length > 1;
+  const chosenGroupName = chosenGroupId ? await resolveGroupName(db, chosenGroupId) : null;
+  return {
+    chosenGroupId,
+    chosenGroupName,
+    hasMultipleAssignments,
+    isUnassigned: assignments.length === 0
+  };
+}
+
+async function resolveGroupName(db: FpDb, groupId?: string | null) {
+  if (!groupId) return null;
+  if (!(db as any).query?.fpGroups?.findFirst) return null;
+  const group = await db.query.fpGroups.findFirst({ where: eq(fpGroups.id, groupId) });
+  return group?.name ?? null;
 }
 
 export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
@@ -552,6 +715,110 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const redirectTo = next || referer || '/templates';
     reply.code(303);
     return reply.redirect(redirectTo);
+  });
+
+  app.get('/admin/debug', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+
+    const users = await db
+      .select({
+        id: fpUsers.id,
+        username: fpUsers.username,
+        displayName: fpUsers.displayName,
+        createdAt: fpUsers.createdAt
+      })
+      .from(fpUsers)
+      .orderBy(asc(fpUsers.username));
+
+    const groups = await db
+      .select({
+        id: fpGroups.id,
+        key: fpGroups.key,
+        name: fpGroups.name,
+        createdAt: fpGroups.createdAt
+      })
+      .from(fpGroups)
+      .orderBy(asc(fpGroups.name));
+
+    const memberships = await db
+      .select({
+        id: fpGroupMembers.id,
+        groupId: fpGroupMembers.groupId,
+        userId: fpGroupMembers.userId,
+        rights: fpGroupMembers.rights,
+        createdAt: fpGroupMembers.createdAt
+      })
+      .from(fpGroupMembers)
+      .orderBy(asc(fpGroupMembers.groupId), asc(fpGroupMembers.userId));
+
+    const assignments = await db
+      .select({
+        id: fpTemplateAssignments.id,
+        templateId: fpTemplateAssignments.templateId,
+        groupId: fpTemplateAssignments.groupId,
+        createdAt: fpTemplateAssignments.createdAt
+      })
+      .from(fpTemplateAssignments)
+      .orderBy(desc(fpTemplateAssignments.createdAt));
+
+    const templates = await db
+      .select({
+        id: fpTemplates.id,
+        key: fpTemplates.key,
+        name: fpTemplates.name
+      })
+      .from(fpTemplates)
+      .orderBy(asc(fpTemplates.name));
+
+    const latestDocuments = await db
+      .select({
+        id: fpDocuments.id,
+        templateId: fpDocuments.templateId,
+        groupId: fpDocuments.groupId,
+        status: fpDocuments.status,
+        createdAt: fpDocuments.createdAt
+      })
+      .from(fpDocuments)
+      .orderBy(desc(fpDocuments.createdAt))
+      .limit(25);
+
+    const usersById = new Map(users.map((item) => [item.id, item]));
+    const groupsById = new Map(groups.map((item) => [item.id, item]));
+    const templatesById = new Map(templates.map((item) => [item.id, item]));
+
+    const membershipRows = memberships.map((item) => ({
+      ...item,
+      username: usersById.get(item.userId)?.username ?? '—',
+      groupKey: groupsById.get(item.groupId)?.key ?? '—'
+    }));
+
+    const assignmentRows = assignments.map((item) => ({
+      ...item,
+      groupKey: groupsById.get(item.groupId)?.key ?? '—',
+      templateKey: templatesById.get(item.templateId)?.key ?? '—',
+      templateName: templatesById.get(item.templateId)?.name ?? '—'
+    }));
+
+    const documentRows = latestDocuments.map((item) => ({
+      ...item,
+      templateKey: templatesById.get(item.templateId)?.key ?? '—',
+      groupKey: item.groupId ? groupsById.get(item.groupId)?.key ?? '—' : '—'
+    }));
+
+    const rawCookieHeader = request.headers.cookie ?? '';
+    const cookieUser = parseCookies(rawCookieHeader).fp_user ?? '';
+
+    await reply.renderPage('admin/debug.ejs', {
+      users,
+      groups,
+      memberships: membershipRows,
+      assignments: assignmentRows,
+      latestDocuments: documentRows,
+      activeUser: request.currentUser ?? null,
+      activeUserCookie: cookieUser
+    });
   });
 
   app.get('/templates', async (_req, reply) => {
@@ -813,8 +1080,16 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const query = toFormRecord(request.query);
     const templateId = getFormString(query, 'templateId');
     if (!templateId) {
-      reply.code(303);
-      return reply.redirect('/templates?error=Please%20select%20a%20template%20first');
+      const templates = await db.query.fpTemplates.findMany({
+        where: eq(fpTemplates.state, 'active'),
+        orderBy: asc(fpTemplates.name)
+      });
+
+      await reply.renderPage('documents/new.ejs', {
+        templates,
+        selectedTemplateId: ''
+      });
+      return;
     }
 
     const queryParsed = templateIdQuerySchema.safeParse({ templateId });
@@ -828,12 +1103,25 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const templateJson = parseTemplateJson(template.templateJson);
-    const layoutHtml = renderLayout({ mode: 'new', templateJson, templateId: template.id });
+    const assignmentContext = await resolveTemplateAssignmentContext(db, template.id);
+    const layoutHtml = renderLayout({
+      mode: 'new',
+      templateJson,
+      templateId: template.id,
+      documentStatus: templateJson.workflow.initial
+    });
 
     await reply.renderPage('documents/new.ejs', {
       template,
       templateJson,
-      layoutHtml
+      layoutHtml,
+      templates: [],
+      selectedTemplateId: template.id,
+      unassignedTemplateWarning: assignmentContext.isUnassigned,
+      groupChosenNote:
+        assignmentContext.hasMultipleAssignments && assignmentContext.chosenGroupName
+          ? `Group chosen: ${assignmentContext.chosenGroupName}`
+          : ''
     });
   });
 
@@ -874,6 +1162,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const templateJson = parseTemplateJson(template.templateJson);
+    const assignmentContext = await resolveTemplateAssignmentContext(db, template.id);
     const externalRefs: Record<string, string> = {};
     const snapshots: Record<string, string> = {};
     const data: Record<string, string> = {};
@@ -906,7 +1195,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       }
 
       if (field.kind === 'editable') {
-        data[fieldKey] = getFormString(form, `data:${fieldKey}`);
+        data[fieldKey] = resolveEditableFormValue(form, field, fieldKey);
       }
     }
 
@@ -928,6 +1217,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       .values({
         templateId,
         status: templateJson.workflow.initial,
+        groupId: assignmentContext.chosenGroupId,
         dataJson: data,
         externalRefsJson: externalRefs,
         snapshotsJson: snapshots
@@ -954,10 +1244,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(404).send({ message: 'Template not found' });
     }
 
+    const groupName = await resolveGroupName(db, document.groupId ?? null);
+
     await renderDocumentDetailPage({
       reply,
       template,
-      document
+      document,
+      groupName
     });
   });
 
@@ -980,10 +1273,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const templateJson = parseTemplateJson(template.templateJson);
     const form = toFormRecord(request.body);
     const editableKeys = resolveEditableFieldKeys(templateJson, document.status);
-    const nextDataJson = applyEditableDataUpdate(
-      (document.dataJson ?? {}) as Record<string, unknown>,
-      form,
-      editableKeys
+    const nextDataJson = sanitizeStatusSourceOfTruthData(
+      applyEditableDataUpdate(templateJson, (document.dataJson ?? {}) as Record<string, unknown>, form, editableKeys)
     );
 
     await db
@@ -1022,14 +1313,29 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const templateJson = parseTemplateJson(template.templateJson);
+    const groupName = await resolveGroupName(db, document.groupId ?? null);
+    const query = toFormRecord(request.query);
+    const source = getFormString(query, 'source');
+    const isUiButtonRequest = source === 'ui';
+    const layoutButtonKinds = isUiButtonRequest ? collectLayoutButtonKinds(templateJson) : null;
+    const layoutButtonKind = isUiButtonRequest ? layoutButtonKinds?.get(paramsParsed.data.controlKey) : null;
+
+    if (isUiButtonRequest && !layoutButtonKind) {
+      return reply.status(400).send({ message: 'UI button is not configured in layout.' });
+    }
+    if (isUiButtonRequest && layoutButtonKind === 'process') {
+      return reply.status(400).send({ message: 'UI button cannot execute process action' });
+    }
+
     const stateDef = (templateJson.workflow as any)?.states?.[document.status];
     const allowedButtons = Array.isArray(stateDef?.buttons) ? stateDef.buttons : [];
 
-    if (!allowedButtons.includes(paramsParsed.data.controlKey)) {
+    if (!isUiButtonRequest && !allowedButtons.includes(paramsParsed.data.controlKey)) {
       await renderDocumentDetailPage({
         reply,
         template,
         document,
+        groupName,
         errorMessage: 'Control is not allowed in the current status.'
       });
       return;
@@ -1042,46 +1348,43 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         reply,
         template,
         document,
+        groupName,
         errorMessage: 'Control action is not configured.'
       });
       return;
     }
 
-    const assignments = await db.query.fpTemplateAssignments.findMany({
-      where: eq(fpTemplateAssignments.templateId, template.id)
-    });
-    const assignment = assignments[0];
-    if (assignment) {
+    const required = resolveActionPermissionRequirements(templateJson, paramsParsed.data.controlKey, actionKey);
+    if (required.length > 0) {
       const currentUser = request.currentUser as CurrentUser | null;
       if (!currentUser) {
-        return reply.status(403).send({ message: 'No active user selected' });
+        return reply.status(403).send({ message: 'No active user. Go to /admin/debug or use the user dropdown.' });
       }
 
-      const groupMembers = await db.query.fpGroupMembers.findMany({
-        where: eq(fpGroupMembers.groupId, assignment.groupId)
-      });
-      const membership = groupMembers.find((item) => item.userId === currentUser.id);
+      if (document.groupId) {
+        const groupMembers = await db.query.fpGroupMembers.findMany({
+          where: eq(fpGroupMembers.groupId, document.groupId)
+        });
+        const membership = groupMembers.find((item) => item.userId === currentUser.id);
+        const userRights = membership?.rights ?? '';
 
-      if (!membership) {
-        return reply.status(403).send({ message: 'Not a member of assigned group' });
-      }
-
-      const required = resolveActionPermissionRequirements(templateJson, paramsParsed.data.controlKey, actionKey);
-      if (required.length > 0 && !hasRequiredRights(membership.rights, required)) {
-        const requiredCompact = compactRequiredRights(required);
-        return reply
-          .status(403)
-          .send({ message: `Missing rights. Required: ${requiredCompact}. User rights: ${membership.rights}` });
+        if (!membership || !hasRequiredRights(userRights, required)) {
+          return reply.status(403).send({
+            message: `Forbidden: requires ${describeRequiredRights(required)}, user has ${userRights || '-'}`
+          });
+        }
       }
     }
 
     const form = toFormRecord(request.body);
     const editableKeys = resolveEditableFieldKeys(templateJson, document.status);
-    const nextDataJson = applyEditableDataUpdate(
-      (document.dataJson ?? {}) as Record<string, unknown>,
-      form,
-      editableKeys
+    const nextDataJson = sanitizeStatusSourceOfTruthData(
+      applyEditableDataUpdate(templateJson, (document.dataJson ?? {}) as Record<string, unknown>, form, editableKeys)
     );
+
+    if (isUiButtonRequest && actionKey === 'save') {
+      return reply.status(400).send({ message: 'UI button cannot execute process action' });
+    }
 
     if (actionKey === 'save') {
       await db
@@ -1102,9 +1405,14 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         reply,
         template,
         document,
+        groupName,
         errorMessage: `Action "${actionKey}" is not defined.`
       });
       return;
+    }
+
+    if (isUiButtonRequest && !isUiSafeActionDefinition(actionDef)) {
+      return reply.status(400).send({ message: 'UI button cannot execute process action' });
     }
 
     try {
@@ -1130,8 +1438,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           .update(fpDocuments)
           .set({
             status: result.status,
-            dataJson: result.dataJson,
-            externalRefsJson: result.externalRefsJson,
+            dataJson: sanitizeStatusSourceOfTruthData(result.dataJson),
+            externalRefsJson: sanitizeStatusSourceOfTruthExternalRefs(result.externalRefsJson),
             snapshotsJson: result.snapshotsJson
           })
           .where(eq(fpDocuments.id, document.id));
@@ -1148,6 +1456,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         reply,
         template,
         document,
+        groupName,
         errorMessage: message
       });
       return;

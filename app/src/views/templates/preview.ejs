@@ -1,6 +1,13 @@
-<h1>Template Preview: <%= template.name %></h1>
-<p class="muted"><code><%= template.key %></code></p>
+<header class="page-header">
+  <h1>Template Preview: <%= template.name %></h1>
+  <p class="muted"><code><%= template.key %></code></p>
+</header>
 
-<%- layoutHtml %>
+<div class="card">
+  <%- layoutHtml %>
+</div>
 
-<p><a href="/documents/new?templateId=<%= template.id %>">Start New Document</a></p>
+<div class="actions">
+  <a class="btn btn-primary" href="/documents/new?templateId=<%= template.id %>">Start New Document</a>
+  <a class="btn btn-secondary" href="/templates">Back to Templates</a>
+</div>

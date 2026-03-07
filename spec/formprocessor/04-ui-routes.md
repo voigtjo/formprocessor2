@@ -21,11 +21,14 @@ UI stack: EJS + HTMX (SSR).
 ## Document pages
 
 - `GET /documents`
-- `GET /documents/new?templateId=<uuid>`
+- `GET /documents/new`
+  - without `templateId`: shows wizard template dropdown (active templates only)
+  - with `templateId`: shows document form for selected template
 - `POST /documents`
 - `GET /documents/:id`
 - `POST /documents/:id/save`
 - `POST /documents/:id/action/:controlKey`
+  - supports `?source=ui` for layout button requests
 
 ## Lookup endpoint
 
@@ -43,5 +46,21 @@ Both resolve through `controls` -> `actions` and execute via the same action rou
 ## Current P0 behavior notes
 
 - document create stores `data_json`, `external_refs_json`, `snapshots_json`
+- document create requires `templateId`; missing/invalid templateId returns `400`
+- document create resolves template assignment and sets `fp_documents.group_id`:
+  - first assigned group is used (P0)
+  - if template is unassigned, `group_id` remains `null` and UI shows `Unassigned template`
 - if `erp_customer_order_id` system field exists, app creates ERP customer order and stores its refs/snapshot
 - action errors re-render detail with message (no expected hard 500)
+- workflow `status` field is display-only/read-only and renders from `fp_documents.status` as the canonical status value
+- `source=ui` action requests are restricted to UI-safe actions (e.g. `reloadLookup` macro), process steps return `400`
+
+## UI design classes (P0 mini design system)
+
+Global stylesheet: `/public/styles.css`
+
+- layout: `.container`, `.page-header`, `.card`
+- layout grid: `.row`, `.col`, `.col-6`
+- actions: `.btn`, `.btn-primary`, `.btn-secondary`, `.btn-danger`
+- badges: `.badge`, `.badge-status`
+- text/helper: `.muted`

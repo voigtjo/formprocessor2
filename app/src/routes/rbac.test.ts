@@ -21,12 +21,16 @@ function parseCookie(cookieHeader: string | undefined) {
 }
 
 function createMockDb(rightsForAlice = 'rwx', rightsForBob = 'r') {
+  const opsGroupId = '00000000-0000-0000-0000-0000000000g1';
+  const updates: Array<{ status?: string }> = [];
   return {
+    __updates: updates,
     query: {
       fpDocuments: {
         findFirst: async () => ({
           id: '00000000-0000-0000-0000-0000000000d1',
           templateId: '00000000-0000-0000-0000-0000000000t1',
+          groupId: opsGroupId,
           status: 'Started',
           dataJson: {},
           externalRefsJson: {},
@@ -70,21 +74,30 @@ function createMockDb(rightsForAlice = 'rwx', rightsForBob = 'r') {
           {
             id: '00000000-0000-0000-0000-0000000000as',
             templateId: '00000000-0000-0000-0000-0000000000t1',
-            groupId: '00000000-0000-0000-0000-0000000000g1'
+            groupId: opsGroupId
           }
         ]
       },
       fpGroupMembers: {
         findMany: async () => [
-          { id: 'm1', groupId: 'g1', userId: alice.id, rights: rightsForAlice },
-          { id: 'm2', groupId: 'g1', userId: bob.id, rights: rightsForBob }
+          { id: 'm1', groupId: opsGroupId, userId: alice.id, rights: rightsForAlice },
+          { id: 'm2', groupId: opsGroupId, userId: bob.id, rights: rightsForBob }
         ]
       }
     },
     transaction: async (cb: (tx: any) => Promise<void>) => {
       const tx = {
         update: () => ({
-          set: () => ({
+          set: (values: { status?: string }) => {
+            updates.push(values);
+            return {
+              where: async () => {}
+            };
+          },
+          where: async () => {}
+        }),
+        insert: () => ({
+          values: () => ({
             where: async () => {}
           })
         })
@@ -114,7 +127,8 @@ async function createApp(mockDb: any) {
 
 describe('RBAC action permissions', () => {
   it('allows alice (rwx) to execute execute-protected action', async () => {
-    const app = await createApp(createMockDb('rwx', 'r'));
+    const db = createMockDb('rwx', 'r');
+    const app = await createApp(db);
     const res = await app.inject({
       method: 'POST',
       url: '/documents/00000000-0000-0000-0000-0000000000d1/action/approve',
@@ -125,6 +139,7 @@ describe('RBAC action permissions', () => {
     });
 
     expect(res.statusCode).toBe(303);
+    expect(db.__updates.some((item) => item.status === 'Approved')).toBe(true);
     await app.close();
   });
 
@@ -140,9 +155,7 @@ describe('RBAC action permissions', () => {
     });
 
     expect(res.statusCode).toBe(403);
-    expect(res.json().message).toContain('Missing rights');
-    expect(res.json().message).toContain('Required: x');
-    expect(res.json().message).toContain('User rights: r');
+    expect(res.json().message).toContain('Forbidden: requires execute (x), user has r');
     await app.close();
   });
 });

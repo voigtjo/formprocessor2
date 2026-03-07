@@ -4,12 +4,13 @@ import { uiRoutes } from './ui.js';
 
 function createMockDb() {
   let currentStatus = 'Assigned';
+  let currentDataJson: Record<string, unknown> = { status: 'LegacyDataStatus' };
 
   const document = {
     id: '00000000-0000-0000-0000-0000000000d1',
     templateId: '00000000-0000-0000-0000-0000000000t1',
     status: currentStatus,
-    dataJson: {},
+    dataJson: currentDataJson,
     externalRefsJson: {},
     snapshotsJson: {}
   };
@@ -38,6 +39,78 @@ function createMockDb() {
         startAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Started' }] },
         submitAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Submitted' }] },
         approveAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Approved' }] }
+      }
+    }
+  };
+
+  const db = {
+    query: {
+      fpDocuments: {
+        findFirst: async () => ({ ...document, status: currentStatus })
+      },
+      fpTemplates: {
+        findFirst: async () => template
+      },
+      fpTemplateAssignments: {
+        findMany: async () => []
+      }
+    },
+    transaction: async (cb: (tx: any) => Promise<void>) => {
+      const tx = {
+        update: () => ({
+          set: (values: any) => ({
+            where: async () => {
+              if (typeof values.status === 'string') {
+                currentStatus = values.status;
+              }
+              if (values.dataJson && typeof values.dataJson === 'object') {
+                currentDataJson = values.dataJson as Record<string, unknown>;
+              }
+            }
+          })
+        })
+      };
+      await cb(tx);
+    }
+  };
+
+  return {
+    db,
+    getStatus: () => currentStatus,
+    getDataJson: () => currentDataJson
+  };
+}
+
+function createLayoutButtonMockDb(actionDef: unknown) {
+  let currentStatus = 'Assigned';
+
+  const document = {
+    id: '00000000-0000-0000-0000-0000000000d2',
+    templateId: '00000000-0000-0000-0000-0000000000t2',
+    status: currentStatus,
+    dataJson: {},
+    externalRefsJson: {},
+    snapshotsJson: {}
+  };
+
+  const template = {
+    id: '00000000-0000-0000-0000-0000000000t2',
+    key: 'layout-ui',
+    name: 'Layout UI',
+    templateJson: {
+      fields: {},
+      layout: [{ type: 'button', key: 'uiReload', action: 'uiReload' }],
+      workflow: {
+        initial: 'Assigned',
+        states: {
+          Assigned: { editable: [], readonly: [], buttons: [] }
+        }
+      },
+      controls: {
+        uiReload: { label: 'Reload', action: 'uiReloadAction' }
+      },
+      actions: {
+        uiReloadAction: actionDef
       }
     }
   };
@@ -116,6 +189,63 @@ describe('workflow action execution', () => {
     expect(submitRes.statusCode).toBe(303);
     expect(submitRes.headers.location).toBe('/documents/00000000-0000-0000-0000-0000000000d1');
     expect(mock.getStatus()).toBe('Submitted');
+
+    await app.close();
+  });
+
+  it('setStatus updates fp_documents.status and does not persist data_json.status', async () => {
+    const mock = createMockDb();
+    const app = Fastify();
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const startRes = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d1/action/start',
+      payload: {}
+    });
+
+    expect(startRes.statusCode).toBe(303);
+    expect(mock.getStatus()).toBe('Started');
+    expect(mock.getDataJson().status).toBeUndefined();
+
+    await app.close();
+  });
+
+  it('denies process action execution from layout button source', async () => {
+    const mock = createLayoutButtonMockDb({
+      type: 'composite',
+      steps: [{ type: 'setStatus', to: 'Started' }]
+    });
+    const app = Fastify();
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d2/action/uiReload?source=ui',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toBe('UI button cannot execute process action');
+    expect(mock.getStatus()).toBe('Assigned');
+
+    await app.close();
+  });
+
+  it('allows reloadLookup macro from layout button source', async () => {
+    const mock = createLayoutButtonMockDb({ type: 'macro', name: 'reloadLookup' });
+    const app = Fastify();
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d2/action/uiReload?source=ui',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(res.headers.location).toBe('/documents/00000000-0000-0000-0000-0000000000d2');
+    expect(mock.getStatus()).toBe('Assigned');
 
     await app.close();
   });

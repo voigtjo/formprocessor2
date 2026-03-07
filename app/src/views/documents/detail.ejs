@@ -1,42 +1,30 @@
-<h1>Document <code><%= document.id %></code></h1>
-<p>Status: <strong><%= document.status %></strong></p>
-<p class="muted">Template: <%= template.name %> (<code><%= template.key %></code>)</p>
 <%
-  const productSnapshot = snapshotsJson.product_id || snapshotsJson.product_name || snapshotsJson.product || null;
-  const customerSnapshot = snapshotsJson.customer_id || snapshotsJson.customer_name || snapshotsJson.customer || null;
+  const shortId = String(document.id || '').slice(0, 8);
 %>
-<% if (productSnapshot || customerSnapshot) { %>
-  <p>
-    <% if (productSnapshot) { %>Product: <strong><%= productSnapshot %></strong><% } %>
-    <% if (productSnapshot && customerSnapshot) { %> · <% } %>
-    <% if (customerSnapshot) { %>Customer: <strong><%= customerSnapshot %></strong><% } %>
-  </p>
-<% } %>
-<% if (dataJson.erp_customer_order_id || snapshotsJson.customer_order_id) { %>
-  <p>ERP Order Number: <strong><%= dataJson.erp_customer_order_id || snapshotsJson.customer_order_id %></strong></p>
-<% } %>
+<header class="page-header">
+  <h1><%= template.name %></h1>
+  <p class="muted">Template: <%= template.name %> (<code><%= template.key %></code>) · Group: <strong><%= groupName || '—' %></strong> · Status: <span class="badge badge-status"><%= document.status %></span> · Document: <code><%= shortId %></code></p>
+</header>
 <% if (errorMessage) { %>
-  <div class="card" style="border-color:#d9534f; background:#fff5f5;">
+  <div class="card error-card">
     <strong>Action failed:</strong> <%= errorMessage %>
   </div>
 <% } %>
 
-<form id="document-form" method="post" action="/documents/<%= document.id %>/save">
+<form id="document-form" method="post" action="/documents/<%= document.id %>/save" class="card">
   <%- layoutHtml %>
-</form>
-<div class="row" style="margin-top: 1rem;">
+  <div class="actions">
   <% (buttonKeys || []).forEach((controlKey) => {
     const control = (templateJson.controls || {})[controlKey] || {};
     const label = control.label || controlKey;
   %>
-    <form method="post" action="/documents/<%= document.id %>/action/<%= controlKey %>" style="display:inline">
-      <button type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= controlKey %>" formmethod="post" style="margin-right:0.5rem;"><%= label %></button>
+    <form method="post" action="/documents/<%= document.id %>/action/<%= controlKey %>">
+      <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= controlKey %>" formmethod="post"><%= label %></button>
     </form>
   <% }) %>
+  </div>
+</form>
+<div class="actions">
+  <a class="btn btn-secondary" href="/documents">Back to Documents</a>
+  <a class="btn btn-secondary" href="/templates">Templates</a>
 </div>
-
-<p>
-  <a href="/documents">Back to Documents</a>
-  ·
-  <a href="/templates">Templates</a>
-</p>

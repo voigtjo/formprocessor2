@@ -62,10 +62,12 @@ Supported now:
 - `row`: `{ "type": "row", "children": [...] }`
 - `col`: `{ "type": "col", "width": 1, "children": [...] }`
 
-Planned extension:
-- `button`: `{ "type": "button", "key": "reloadCustomers", "label": "Reload" }`
-  - `key` refers to a control/action key
-  - used for in-form actions (e.g. load/reload lookup options)
+`button` node (supported):
+- `{ "type": "button", "key": "reloadCustomers", "label": "Reload", "kind": "ui" }`
+- `kind` is optional and defaults to `"ui"` for backward compatibility
+- `kind: "ui"` buttons are UI helper buttons (lookup reload etc.)
+- `kind: "process"` is reserved/process-like and must not execute process steps when triggered as layout UI button source
+- `key` refers to a control/action key
 
 Behavior:
 - unknown node types are ignored safely
@@ -102,7 +104,7 @@ Maps button key -> action key:
 }
 ```
 
-This mapping is shared by workflow bar buttons and planned layout button nodes.
+This mapping is shared by workflow bar buttons and layout button nodes.
 
 ## actions
 
@@ -146,6 +148,11 @@ Resolution order for required rights:
 1. `permissions.actions[controlKey]`
 2. `permissions.actions[actionKey]`
 3. default allow
+
+Runtime enforcement:
+- rights are checked against the active user membership in `document.group_id`
+- if `document.group_id` is `null`, action is allowed in P0 (no group-scoped check)
+- failing checks return `403` with a clear forbidden message
 
 Supported requirement values:
 - `read`

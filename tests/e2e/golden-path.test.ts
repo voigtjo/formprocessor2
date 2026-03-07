@@ -1,151 +1,254 @@
+import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
+import { healthRoutes } from '../../app/src/routes/health.js';
+import { uiRoutes } from '../../app/src/routes/ui.js';
 
-const APP_BASE_URL = process.env.FP_BASE_URL ?? 'http://localhost:3000';
-const ERP_BASE_URL = process.env.ERP_BASE_URL ?? 'http://localhost:3001';
-const UUID_RE = '[0-9a-fA-F-]{36}';
+const alice = { id: '00000000-0000-0000-0000-0000000000a1', username: 'alice', displayName: 'Alice' };
+const bob = { id: '00000000-0000-0000-0000-0000000000b1', username: 'bob', displayName: 'Bob' };
+const groupId = '00000000-0000-0000-0000-0000000000a9';
+const templateId = '00000000-0000-0000-0000-0000000000a8';
+const documentId = '00000000-0000-0000-0000-0000000000a7';
 
-async function getText(url: string) {
-  const res = await fetch(url);
-  const text = await res.text();
-  return { res, text };
-}
-
-async function getJson(url: string) {
-  const res = await fetch(url);
-  const text = await res.text();
-  return { res, json: JSON.parse(text) as any, text };
-}
-
-function extractTemplateId(html: string) {
-  const customerOrderMatch = html.match(
-    new RegExp(`customer-order[\\s\\S]{0,1200}/documents/new\\?templateId=(${UUID_RE})`, 'i')
+function parseCookie(cookieHeader: string | undefined) {
+  if (!cookieHeader) return {} as Record<string, string>;
+  return Object.fromEntries(
+    cookieHeader
+      .split(';')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const i = part.indexOf('=');
+        if (i === -1) return [part, ''];
+        return [part.slice(0, i), decodeURIComponent(part.slice(i + 1))];
+      })
   );
-  if (customerOrderMatch?.[1]) {
-    return customerOrderMatch[1];
-  }
-
-  const fallback = html.match(new RegExp(`/documents/new\\?templateId=(${UUID_RE})`, 'i'));
-  if (fallback?.[1]) {
-    return fallback[1];
-  }
-
-  return undefined;
 }
 
-function extractFirstRealOptionValue(optionsHtml: string) {
-  const optionRegex = /<option[^>]*value="([^"]*)"[^>]*>([\s\S]*?)<\/option>/gi;
-  let match: RegExpExecArray | null;
+function userCookie(userId: string) {
+  return `fp_user=${encodeURIComponent(userId)}`;
+}
 
-  while ((match = optionRegex.exec(optionsHtml)) !== null) {
-    const value = match[1]?.trim() ?? '';
-    const label = match[2]?.replace(/<[^>]+>/g, '').trim() ?? '';
+function createMockDb() {
+  let doc:
+    | {
+        id: string;
+        templateId: string;
+        status: string;
+        groupId: string | null;
+        dataJson: Record<string, unknown>;
+        externalRefsJson: Record<string, unknown>;
+        snapshotsJson: Record<string, unknown>;
+      }
+    | null = null;
 
-    if (!value) continue;
-    if (!label) continue;
-
-    const lowerLabel = label.toLowerCase();
-    if (
-      lowerLabel.includes('please choose') ||
-      lowerLabel.includes('invalid lookup') ||
-      lowerLabel.includes('template not found') ||
-      lowerLabel.includes('lookup unavailable') ||
-      lowerLabel.includes('lookup field not found')
-    ) {
-      continue;
+  const template = {
+    id: templateId,
+    key: 'change-request',
+    name: 'Change Request',
+    state: 'active',
+    templateJson: {
+      fields: {},
+      layout: [{ type: 'button', key: 'reload', action: 'reload' }],
+      workflow: {
+        initial: 'Assigned',
+        states: {
+          Assigned: { editable: [], readonly: [], buttons: ['assign', 'start'] },
+          Started: { editable: [], readonly: [], buttons: ['submit'] },
+          Submitted: { editable: [], readonly: [], buttons: ['approve'] },
+          Approved: { editable: [], readonly: [], buttons: [] }
+        }
+      },
+      controls: {
+        assign: { label: 'Assign', action: 'assignAction' },
+        start: { label: 'Start', action: 'startAction' },
+        submit: { label: 'Submit', action: 'submitAction' },
+        approve: { label: 'Approve', action: 'approveAction' },
+        reload: { label: 'Reload', action: 'reloadAction' }
+      },
+      actions: {
+        assignAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Assigned' }] },
+        startAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Started' }] },
+        submitAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Submitted' }] },
+        approveAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Approved' }] },
+        reloadAction: { type: 'macro', name: 'reloadLookup' }
+      },
+      permissions: {
+        actions: {
+          approve: { requires: ['execute'] }
+        }
+      }
     }
+  };
 
-    return value;
-  }
-
-  return undefined;
-}
-
-function extractDocumentIdFromLocation(location: string | null) {
-  if (!location) return undefined;
-  const match = location.match(new RegExp(`/documents/(${UUID_RE})`));
-  return match?.[1];
-}
-
-describe('E2E golden path: create + create_offer + complete', () => {
-  it('runs complete flow over HTTP', async () => {
-    const templatesPage = await getText(`${APP_BASE_URL}/templates`);
-    expect(templatesPage.res.status).toBe(200);
-
-    const templateId = extractTemplateId(templatesPage.text);
-    expect(templateId).toBeTruthy();
-
-    const newDocPage = await getText(`${APP_BASE_URL}/documents/new?templateId=${encodeURIComponent(templateId!)}`);
-    expect(newDocPage.res.status).toBe(200);
-
-    const productLookup = await getText(
-      `${APP_BASE_URL}/api/lookup?templateId=${encodeURIComponent(templateId!)}&fieldKey=product_id`
-    );
-    expect(productLookup.res.status).toBe(200);
-    expect(productLookup.text).toContain('<option');
-
-    const productId = extractFirstRealOptionValue(productLookup.text);
-    expect(productId).toBeTruthy();
-
-    const customerLookup = await getText(
-      `${APP_BASE_URL}/api/lookup?templateId=${encodeURIComponent(templateId!)}&fieldKey=customer_id`
-    );
-    expect(customerLookup.res.status).toBe(200);
-    expect(customerLookup.text).toContain('<option');
-
-    const customerId = extractFirstRealOptionValue(customerLookup.text);
-    expect(customerId).toBeTruthy();
-
-    const createBody = new URLSearchParams({
-      templateId: templateId!,
-      'lookup:product_id': productId!,
-      'lookup:customer_id': customerId!,
-      'data:order_notes': 'e2e'
-    });
-
-    const createRes = await fetch(`${APP_BASE_URL}/documents`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: createBody.toString(),
-      redirect: 'manual'
-    });
-
-    expect([302, 303]).toContain(createRes.status);
-
-    const createdDocumentId = extractDocumentIdFromLocation(createRes.headers.get('location'));
-    expect(createdDocumentId).toBeTruthy();
-
-    const createOfferRes = await fetch(`${APP_BASE_URL}/documents/${createdDocumentId}/action/create_offer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: '',
-      redirect: 'manual'
-    });
-    expect([302, 303]).toContain(createOfferRes.status);
-
-    const afterCreateOffer = await getText(`${APP_BASE_URL}/documents/${createdDocumentId}`);
-    expect(afterCreateOffer.res.status).toBe(200);
-    expect(afterCreateOffer.text.toLowerCase()).toContain('offer_created');
-
-    const completeRes = await fetch(`${APP_BASE_URL}/documents/${createdDocumentId}/action/complete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: '',
-      redirect: 'manual'
-    });
-    expect([302, 303]).toContain(completeRes.status);
-
-    const afterComplete = await getText(`${APP_BASE_URL}/documents/${createdDocumentId}`);
-    expect(afterComplete.res.status).toBe(200);
-    expect(afterComplete.text.toLowerCase()).toContain('completed');
-
-    // Optional ERP-side check for completed order of selected customer.
-    const erpCheck = await getJson(
-      `${ERP_BASE_URL}/api/customer-orders?status=completed&customer_id=${encodeURIComponent(customerId!)}`
-    );
-    expect(erpCheck.res.status).toBe(200);
-    const items = Array.isArray(erpCheck.json?.items) ? erpCheck.json.items : [];
-    if (items.length > 0) {
-      expect(items.some((item: any) => item.status === 'completed')).toBe(true);
+  const db = {
+    query: {
+      fpTemplates: {
+        findMany: async () => [template],
+        findFirst: async ({ where }: any) => {
+          const whereText = String(where ?? '');
+          if (whereText.includes(templateId)) return template;
+          return template;
+        }
+      },
+      fpTemplateAssignments: {
+        findMany: async () => [{ id: 'as-1', templateId, groupId }]
+      },
+      fpDocuments: {
+        findFirst: async () => (doc ? { ...doc } : null)
+      },
+      fpGroupMembers: {
+        findMany: async () => [
+          { id: 'm1', groupId, userId: alice.id, rights: 'rwx' },
+          { id: 'm2', groupId, userId: bob.id, rights: 'r' }
+        ]
+      },
+      fpGroups: {
+        findFirst: async () => ({ id: groupId, key: 'ops', name: 'Operations' })
+      }
+    },
+    insert: () => ({
+      values: (values: any) => ({
+        returning: async () => {
+          doc = {
+            id: documentId,
+            templateId: values.templateId,
+            status: values.status,
+            groupId: values.groupId ?? null,
+            dataJson: values.dataJson ?? {},
+            externalRefsJson: values.externalRefsJson ?? {},
+            snapshotsJson: values.snapshotsJson ?? {}
+          };
+          return [{ id: documentId }];
+        }
+      })
+    }),
+    update: () => ({
+      set: (values: any) => ({
+        where: async () => {
+          if (!doc) return;
+          doc = {
+            ...doc,
+            ...values
+          };
+        }
+      })
+    }),
+    select: () => ({
+      from: () => ({
+        innerJoin: () => ({
+          orderBy: async () => []
+        })
+      })
+    }),
+    transaction: async (cb: (tx: any) => Promise<void>) => {
+      const tx = {
+        update: () => ({
+          set: (values: any) => ({
+            where: async () => {
+              if (!doc) return;
+              doc = {
+                ...doc,
+                ...values
+              };
+            }
+          })
+        })
+      };
+      await cb(tx);
     }
+  };
+
+  return {
+    db,
+    getDoc: () => doc
+  };
+}
+
+async function createApp() {
+  const mock = createMockDb();
+  const app = Fastify();
+
+  app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+    this.type('text/html').send(JSON.stringify(data));
+  });
+
+  app.addHook('preHandler', async (request) => {
+    const cookie = parseCookie(request.headers.cookie);
+    const userId = cookie.fp_user;
+    request.users = [alice, bob];
+    request.currentUser = userId === bob.id ? bob : alice;
+  });
+
+  await app.register(healthRoutes);
+  await app.register(uiRoutes, {
+    db: mock.db as any,
+    erpBaseUrl: 'http://localhost:3001'
+  });
+
+  return { app, mock };
+}
+
+describe('golden path e2e via inject', () => {
+  it('boot smoke + happy path (alice) + deny (bob)', async () => {
+    const { app, mock } = await createApp();
+
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    expect(health.statusCode).toBe(200);
+    expect(health.json()).toEqual({ ok: true });
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/documents',
+      headers: { cookie: userCookie(alice.id) },
+      payload: { templateId }
+    });
+    expect(createRes.statusCode).toBe(303);
+    expect(createRes.headers.location).toBe(`/documents/${documentId}`);
+    expect(mock.getDoc()?.status).toBe('Assigned');
+
+    const assignRes = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/action/assign`,
+      headers: { cookie: userCookie(alice.id) },
+      payload: {}
+    });
+    expect(assignRes.statusCode).toBe(303);
+
+    const startRes = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/action/start`,
+      headers: { cookie: userCookie(alice.id) },
+      payload: {}
+    });
+    expect(startRes.statusCode).toBe(303);
+    expect(mock.getDoc()?.status).toBe('Started');
+
+    const submitRes = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/action/submit`,
+      headers: { cookie: userCookie(alice.id) },
+      payload: {}
+    });
+    expect(submitRes.statusCode).toBe(303);
+    expect(mock.getDoc()?.status).toBe('Submitted');
+
+    const bobApprove = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/action/approve`,
+      headers: { cookie: userCookie(bob.id) },
+      payload: {}
+    });
+    expect(bobApprove.statusCode).toBe(403);
+
+    const aliceApprove = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/action/approve`,
+      headers: { cookie: userCookie(alice.id) },
+      payload: {}
+    });
+    expect(aliceApprove.statusCode).toBe(303);
+    expect(['Approved', 'Done']).toContain(String(mock.getDoc()?.status));
+
+    await app.close();
   });
 });

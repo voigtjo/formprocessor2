@@ -1,8 +1,8 @@
 import dotenv from 'dotenv';
 import { eq } from 'drizzle-orm';
 import { resolve } from 'node:path';
-import { makeDb } from '../db/index.js';
-import { fpGroupMembers, fpGroups, fpTemplateAssignments, fpTemplates, fpUsers } from '../db/schema.js';
+import { makeDb } from './index.js';
+import { fpGroupMembers, fpGroups, fpTemplateAssignments, fpTemplates, fpUsers } from './schema.js';
 
 dotenv.config({ path: resolve(process.cwd(), '../.env') });
 
@@ -72,9 +72,15 @@ async function run() {
     const templateId = await findSeedTemplateId(db);
     if (templateId) {
       await upsertTemplateAssignment(db, templateId, opsId);
-      console.log(`RBAC seed done (template assigned: ${templateId}).`);
+    }
+
+    console.log('Seed ensured groups: ops, qa');
+    console.log('Seed ensured users: alice, bob');
+    console.log('Seed ensured memberships: alice->ops(rwx), bob->ops(r)');
+    if (templateId) {
+      console.log(`Seed ensured assignment: template ${templateId} -> ops`);
     } else {
-      console.log('RBAC seed done (no active template found for assignment).');
+      console.log('Seed note: no active template found for automatic ops assignment.');
     }
   } finally {
     await pool.end();

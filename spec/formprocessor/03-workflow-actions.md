@@ -18,7 +18,8 @@ Workflow states may use the same strings; this is the recommended convention.
 3. Resolve each via `controls[buttonKey].action` to `actionKey`
 4. Execute `actions[actionKey]`
 
-Both workflow bar buttons and planned in-layout `button` nodes use this same action engine.
+Workflow bar buttons are `process` buttons and can execute normal process actions.
+Layout buttons are `ui` buttons and are restricted to UI-safe actions only.
 
 ## Action definition types
 
@@ -32,6 +33,16 @@ Supported step types:
 - `setStatus` (`to` or `status`)
 - `setField` (`key`, `value`)
 - `callExternal` (`service`, `method`, `path`, `body`)
+
+UI button restrictions:
+- UI button source may execute only whitelist actions (e.g. macro `reloadLookup`, optional `noop`/`showToast`)
+- UI button source must not execute `setStatus`, `setField`, `callExternal` or other process actions
+- violations return `400` with message `UI button cannot execute process action`
+
+Status source-of-truth behavior:
+- `setStatus` updates process status in `fp_documents.status` only
+- workflow status must not be mirrored to `data_json.status` or `external_refs_json.status`
+- UI workflow field `status` displays `doc.status` (not `data_json.status`)
 
 ### Macro (planned extension)
 

@@ -4,6 +4,7 @@ type RenderLayoutParams = {
   mode: RenderMode;
   templateId?: string;
   documentId?: string;
+  documentStatus?: string;
   templateJson: any;
   dataJson?: Record<string, unknown>;
   externalRefsJson?: Record<string, unknown>;
@@ -38,6 +39,14 @@ function escapeHtml(value: unknown) {
 
 function escapeAttr(value: unknown) {
   return escapeHtml(value);
+}
+
+function isCheckedValue(value: unknown) {
+  if (value === true) return true;
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase();
+  return normalized === 'true' || normalized === 'yes' || normalized === '1';
 }
 
 function normalizeLayoutNodes(templateJson: any): LayoutNode[] {
@@ -77,6 +86,7 @@ function isEmptyDisplayValue(value: unknown) {
 function hasDisplayValueForField(fieldKey: string, params: RenderLayoutParams) {
   const field = (params.templateJson?.fields ?? {})[fieldKey] ?? {};
   const kind = String(field.kind ?? 'unknown');
+  const isStatusWorkflowField = kind === 'workflow' && fieldKey === 'status';
   const dataValue = params.dataJson?.[fieldKey];
   const snapshotValue = params.snapshotsJson?.[fieldKey];
   const externalValue = params.externalRefsJson?.[fieldKey];
@@ -86,6 +96,9 @@ function hasDisplayValueForField(fieldKey: string, params: RenderLayoutParams) {
   }
 
   if (kind === 'system' || kind === 'workflow') {
+    if (isStatusWorkflowField) {
+      return !isEmptyDisplayValue(params.documentStatus);
+    }
     return !isEmptyDisplayValue(dataValue) || !isEmptyDisplayValue(snapshotValue) || !isEmptyDisplayValue(externalValue);
   }
 
@@ -111,38 +124,54 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
   const field = (params.templateJson?.fields ?? {})[fieldKey] ?? {};
   const label = escapeHtml(field.label ?? fieldKey);
   const kind = String(field.kind ?? 'unknown');
+  const uiInput = field?.ui?.input === 'date' || field?.ui?.input === 'checkbox' ? field.ui.input : 'text';
+  const isWorkflow = kind === 'workflow';
+  const isStatusWorkflowField = isWorkflow && fieldKey === 'status';
+
+  if (params.mode === 'detail' && isStatusWorkflowField) {
+    return '';
+  }
 
   const dataValue = params.dataJson?.[fieldKey];
   const snapshotValue = params.snapshotsJson?.[fieldKey];
   const externalValue = params.externalRefsJson?.[fieldKey];
   const inEditable = (params.editableKeys ?? []).includes(fieldKey);
   const inReadonly = (params.readonlyKeys ?? []).includes(fieldKey);
-  const isEditable = inEditable || (!inReadonly && kind === 'editable');
-  const isSystemLike = kind === 'system' || kind === 'workflow';
+  const isEditable = !isWorkflow && (inEditable || (!inReadonly && kind === 'editable'));
+  const isSystemLike = kind === 'system' || isWorkflow;
+  const workflowDisplay = isStatusWorkflowField ? params.documentStatus : dataValue ?? snapshotValue ?? externalValue;
+  const systemLikeDisplay = isWorkflow ? workflowDisplay : dataValue ?? snapshotValue ?? externalValue;
 
   if (params.mode === 'preview') {
     if (isSystemLike) {
-      return `<div class="row"><label>${label}</label><div class="muted">${escapeHtml(dataValue ?? snapshotValue ?? externalValue ?? '—')}</div></div>`;
+      if (isWorkflow) {
+        const value = isEmptyDisplayValue(workflowDisplay) ? '—' : workflowDisplay;
+        return `<div class="row"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
+      }
+      return `<div class="row"><label>${label}</label><div class="muted">${escapeHtml(systemLikeDisplay ?? '—')}</div></div>`;
     }
 
     if (kind === 'lookup') {
-      return `<div class="row"><label>${label} (<code>${escapeHtml(kind)}</code>)</label><select disabled><option>Lookup field</option></select></div>`;
+      return `<div class="row"><label>${label}</label><select disabled><option>Lookup field</option></select></div>`;
     }
 
     if (field.multiline) {
-      return `<div class="row"><label>${label} (<code>${escapeHtml(kind)}</code>)</label><textarea rows="3" disabled placeholder="Preview"></textarea></div>`;
+      return `<div class="row"><label>${label}</label><textarea rows="3" disabled placeholder="Preview"></textarea></div>`;
     }
 
-    return `<div class="row"><label>${label} (<code>${escapeHtml(kind)}</code>)</label><input type="text" disabled placeholder="Preview" /></div>`;
+    return `<div class="row"><label>${label}</label><input type="text" disabled placeholder="Preview" /></div>`;
   }
 
   if (params.mode === 'new') {
     if (isSystemLike) {
-      const display = dataValue ?? snapshotValue ?? externalValue;
-      if (isEmptyDisplayValue(display)) {
+      if (isWorkflow) {
+        const value = isEmptyDisplayValue(workflowDisplay) ? '—' : workflowDisplay;
+        return `<div class="row"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
+      }
+      if (isEmptyDisplayValue(systemLikeDisplay)) {
         return '';
       }
-      return `<div class="row"><label>${label}</label><div>${escapeHtml(display)}</div></div>`;
+      return `<div class="row"><label>${label}</label><div>${escapeHtml(systemLikeDisplay)}</div></div>`;
     }
 
     if (kind === 'lookup') {
@@ -156,6 +185,13 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
     }
 
     if (kind === 'editable') {
+      if (uiInput === 'date') {
+        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}" /></div>`;
+      }
+      if (uiInput === 'checkbox') {
+        const checked = isCheckedValue(dataValue) ? ' checked' : '';
+        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="true"${checked} /></div>`;
+      }
       return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" /></div>`;
     }
 
@@ -167,33 +203,40 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
       const templateId = params.templateId ?? '';
       const hxVals = JSON.stringify({ templateId, fieldKey });
       const selectedLabel = escapeHtml(snapshotValue ?? 'Loading...');
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label} (<code>${escapeHtml(kind)}</code>)</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="closest form" hx-trigger="load, change from:closest form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="${escapeAttr(externalValue ?? '')}">${selectedLabel}</option></select></div>`;
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="closest form" hx-trigger="load, change from:closest form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="${escapeAttr(externalValue ?? '')}">${selectedLabel}</option></select></div>`;
     }
 
-    const snapshot = escapeHtml(snapshotValue ?? '-');
-    const hiddenValue = escapeAttr(externalValue ?? '');
-    const debug = externalValue
-      ? `<details class="muted"><summary>Debug</summary><div>ID: ${escapeHtml(externalValue)}</div></details>`
-      : '';
-
-    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label} (<code>${escapeHtml(kind)}</code>)</label><div><strong>${snapshot}</strong></div><input type="hidden" name="lookup:${escapeAttr(fieldKey)}" value="${hiddenValue}" />${debug}</div>`;
+    const optionValue = externalValue ?? '';
+    const optionLabel = snapshotValue ?? externalValue ?? '-';
+    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" disabled><option value="${escapeAttr(optionValue)}" selected>${escapeHtml(optionLabel)}</option></select></div>`;
   }
 
   if (kind === 'editable') {
     const roAttr = isEditable ? '' : ' readonly';
     if (field.multiline) {
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label} (<code>${escapeHtml(kind)}</code>)</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"${roAttr}>${escapeHtml(dataValue ?? '')}</textarea></div>`;
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"${roAttr}>${escapeHtml(dataValue ?? '')}</textarea></div>`;
     }
-    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label} (<code>${escapeHtml(kind)}</code>)</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${roAttr} /></div>`;
+    if (uiInput === 'date') {
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${roAttr} /></div>`;
+    }
+    if (uiInput === 'checkbox') {
+      const checked = isCheckedValue(dataValue) ? ' checked' : '';
+      const disabledAttr = isEditable ? '' : ' disabled';
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="true"${checked}${disabledAttr} /></div>`;
+    }
+    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${roAttr} /></div>`;
   }
 
   if (isSystemLike) {
-    const display = dataValue ?? snapshotValue ?? externalValue;
-    return `<div class="row"><label>${label}</label><div>${escapeHtml(isEmptyDisplayValue(display) ? '—' : display)}</div></div>`;
+    if (isWorkflow) {
+      const value = isEmptyDisplayValue(workflowDisplay) ? '—' : workflowDisplay;
+      return `<div class="row"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
+    }
+    return `<div class="row"><label>${label}</label><div>${escapeHtml(isEmptyDisplayValue(systemLikeDisplay) ? '—' : systemLikeDisplay)}</div></div>`;
   }
 
   const readonlyValue = dataValue ?? snapshotValue ?? externalValue ?? '';
-  return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label} (<code>${escapeHtml(kind)}</code>)</label><input id="field-${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(readonlyValue)}" readonly /></div>`;
+  return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(readonlyValue)}" readonly /></div>`;
 }
 
 function resolveControlKeyFromAction(templateJson: any, action: string) {
@@ -287,16 +330,16 @@ function inferLookupTargets(node: LayoutNode, params: RenderLayoutParams): strin
 function renderButton(node: LayoutNode, params: RenderLayoutParams) {
   const label = escapeHtml(node.label ?? node.key ?? node.action ?? 'Button');
   const action = typeof node.action === 'string' ? node.action : undefined;
-  const variantClass = node.variant ? ` btn-${escapeAttr(node.variant)}` : '';
+  const variantClass = ' btn-secondary';
 
   if (!action) {
-    return `<button type="button" class="layout-btn${variantClass}" disabled>${label}</button>`;
+    return `<button type="button" class="btn${variantClass}" disabled>${label}</button>`;
   }
 
   if (params.mode === 'detail' && params.documentId) {
     const controlKey = resolveControlKeyFromAction(params.templateJson, action);
-    const endpoint = `/documents/${encodeURIComponent(params.documentId)}/action/${encodeURIComponent(controlKey)}`;
-    return `<button type="button" class="layout-btn${variantClass}" hx-post="${escapeAttr(endpoint)}" hx-include="closest form" hx-swap="none">${label}</button>`;
+    const endpoint = `/documents/${encodeURIComponent(params.documentId)}/action/${encodeURIComponent(controlKey)}?source=ui`;
+    return `<button type="button" class="btn${variantClass}" hx-post="${escapeAttr(endpoint)}" hx-include="closest form" hx-swap="none">${label}</button>`;
   }
 
   if (params.mode === 'new') {
@@ -305,7 +348,7 @@ function renderButton(node: LayoutNode, params: RenderLayoutParams) {
       const script = targetKeys
         .map((key) => `htmx.trigger('#field-${key}', 'reloadLookup')`)
         .join('; ');
-      return `<button type="button" class="layout-btn${variantClass}" hx-on:click="${escapeAttr(script)}">${label}</button>`;
+      return `<button type="button" class="btn${variantClass}" hx-on:click="${escapeAttr(script)}">${label}</button>`;
     }
   }
 
@@ -315,11 +358,11 @@ function renderButton(node: LayoutNode, params: RenderLayoutParams) {
       const script = targetKeys
         .map((key) => `htmx.trigger('#field-${key}', 'reloadLookup')`)
         .join('; ');
-      return `<button type="button" class="layout-btn${variantClass}" hx-on:click="${escapeAttr(script)}">${label}</button>`;
+      return `<button type="button" class="btn${variantClass}" hx-on:click="${escapeAttr(script)}">${label}</button>`;
     }
   }
 
-  return `<button type="button" class="layout-btn${variantClass}" disabled>${label}</button>`;
+  return `<button type="button" class="btn${variantClass}" disabled>${label}</button>`;
 }
 
 function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
@@ -334,11 +377,11 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
   }
 
   if (type === 'text') {
-    return `<p>${escapeHtml(node.text ?? '')}</p>`;
+    return `<p class="row"><span class="col">${escapeHtml(node.text ?? '')}</span></p>`;
   }
 
   if (type === 'hint') {
-    return `<p class="muted" style="font-size:0.9rem;">${escapeHtml(node.text ?? '')}</p>`;
+    return `<p class="muted">${escapeHtml(node.text ?? '')}</p>`;
   }
 
   if (type === 'divider') {
@@ -359,20 +402,38 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
       }
     }
 
-    const title = node.title ? `<h3>${escapeHtml(node.title)}</h3>` : '';
-    const children = Array.isArray(node.children) ? node.children.map((child) => renderNode(child, params)).join('') : '';
+    const title = node.title ? `<h3 class="card-title">${escapeHtml(node.title)}</h3>` : '';
+    const children = Array.isArray(node.children)
+      ? node.children
+          .map((child) => renderNode(child, params))
+          .filter((html) => html.trim().length > 0)
+          .join('')
+      : '';
+    if (!children) return '';
     return `<div class="card">${title}${children}</div>`;
   }
 
   if (type === 'row') {
-    const children = Array.isArray(node.children) ? node.children.map((child) => renderNode(child, params)).join('') : '';
-    return `<div class="layout-row" style="display:flex; gap:1rem; align-items:flex-start; flex-wrap:wrap;">${children}</div>`;
+    const children = Array.isArray(node.children)
+      ? node.children
+          .map((child) => renderNode(child, params))
+          .filter((html) => html.trim().length > 0)
+          .join('')
+      : '';
+    if (!children) return '';
+    return `<div class="row">${children}</div>`;
   }
 
   if (type === 'col') {
-    const width = node.width ? `flex:${escapeAttr(node.width)};` : 'flex:1;';
-    const children = Array.isArray(node.children) ? node.children.map((child) => renderNode(child, params)).join('') : '';
-    return `<div class="layout-col" style="${width} min-width:240px;">${children}</div>`;
+    const widthStyle = node.width ? ` style="flex:${escapeAttr(node.width)};"` : '';
+    const children = Array.isArray(node.children)
+      ? node.children
+          .map((child) => renderNode(child, params))
+          .filter((html) => html.trim().length > 0)
+          .join('')
+      : '';
+    if (!children) return '';
+    return `<div class="col col-6"${widthStyle}>${children}</div>`;
   }
 
   if (type === 'button') {
@@ -380,7 +441,7 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
   }
 
   if (process.env.NODE_ENV !== 'production') {
-    return `<p class="muted" style="font-size:0.85rem;">Unsupported node type: ${escapeHtml(type || 'unknown')}</p>`;
+    return `<p class="muted">Unsupported node type: ${escapeHtml(type || 'unknown')}</p>`;
   }
 
   return '';

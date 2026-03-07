@@ -1,43 +1,51 @@
-<h1>Edit Template</h1>
-<p class="muted">Template ID: <code><%= template.id %></code></p>
+<header class="page-header">
+  <h1>Edit Template</h1>
+  <p class="muted">Template ID: <code><%= template.id %></code></p>
+</header>
 
 <% if (errorMessage) { %>
-  <div class="card" style="border-color:#d9534f; background:#fff5f5;">
+  <div class="card error-card">
     <strong>Save failed:</strong> <%= errorMessage %>
   </div>
 <% } %>
 
-<form method="post" action="/templates/<%= template.id %>">
+<form method="post" action="/templates/<%= template.id %>" class="card">
   <div class="row">
-    <label for="key">Key</label>
-    <input id="key" name="key" type="text" value="<%= form?.key ?? '' %>" required />
+    <div class="col col-6">
+      <label for="key">Key</label>
+      <input id="key" name="key" type="text" value="<%= form?.key ?? '' %>" required />
+    </div>
+    <div class="col col-6">
+      <label for="name">Name</label>
+      <input id="name" name="name" type="text" value="<%= form?.name ?? '' %>" required />
+    </div>
   </div>
 
   <div class="row">
-    <label for="name">Name</label>
-    <input id="name" name="name" type="text" value="<%= form?.name ?? '' %>" required />
+    <div class="col col-6">
+      <label for="description">Description</label>
+      <input id="description" name="description" type="text" value="<%= form?.description ?? '' %>" />
+    </div>
+    <div class="col col-6">
+      <label for="state">State</label>
+      <input id="state" name="state" type="text" value="<%= form?.state ?? 'active' %>" required />
+    </div>
   </div>
 
   <div class="row">
-    <label for="description">Description</label>
-    <input id="description" name="description" type="text" value="<%= form?.description ?? '' %>" />
+    <div class="col">
+      <label for="template_json">template_json</label>
+      <textarea id="template_json" name="template_json" rows="22"><%= form?.template_json ?? '' %></textarea>
+    </div>
   </div>
 
-  <div class="row">
-    <label for="state">State</label>
-    <input id="state" name="state" type="text" value="<%= form?.state ?? 'active' %>" required />
+  <div class="actions">
+    <button class="btn btn-primary" type="submit">Save Template</button>
   </div>
-
-  <div class="row">
-    <label for="template_json">template_json</label>
-    <textarea id="template_json" name="template_json" rows="22" style="max-width:900px"><%= form?.template_json ?? '' %></textarea>
-  </div>
-
-  <button type="submit">Save Template</button>
 </form>
 
 <div class="card">
-  <h3>Group Assignments</h3>
+  <h3 class="card-title">Group Assignments</h3>
   <% if (!hasGroups) { %>
     <p class="muted">Create groups via seed</p>
   <% } %>
@@ -46,8 +54,8 @@
       <% assignedGroups.forEach((item) => { %>
         <li>
           <strong><%= item.groupName %></strong> (<code><%= item.groupKey %></code>)
-          <form method="post" action="/templates/<%= template.id %>/assignments/<%= item.assignmentId %>/delete" style="display:inline">
-            <button type="submit">Remove</button>
+          <form method="post" action="/templates/<%= template.id %>/assignments/<%= item.assignmentId %>/delete" class="row">
+            <button class="btn btn-danger" type="submit">Remove</button>
           </form>
         </li>
       <% }) %>
@@ -57,22 +65,24 @@
   <% } %>
 
   <% if (hasGroups && assignableGroups && assignableGroups.length > 0) { %>
-    <form method="post" action="/templates/<%= template.id %>/assignments">
-      <label for="groupId">Assign Group</label>
-      <select id="groupId" name="groupId">
-        <% assignableGroups.forEach((group) => { %>
-          <option value="<%= group.id %>"><%= group.name %> (<%= group.key %>)</option>
-        <% }) %>
-      </select>
-      <button type="submit">Assign</button>
+    <form method="post" action="/templates/<%= template.id %>/assignments" class="row">
+      <div class="col col-6">
+        <label for="groupId">Assign Group</label>
+        <select id="groupId" name="groupId">
+          <% assignableGroups.forEach((group) => { %>
+            <option value="<%= group.id %>"><%= group.name %> (<%= group.key %>)</option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col">
+        <button class="btn btn-secondary" type="submit">Assign</button>
+      </div>
     </form>
   <% } %>
 </div>
 
-<p>
-  <a href="/templates/<%= template.id %>/preview">Preview</a>
-  ·
-  <a href="/documents/new?templateId=<%= template.id %>">New Document</a>
-  ·
-  <a href="/templates">Back to Templates</a>
-</p>
+<div class="actions">
+  <a class="btn btn-secondary" href="/templates/<%= template.id %>/preview">Preview</a>
+  <a class="btn btn-primary" href="/documents/new?templateId=<%= template.id %>">New Document</a>
+  <a class="btn btn-secondary" href="/templates">Back to Templates</a>
+</div>

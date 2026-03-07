@@ -17,23 +17,6 @@ export const fpTemplates = pgTable(
   (table) => [index('ux_fp_templates_key_version').on(table.key, table.version)]
 );
 
-export const fpDocuments = pgTable(
-  'fp_documents',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    templateId: uuid('template_id')
-      .notNull()
-      .references(() => fpTemplates.id, { onDelete: 'restrict' }),
-    status: text('status').notNull(),
-    dataJson: jsonb('data_json').notNull().default(sql`'{}'::jsonb`),
-    externalRefsJson: jsonb('external_refs_json').notNull().default(sql`'{}'::jsonb`),
-    snapshotsJson: jsonb('snapshots_json').notNull().default(sql`'{}'::jsonb`),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
-  },
-  (table) => [index('idx_fp_documents_template_status').on(table.templateId, table.status)]
-);
-
 export const fpUsers = pgTable(
   'fp_users',
   {
@@ -85,4 +68,25 @@ export const fpTemplateAssignments = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [uniqueIndex('ux_fp_template_assignments_template_group').on(table.templateId, table.groupId)]
+);
+
+export const fpDocuments = pgTable(
+  'fp_documents',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    templateId: uuid('template_id')
+      .notNull()
+      .references(() => fpTemplates.id, { onDelete: 'restrict' }),
+    status: text('status').notNull(),
+    groupId: uuid('group_id').references(() => fpGroups.id, { onDelete: 'set null' }),
+    dataJson: jsonb('data_json').notNull().default(sql`'{}'::jsonb`),
+    externalRefsJson: jsonb('external_refs_json').notNull().default(sql`'{}'::jsonb`),
+    snapshotsJson: jsonb('snapshots_json').notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    index('idx_fp_documents_template_status').on(table.templateId, table.status),
+    index('idx_fp_documents_group').on(table.groupId)
+  ]
 );

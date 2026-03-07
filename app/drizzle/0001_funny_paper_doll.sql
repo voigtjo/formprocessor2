@@ -1,0 +1,1 @@
+ALTER TABLE "fp_documents" ADD CONSTRAINT "fp_documents_group_id_fp_groups_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."fp_groups"("id") ON DELETE set null ON UPDATE no action;

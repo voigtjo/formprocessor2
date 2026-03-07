@@ -1,71 +1,120 @@
+import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
+import { healthRoutes } from '../../app/src/routes/health.js';
+import { uiRoutes } from '../../app/src/routes/ui.js';
 
-const ERP_BASE_URL = process.env.ERP_BASE_URL ?? 'http://localhost:3001';
-const APP_BASE_URL = process.env.FP_BASE_URL ?? 'http://localhost:3000';
-
-async function getText(url: string) {
-  const res = await fetch(url);
-  const text = await res.text();
-  return { res, text };
-}
-
-async function getJson(url: string) {
-  const { res, text } = await getText(url);
-  let json: unknown = null;
-
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = null;
-  }
-
-  return { res, json, text };
-}
-
-describe('E2E smoke: erp-sim + app over HTTP', () => {
-  it('GET erp-sim /health returns 200', async () => {
-    const erpHealth = await getJson(`${ERP_BASE_URL}/health`);
-    expect(erpHealth.res.status).toBe(200);
-    expect(erpHealth.json).toEqual({ ok: true });
-  });
-
-  it('GET erp-sim /api/products?valid=true returns 200 and non-empty items', async () => {
-    const products = await getJson(`${ERP_BASE_URL}/api/products?valid=true`);
-    expect(products.res.status).toBe(200);
-
-    const parsed = products.json as { items?: unknown[] } | null;
-    expect(Array.isArray(parsed?.items)).toBe(true);
-    expect((parsed?.items ?? []).length).toBeGreaterThan(0);
-  });
-
-  it('GET app /health returns 200', async () => {
-    const appHealth = await getJson(`${APP_BASE_URL}/health`);
-    expect(appHealth.res.status).toBe(200);
-    expect(appHealth.json).toEqual({ ok: true });
-  });
-
-  it('GET app /templates returns 200 and contains template marker', async () => {
-    const templatesPage = await getText(`${APP_BASE_URL}/templates`);
-    expect(templatesPage.res.status).toBe(200);
-    expect(
-      templatesPage.text.includes('customer-order') || templatesPage.text.includes('Templates')
-    ).toBe(true);
-  });
-
-  it('optionally opens /documents/new using a templateId parsed from /templates', async () => {
-    const templatesPage = await getText(`${APP_BASE_URL}/templates`);
-    expect(templatesPage.res.status).toBe(200);
-
-    const match = templatesPage.text.match(/\/documents\/new\?templateId=([0-9a-fA-F-]{36})/);
-    if (!match) {
-      return;
+function createMockDb() {
+  const template = {
+    id: '00000000-0000-0000-0000-000000000011',
+    key: 'change-request',
+    name: 'Change Request',
+    state: 'active',
+    templateJson: {
+      fields: {},
+      layout: [],
+      workflow: { initial: 'Assigned', states: { Assigned: { editable: [], readonly: [], buttons: [] } } },
+      controls: {},
+      actions: {}
     }
+  };
 
-    const templateId = match[1];
-    const newDocumentPage = await getText(
-      `${APP_BASE_URL}/documents/new?templateId=${encodeURIComponent(templateId)}`
-    );
+  return {
+    query: {
+      fpTemplates: {
+        findMany: async () => [template],
+        findFirst: async () => template
+      },
+      fpTemplateAssignments: {
+        findMany: async () => []
+      },
+      fpDocuments: {
+        findFirst: async () => null
+      }
+    },
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          orderBy: async () => [
+            {
+              id: template.id,
+              key: template.key,
+              name: template.name,
+              description: null,
+              state: template.state,
+              version: 1
+            }
+          ]
+        }),
+        innerJoin: () => ({
+          orderBy: async () => []
+        })
+      })
+    }),
+    insert: () => ({
+      values: () => ({
+        returning: async () => [{ id: '00000000-0000-0000-0000-000000000099' }]
+      })
+    }),
+    update: () => ({
+      set: () => ({
+        where: async () => {}
+      })
+    }),
+    transaction: async (cb: (tx: any) => Promise<void>) => {
+      await cb({
+        update: () => ({
+          set: () => ({
+            where: async () => {}
+          })
+        })
+      });
+    }
+  };
+}
 
-    expect(newDocumentPage.res.status).toBe(200);
+async function createApp() {
+  const app = Fastify();
+  app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+    const content = JSON.stringify(data);
+    this.type('text/html').send(content);
+  });
+  app.addHook('preHandler', async (request) => {
+    request.users = [{ id: 'u1', username: 'alice', displayName: 'Alice' }];
+    request.currentUser = request.users[0];
+  });
+
+  await app.register(healthRoutes);
+  await app.register(uiRoutes, {
+    db: createMockDb() as any,
+    erpBaseUrl: 'http://localhost:3001'
+  });
+
+  return app;
+}
+
+describe('E2E smoke via inject', () => {
+  it('GET /health returns 200', async () => {
+    const app = await createApp();
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    await app.close();
+  });
+
+  it('GET /templates returns active template page', async () => {
+    const app = await createApp();
+    const res = await app.inject({ method: 'GET', url: '/templates' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('change-request');
+    await app.close();
+  });
+
+  it('GET /documents/new without templateId returns wizard select', async () => {
+    const app = await createApp();
+    const res = await app.inject({ method: 'GET', url: '/documents/new' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('"selectedTemplateId":""');
+    expect(res.body).toContain('"templates"');
+    await app.close();
   });
 });

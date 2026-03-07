@@ -4,32 +4,29 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title><%= (typeof title !== 'undefined' && title) ? title : 'FormProcessor' %></title>
+  <link rel="stylesheet" href="/public/styles.css" />
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
-  <style>
-    body { font-family: sans-serif; margin: 2rem; }
-    nav a { margin-right: 1rem; }
-    .card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-    .row { margin: 0.5rem 0; }
-    label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
-    input, textarea, select { width: 100%; max-width: 560px; padding: 0.4rem; }
-    .muted { color: #555; font-size: 0.9rem; }
-  </style>
 </head>
 <body>
-  <nav>
-    <a href="/templates">Templates</a>
-    <% if (typeof users !== 'undefined' && users && users.length > 0) { %>
-      <span style="margin-left:1rem;">
-        User:
-        <select onchange="if (this.value) { window.location.href = '/users/switch?userId=' + encodeURIComponent(this.value) + '&next=' + encodeURIComponent('<%= currentPath || '/templates' %>'); }">
-          <% users.forEach((u) => { %>
-            <option value="<%= u.id %>" <%= (currentUser && currentUser.id === u.id) ? 'selected' : '' %>><%= u.displayName %> (@<%= u.username %>)</option>
-          <% }) %>
-        </select>
-      </span>
-    <% } %>
-  </nav>
-  <hr />
-  <%- content %>
+  <div class="container">
+    <nav class="top-nav">
+      <div class="top-nav-links">
+        <a class="btn btn-secondary" href="/templates">Templates</a>
+        <a class="btn btn-secondary" href="/documents">Documents</a>
+        <a class="btn btn-secondary" href="/admin/debug">RBAC Debug</a>
+      </div>
+      <% if (typeof users !== 'undefined' && users && users.length > 0) { %>
+        <div>
+          <label for="active-user">User</label>
+          <select id="active-user" onchange="if (this.value) { window.location.href = '/users/switch?userId=' + encodeURIComponent(this.value) + '&next=' + encodeURIComponent('<%= currentPath || '/templates' %>'); }">
+            <% users.forEach((u) => { %>
+              <option value="<%= u.id %>" <%= (currentUser && currentUser.id === u.id) ? 'selected' : '' %>><%= u.displayName %> (@<%= u.username %>)</option>
+            <% }) %>
+          </select>
+        </div>
+      <% } %>
+    </nav>
+    <%- content %>
+  </div>
 </body>
 </html>

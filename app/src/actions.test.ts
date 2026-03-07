@@ -42,6 +42,25 @@ describe('action engine', () => {
     });
   });
 
+  it('setStatus updates status output and does not create data.status', async () => {
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'composite',
+        steps: [{ type: 'setStatus', to: 'Approved' }]
+      },
+      context: {
+        doc: { id: 'doc-8', status: 'Submitted' },
+        data: {},
+        external: {},
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    expect(result.status).toBe('Approved');
+    expect(result.dataJson.status).toBeUndefined();
+  });
+
   it('throws a clear error when required external interpolation value is missing', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
 

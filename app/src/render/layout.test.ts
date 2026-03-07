@@ -30,7 +30,7 @@ describe('layout renderer v2', () => {
     });
 
     expect(html).toContain('<div class="card">');
-    expect(html).toContain('<div class="layout-row"');
+    expect(html).toContain('<div class="row">');
     expect(html).toContain('name="lookup:customer_id"');
     expect(html).toContain('name="data:comment"');
   });
@@ -48,7 +48,8 @@ describe('layout renderer v2', () => {
       }
     });
 
-    expect(html).toContain('hx-post="/documents/doc-1/action/submit"');
+    expect(html).toContain('hx-post="/documents/doc-1/action/submit?source=ui"');
+    expect(html).toContain('btn btn-secondary');
     expect(html).toContain('type="button"');
     expect(html).toContain('>Submit<');
   });
@@ -101,5 +102,94 @@ describe('layout renderer v2', () => {
     expect(html).toContain('<select id="field-customer_id"');
     expect(html).toContain('name="lookup:customer_id"');
     expect(html).toContain('Acme');
+  });
+
+  it('renders readonly lookup in detail mode as disabled select with snapshot label', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      templateId: 'tpl-1',
+      documentId: 'doc-1',
+      editableKeys: [],
+      readonlyKeys: ['product_id'],
+      externalRefsJson: { product_id: 'p-1' },
+      snapshotsJson: { product_id: 'Product A' },
+      templateJson: {
+        fields: {
+          product_id: { kind: 'lookup', label: 'Product' }
+        },
+        layout: [{ type: 'field', key: 'product_id' }]
+      }
+    });
+
+    expect(html).toContain('<select id="field-product_id"');
+    expect(html).toContain('disabled');
+    expect(html).toContain('Product A');
+    expect(html).not.toContain('Debug');
+  });
+
+  it('hides workflow status field in detail layout to avoid duplicate header status', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      documentId: 'doc-1',
+      documentStatus: 'Submitted',
+      dataJson: { status: 'LegacyDataStatus' },
+      templateJson: {
+        fields: {
+          status: { kind: 'workflow', label: 'Status' }
+        },
+        layout: [{ type: 'field', key: 'status' }]
+      }
+    });
+
+    expect(html).toBe('');
+  });
+
+  it('does not render empty group when all children are filtered out', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      documentId: 'doc-1',
+      documentStatus: 'Created',
+      templateJson: {
+        fields: {
+          status: { kind: 'workflow', label: 'Status' }
+        },
+        layout: [
+          {
+            type: 'group',
+            title: 'Process',
+            children: [{ type: 'field', key: 'status' }]
+          }
+        ]
+      }
+    });
+
+    expect(html).toBe('');
+    expect(html).not.toContain('Process');
+    expect(html).not.toContain('<div class="card">');
+  });
+
+  it('renders editable date and checkbox controls', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      templateId: 'tpl-1',
+      documentId: 'doc-1',
+      editableKeys: ['due_date', 'urgent'],
+      readonlyKeys: [],
+      dataJson: { due_date: '2026-03-09', urgent: 'yes' },
+      templateJson: {
+        fields: {
+          due_date: { kind: 'editable', label: 'Due Date', ui: { input: 'date' } },
+          urgent: { kind: 'editable', label: 'Urgent', ui: { input: 'checkbox' } }
+        },
+        layout: [{ type: 'field', key: 'due_date' }, { type: 'field', key: 'urgent' }]
+      }
+    });
+
+    expect(html).toContain('name="data:due_date"');
+    expect(html).toContain('type="date"');
+    expect(html).toContain('value="2026-03-09"');
+    expect(html).toContain('name="data:urgent"');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('checked');
   });
 });
