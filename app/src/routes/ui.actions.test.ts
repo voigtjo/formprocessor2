@@ -51,6 +51,9 @@ function createMockDb() {
       fpTemplates: {
         findFirst: async () => template
       },
+      fpMacros: {
+        findFirst: async () => ({ ref: 'macro:ui/reloadLookup@1', isEnabled: true })
+      },
       fpTemplateAssignments: {
         findMany: async () => []
       }
@@ -122,6 +125,9 @@ function createLayoutButtonMockDb(actionDef: unknown) {
       },
       fpTemplates: {
         findFirst: async () => template
+      },
+      fpMacros: {
+        findFirst: async () => ({ ref: 'macro:ui/reloadLookup@1', isEnabled: true })
       },
       fpTemplateAssignments: {
         findMany: async () => []
@@ -233,7 +239,7 @@ describe('workflow action execution', () => {
   });
 
   it('allows reloadLookup macro from layout button source', async () => {
-    const mock = createLayoutButtonMockDb({ type: 'macro', name: 'reloadLookup' });
+    const mock = createLayoutButtonMockDb({ type: 'macro', ref: 'macro:ui/reloadLookup@1' });
     const app = Fastify();
     await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
 

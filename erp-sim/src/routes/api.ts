@@ -39,6 +39,7 @@ const patchValidityBodySchema = z.object({ valid: z.boolean() });
 const patchMovementStatusBodySchema = z.object({ status: z.enum(movementStatusEnum.enumValues) });
 const patchCustomerOrderStatusBodySchema = z.object({ status: z.enum(customerOrderStatusEnum.enumValues) });
 const createCustomerOrderBodySchema = z.object({ customer_id: z.string().uuid().optional() }).optional();
+const createBatchBodySchema = z.object({ product_id: z.string().uuid() });
 const idParamSchema = z.object({ id: z.string().uuid() });
 
 const movementOrder: MovementStatus[] = ['ordered', 'produced', 'validated'];
@@ -74,6 +75,12 @@ function randomSuffix() {
 function generateOrderNumber() {
   const random = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `O-${random}`;
+}
+
+function generateBatchNumber(productId: string) {
+  const prefix = productId.slice(0, 8).toUpperCase();
+  const suffix = Date.now().toString(36).toUpperCase();
+  return `B-${prefix}-${suffix}`;
 }
 
 function toProductResponse(item: Awaited<ReturnType<ApiRepo['listProducts']>>[number]) {
@@ -206,6 +213,19 @@ export function createDrizzleRepo(db: ErpDb) {
           customerId,
           orderNumber,
           status: 'received'
+        })
+        .returning();
+      return inserted[0];
+    },
+
+    async createBatch(productId: string) {
+      const batchNumber = generateBatchNumber(productId);
+      const inserted = await db
+        .insert(batches)
+        .values({
+          productId,
+          batchNumber,
+          status: 'ordered'
         })
         .returning();
       return inserted[0];
@@ -361,6 +381,27 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiRoutesOptions = {
     }
 
     return toCustomerOrderResponse(order);
+  });
+
+  app.post('/api/batches', async (request, reply) => {
+    const parsed = createBatchBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid body: product_id (uuid) is required' });
+    }
+
+    const product = await repo.getProductById(parsed.data.product_id);
+    if (!product) {
+      return reply.status(400).send({ message: 'Invalid product_id: product not found' });
+    }
+    if (!product.valid) {
+      return reply.status(400).send({ message: 'Invalid product_id: product is not valid' });
+    }
+    if (product.productType !== 'batch') {
+      return reply.status(400).send({ message: 'Invalid product_id: product_type must be batch' });
+    }
+
+    const created = await repo.createBatch(parsed.data.product_id);
+    return toBatchResponse(created);
   });
 
   app.post('/api/customer-orders', async (request, reply) => {

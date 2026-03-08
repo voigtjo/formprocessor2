@@ -1,4 +1,12 @@
-import { macroRegistry, type MacroCtx, type MacroResult } from './macros/index.js';
+import { eq } from 'drizzle-orm';
+import { fpMacros } from '../db/schema.js';
+import {
+  macroLegacyNameToRef,
+  macroRegistryByRef,
+  type MacroCtx,
+  type MacroPatchContext,
+  type MacroResult
+} from './macros/index.js';
 
 export type ActionContext = {
   doc: { id: string; status: string };
@@ -20,7 +28,8 @@ export type ActionStep =
     }
   | {
       type: 'macro';
-      name: string;
+      ref?: string;
+      name?: string;
       params?: Record<string, unknown>;
     };
 
@@ -254,6 +263,44 @@ function applyMacroResult(
   }
 }
 
+function applyMacroPatch(
+  patch: MacroPatchContext,
+  nextData: Record<string, unknown>,
+  nextExternal: Record<string, unknown>,
+  nextSnapshot: Record<string, unknown>
+) {
+  Object.assign(nextData, patch.dataJson);
+  Object.assign(nextExternal, patch.externalRefsJson);
+  Object.assign(nextSnapshot, patch.snapshotsJson);
+}
+
+function resolveMacroRef(step: Extract<ActionStep, { type: 'macro' }>) {
+  if (typeof step.ref === 'string' && step.ref.trim().length > 0) {
+    return step.ref.trim();
+  }
+  const legacyName = typeof step.name === 'string' ? step.name.trim() : '';
+  if (legacyName.length > 0 && macroLegacyNameToRef[legacyName]) {
+    return macroLegacyNameToRef[legacyName];
+  }
+  return legacyName.length > 0 ? `macro:legacy/${legacyName}@1` : '';
+}
+
+async function ensureMacroIsEnabledInCatalog(db: unknown, ref: string) {
+  const dbQuery = (db as { query?: { fpMacros?: { findFirst?: (args: unknown) => Promise<unknown> } } })?.query?.fpMacros
+    ?.findFirst;
+  if (!dbQuery) {
+    throw new Error('Macro execution requires fp_macros catalog access.');
+  }
+
+  const row = (await dbQuery({ where: eq(fpMacros.ref, ref) })) as { ref?: string; isEnabled?: boolean } | undefined;
+  if (!row) {
+    throw new Error(`Macro ref is not registered: ${ref}`);
+  }
+  if (!row.isEnabled) {
+    throw new Error(`Macro ref is disabled: ${ref}`);
+  }
+}
+
 export async function executeActionDefinition(params: {
   actionDef: ActionDefinition;
   context: ActionContext;
@@ -317,29 +364,97 @@ export async function executeActionDefinition(params: {
     }
 
     if (step.type === 'macro') {
-      const macro = macroRegistry[step.name];
-      if (!macro) {
-        throw new Error(`Unknown macro: ${step.name}`);
+      const macroRef = resolveMacroRef(step);
+      if (!macroRef) {
+        throw new Error('Macro step requires ref (or legacy name).');
       }
+      await ensureMacroIsEnabledInCatalog(params.macroContext?.db, macroRef);
+      const macro = macroRegistryByRef[macroRef];
+      if (!macro) {
+        throw new Error(`Macro ref not implemented in runtime: ${macroRef}`);
+      }
+
+      const macroPatch: MacroPatchContext = {
+        dataJson: {},
+        externalRefsJson: {},
+        snapshotsJson: {}
+      };
+      const erpPost = async <T = unknown>(path: string, body: unknown) => {
+        const url = new URL(path, params.erpBaseUrl).toString();
+        const response = await fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(body ?? {})
+        });
+        const raw = await response.text();
+        if (!response.ok) {
+          let detail = raw.slice(0, 200);
+          try {
+            const parsed = JSON.parse(raw) as { message?: unknown };
+            if (typeof parsed.message === 'string' && parsed.message.trim().length > 0) {
+              detail = parsed.message;
+            }
+          } catch {
+            // keep detail fallback
+          }
+          throw new Error(`Macro ${macroRef} failed (${response.status}): ${detail}`);
+        }
+        if (!raw) return {} as T;
+        return JSON.parse(raw) as T;
+      };
 
       const macroCtx: MacroCtx = {
         db: params.macroContext?.db,
-        erpBaseUrl: params.erpBaseUrl,
-        templateJson: params.macroContext?.templateJson,
-        document: {
+        doc: {
           id: params.macroContext?.document.id ?? params.context.doc.id,
           status: nextStatus
+        },
+        template: params.macroContext?.templateJson,
+        data: {
+          get: (key: string) => nextData[key]
+        },
+        external: {
+          get: (key: string) => nextExternal[key]
+        },
+        snapshot: {
+          get: (key: string) => nextSnapshot[key]
+        },
+        patch: {
+          data: (key: string, value: unknown) => {
+            macroPatch.dataJson[key] = value;
+          },
+          external: (key: string, value: unknown) => {
+            macroPatch.externalRefsJson[key] = value;
+          },
+          snapshot: (key: string, value: unknown) => {
+            macroPatch.snapshotsJson[key] = value;
+          },
+          status: (status: string) => {
+            macroPatch.status = status;
+          }
+        },
+        http: {
+          erp: {
+            post: erpPost
+          }
         },
         dataJson: nextData,
         externalRefsJson: nextExternal,
         snapshotsJson: nextSnapshot,
-        form: params.macroContext?.form,
-        fetchImpl
+        form: params.macroContext?.form
       };
 
       const macroResult = await macro(macroCtx, step.params);
+      applyMacroPatch(macroPatch, nextData, nextExternal, nextSnapshot);
       applyMacroResult(macroResult, nextData, nextExternal, nextSnapshot);
 
+      if (macroPatch.status) {
+        nextStatus = macroPatch.status;
+        actionContext.doc.status = nextStatus;
+      }
       if (macroResult?.status) {
         nextStatus = macroResult.status;
         actionContext.doc.status = nextStatus;

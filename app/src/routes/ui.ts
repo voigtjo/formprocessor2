@@ -455,14 +455,23 @@ function normalizeActionSteps(actionDef: unknown): Array<Record<string, unknown>
 }
 
 function isUiSafeActionDefinition(actionDef: unknown) {
-  const allowedMacros = new Set(['reloadLookup', 'noop', 'showToast']);
+  const allowedMacros = new Set([
+    'reloadLookup',
+    'noop',
+    'showToast',
+    'macro:ui/reloadLookup@1',
+    'macro:ui/noop@1',
+    'macro:ui/showToast@1'
+  ]);
   const steps = normalizeActionSteps(actionDef);
   if (steps.length === 0) return false;
 
   for (const step of steps) {
     if (step.type !== 'macro') return false;
+    const macroRef = typeof step.ref === 'string' ? step.ref : '';
     const macroName = typeof step.name === 'string' ? step.name : '';
-    if (!allowedMacros.has(macroName)) return false;
+    const normalized = macroRef || macroName;
+    if (!allowedMacros.has(normalized)) return false;
   }
 
   return true;
@@ -1404,6 +1413,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const rawStatus = normalizeOptionalFilter(getFormString(query, 'status'));
     const productId = normalizeOptionalFilter(getFormString(query, 'product_id'));
     const customerId = normalizeOptionalFilter(getFormString(query, 'customer_id'));
+    const erpMessage = normalizeOptionalFilter(getFormString(query, 'message'));
     const statusByTab: Record<AdminErpTab, string> = {
       products: '',
       customers: '',
@@ -1547,10 +1557,60 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       totalCount: items.length,
       fetchError,
       hintMessage,
+      erpMessage,
       productOptions,
       customerOptions,
       filters: { valid, status, product_id: productId, customer_id: customerId }
     });
+  });
+
+  app.post('/erp/products/:id/create-batch', async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.status(404).send({ message: 'Not found' });
+    }
+
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) {
+      return sendUiError(request, reply, 400, 'product_id (uuid) is required');
+    }
+    const productId = params.data.id;
+    if (!z.string().uuid().safeParse(productId).success) {
+      return sendUiError(request, reply, 400, 'product_id (uuid) is required');
+    }
+
+    const url = new URL('/api/batches', erpBaseUrl).toString();
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify({ product_id: productId })
+    });
+
+    if (!response.ok) {
+      let message = `Failed creating batch (${response.status})`;
+      try {
+        const payload = (await response.json()) as { message?: unknown };
+        if (typeof payload.message === 'string' && payload.message.trim().length > 0) {
+          message = payload.message;
+        }
+      } catch {
+        // ignore JSON parse errors and keep fallback message
+      }
+      return sendUiError(request, reply, 400, message);
+    }
+
+    const payload = (await response.json()) as { batch_number?: unknown };
+    const batchNumber =
+      typeof payload.batch_number === 'string' && payload.batch_number.trim().length > 0
+        ? payload.batch_number
+        : '(unknown)';
+    const next = new URL('/erp', 'http://localhost');
+    next.searchParams.set('tab', 'products');
+    next.searchParams.set('message', `Created batch: ${batchNumber}`);
+    reply.code(303);
+    return reply.redirect(`${next.pathname}${next.search}`);
   });
 
   app.get('/admin/erp', async (_request, reply) => {

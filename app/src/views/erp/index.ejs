@@ -15,6 +15,11 @@
 
 <section class="card">
   <h3 class="card-title"><%= selectedTitle %> (<%= totalCount %>)</h3>
+  <% if (erpMessage) { %>
+    <div class="card">
+      <strong><%= erpMessage %></strong>
+    </div>
+  <% } %>
   <% if (selectedTab === 'products' || selectedTab === 'customers') { %>
     <form method="get" action="/erp" class="row">
       <input type="hidden" name="tab" value="<%= selectedTab %>" />
@@ -124,6 +129,7 @@
                 const pid = item.id ? String(item.id) : '';
                 const isBatch = type.includes('batch');
                 const isSerial = type.includes('serial');
+                const isValid = item.valid === true || String(item.valid).toLowerCase() === 'true';
               %>
               <% if (pid) { %>
                 <% if (isBatch || (!isBatch && !isSerial)) { %>
@@ -132,6 +138,13 @@
                 <% if ((isBatch || (!isBatch && !isSerial)) && (isSerial || (!isBatch && !isSerial))) { %> · <% } %>
                 <% if (isSerial || (!isBatch && !isSerial)) { %>
                   <a href="/erp?tab=serial-instances&product_id=<%= encodeURIComponent(pid) %>">serial instances</a>
+                <% } %>
+                <% if (isBatch && isValid) { %>
+                  <div>
+                    <form method="post" action="/erp/products/<%= encodeURIComponent(pid) %>/create-batch" style="display:inline;">
+                      <button class="btn btn-secondary" type="submit">Create Batch</button>
+                    </form>
+                  </div>
                 <% } %>
               <% } else { %>
                 —

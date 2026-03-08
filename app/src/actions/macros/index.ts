@@ -1,48 +1,66 @@
 export type MacroResult = {
   status?: string;
+  message?: string;
   dataJson?: Record<string, unknown>;
   externalRefsJson?: Record<string, unknown>;
   snapshotsJson?: Record<string, unknown>;
 };
 
+type MacroPatch = {
+  status?: string;
+  message?: string;
+  dataJson: Record<string, unknown>;
+  externalRefsJson: Record<string, unknown>;
+  snapshotsJson: Record<string, unknown>;
+};
+
 export type MacroCtx = {
   db: unknown;
-  erpBaseUrl: string;
-  templateJson: unknown;
-  document: { id: string; status: string };
+  doc: { id: string; status: string };
+  template: unknown;
+  data: {
+    get: (key: string) => unknown;
+  };
+  external: {
+    get: (key: string) => unknown;
+  };
+  snapshot: {
+    get: (key: string) => unknown;
+  };
+  patch: {
+    data: (key: string, value: unknown) => void;
+    external: (key: string, value: unknown) => void;
+    snapshot: (key: string, value: unknown) => void;
+    status: (status: string) => void;
+  };
+  http: {
+    erp: {
+      post: <T = unknown>(path: string, body: unknown) => Promise<T>;
+    };
+  };
+  // Backward compatible read/write fields for existing macros.
   dataJson: Record<string, unknown>;
   externalRefsJson: Record<string, unknown>;
   snapshotsJson: Record<string, unknown>;
   form?: Record<string, unknown>;
-  fetchImpl: typeof fetch;
 };
 
 export type MacroExecutionContext = MacroCtx;
 export type MacroHandler = (ctx: MacroCtx, params?: Record<string, unknown>) => Promise<MacroResult | void>;
+export type MacroPatchContext = MacroPatch;
 
 const ensureErpCustomerOrder: MacroHandler = async (ctx) => {
-  const existing = ctx.externalRefsJson.customer_order_id;
+  const existing = ctx.external.get('customer_order_id');
   if (typeof existing === 'string' && existing.length > 0) {
     return;
   }
 
-  const rawCustomerId = ctx.externalRefsJson.customer_id;
+  const rawCustomerId = ctx.external.get('customer_id');
   const customerId = typeof rawCustomerId === 'string' && rawCustomerId.length > 0 ? rawCustomerId : null;
 
-  const response = await ctx.fetchImpl(new URL('/api/customer-orders', ctx.erpBaseUrl).toString(), {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ customer_id: customerId })
-  });
-
-  if (!response.ok) {
-    throw new Error(`Macro ensureErpCustomerOrder failed (${response.status})`);
-  }
-
-  const payload = (await response.json()) as {
+  const payload = (await ctx.http.erp.post('/api/customer-orders', {
+    customer_id: customerId
+  })) as {
     id?: string;
     order_number?: string;
   };
@@ -51,19 +69,49 @@ const ensureErpCustomerOrder: MacroHandler = async (ctx) => {
     throw new Error('Macro ensureErpCustomerOrder received incomplete ERP response');
   }
 
-  ctx.externalRefsJson.customer_order_id = payload.id;
-  ctx.snapshotsJson.customer_order_id = payload.order_number;
-  ctx.dataJson.erp_customer_order_id = payload.order_number;
-  ctx.dataJson.erp_customer_order_ref = payload.id;
+  ctx.patch.external('customer_order_id', payload.id);
+  ctx.patch.snapshot('customer_order_id', payload.order_number);
+  ctx.patch.data('erp_customer_order_id', payload.order_number);
+  ctx.patch.data('erp_customer_order_ref', payload.id);
+};
+
+const createBatch: MacroHandler = async (ctx) => {
+  const productId = ctx.external.get('product_id');
+  if (typeof productId !== 'string' || productId.trim().length === 0) {
+    throw new Error('Create Batch requires external.product_id');
+  }
+
+  const payload = (await ctx.http.erp.post('/api/batches', {
+    product_id: productId
+  })) as {
+    id?: string;
+    batch_number?: string;
+  };
+
+  if (!payload.id || !payload.batch_number) {
+    throw new Error('Macro createBatch received incomplete ERP response');
+  }
+
+  ctx.patch.data('batch_number', payload.batch_number);
+  ctx.patch.external('batch_id', payload.id);
+  ctx.patch.snapshot('batch_id', payload.batch_number);
+  return { message: `Batch created: ${payload.batch_number}` };
 };
 
 const reloadLookup: MacroHandler = async () => {
   // P0 no-op: this macro exists to allow templates to reference it safely.
 };
 
-export const registry: Record<string, MacroHandler> = {
-  ensureErpCustomerOrder,
-  reloadLookup
+export const macroRegistryByRef: Record<string, MacroHandler> = {
+  'macro:erp/ensureErpCustomerOrder@1': ensureErpCustomerOrder,
+  'macro:erp/createBatch@1': createBatch,
+  'macro:ui/reloadLookup@1': reloadLookup
 };
 
-export const macroRegistry = registry;
+export const macroLegacyNameToRef: Record<string, string> = {
+  ensureErpCustomerOrder: 'macro:erp/ensureErpCustomerOrder@1',
+  createBatch: 'macro:erp/createBatch@1',
+  reloadLookup: 'macro:ui/reloadLookup@1'
+};
+
+export const macroRegistry = macroRegistryByRef;

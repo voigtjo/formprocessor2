@@ -2,6 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { executeActionDefinition, interpolateString } from './actions/index.js';
 
 describe('action engine', () => {
+  const makeMacroCatalogDb = (enabledRefs: string[]) => ({
+    query: {
+      fpMacros: {
+        findFirst: async () => {
+          const ref = enabledRefs[0];
+          return ref ? { ref, isEnabled: true } : undefined;
+        }
+      }
+    }
+  });
+
   it('interpolates supported tokens', () => {
     const result = interpolateString(
       '/api/customer-orders/{{external.customer_order_id}}/status?doc={{doc.id}}&s={{doc.status}}&n={{data.note}}&snap={{snapshot.customer_name}}',
@@ -121,7 +132,7 @@ describe('action engine', () => {
     const result = await executeActionDefinition({
       actionDef: {
         type: 'composite',
-        steps: [{ type: 'macro', name: 'ensureErpCustomerOrder' }]
+        steps: [{ type: 'macro', ref: 'macro:erp/ensureErpCustomerOrder@1' }]
       },
       context: {
         doc: { id: 'doc-4', status: 'received' },
@@ -132,7 +143,7 @@ describe('action engine', () => {
       erpBaseUrl: 'http://localhost:3001',
       fetchImpl: fetchMock as unknown as typeof fetch,
       macroContext: {
-        db: {},
+        db: makeMacroCatalogDb(['macro:erp/ensureErpCustomerOrder@1']),
         templateJson: {},
         document: { id: 'doc-4', status: 'received' }
       }
@@ -145,10 +156,10 @@ describe('action engine', () => {
     expect(result.dataJson.erp_customer_order_ref).toBe('co-11');
   });
 
-  it('returns a friendly error for unknown macro name', async () => {
+  it('returns a friendly error for unknown macro ref', async () => {
     await expect(
       executeActionDefinition({
-        actionDef: { type: 'macro', name: 'doesNotExist' },
+        actionDef: { type: 'macro', ref: 'macro:erp/doesNotExist@1' },
         context: {
           doc: { id: 'doc-5', status: 'received' },
           data: {},
@@ -157,12 +168,68 @@ describe('action engine', () => {
         },
         erpBaseUrl: 'http://localhost:3001',
         macroContext: {
-          db: {},
+          db: makeMacroCatalogDb(['macro:erp/doesNotExist@1']),
           templateJson: {},
           document: { id: 'doc-5', status: 'received' }
         }
       })
-    ).rejects.toThrow('Unknown macro: doesNotExist');
+    ).rejects.toThrow('Macro ref not implemented in runtime: macro:erp/doesNotExist@1');
+  });
+
+  it('fails gracefully when macro ref is missing in fp_macros catalog', async () => {
+    await expect(
+      executeActionDefinition({
+        actionDef: { type: 'macro', ref: 'macro:erp/createBatch@1' },
+        context: {
+          doc: { id: 'doc-10', status: 'Created' },
+          data: {},
+          external: {},
+          snapshot: {}
+        },
+        erpBaseUrl: 'http://localhost:3001',
+        macroContext: {
+          db: makeMacroCatalogDb([]),
+          templateJson: {},
+          document: { id: 'doc-10', status: 'Created' }
+        }
+      })
+    ).rejects.toThrow('Macro ref is not registered: macro:erp/createBatch@1');
+  });
+
+  it('macro createBatch writes batch fields back into document payload', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: '11111111-2222-3333-4444-555555555555',
+          batch_number: 'B-00000000-NEW'
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        }
+      )
+    );
+
+    const result = await executeActionDefinition({
+      actionDef: { type: 'macro', ref: 'macro:erp/createBatch@1' },
+      context: {
+        doc: { id: 'doc-11', status: 'Created' },
+        data: {},
+        external: { product_id: '00000000-0000-0000-0000-000000000001' },
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      macroContext: {
+        db: makeMacroCatalogDb(['macro:erp/createBatch@1']),
+        templateJson: {},
+        document: { id: 'doc-11', status: 'Created' }
+      }
+    });
+
+    expect(result.dataJson.batch_number).toBe('B-00000000-NEW');
+    expect(result.externalRefsJson.batch_id).toBe('11111111-2222-3333-4444-555555555555');
+    expect(result.snapshotsJson.batch_id).toBe('B-00000000-NEW');
   });
 
   it('normalizes customer-order transition for submit flow to avoid ERP 409', async () => {

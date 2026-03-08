@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const fpTemplates = pgTable(
   'fp_templates',
@@ -99,4 +99,19 @@ export const fpDocuments = pgTable(
     index('idx_fp_documents_assignee').on(table.assigneeUserId),
     index('idx_fp_documents_reviewer').on(table.reviewerUserId)
   ]
+);
+
+export const fpMacros = pgTable(
+  'fp_macros',
+  {
+    ref: text('ref').primaryKey(),
+    namespace: text('namespace').notNull(),
+    name: text('name').notNull(),
+    version: integer('version').notNull(),
+    description: text('description'),
+    isEnabled: boolean('is_enabled').notNull().default(true),
+    paramsSchemaJson: jsonb('params_schema_json'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [index('idx_fp_macros_enabled').on(table.isEnabled)]
 );

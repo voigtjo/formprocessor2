@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import { and, eq } from 'drizzle-orm';
 import { resolve } from 'node:path';
 import { makeDb } from './index.js';
-import { fpGroupMembers, fpGroups, fpTemplateAssignments, fpTemplates, fpUsers } from './schema.js';
+import { fpGroupMembers, fpGroups, fpMacros, fpTemplateAssignments, fpTemplates, fpUsers } from './schema.js';
 
 dotenv.config({ path: resolve(process.cwd(), '../.env') });
 
@@ -47,6 +47,42 @@ async function upsertMembership(
 
 async function upsertTemplateAssignment(db: ReturnType<typeof makeDb>['db'], templateId: string, groupId: string) {
   await db.insert(fpTemplateAssignments).values({ templateId, groupId }).onConflictDoNothing();
+}
+
+async function upsertMacro(
+  db: ReturnType<typeof makeDb>['db'],
+  values: {
+    ref: string;
+    namespace: string;
+    name: string;
+    version: number;
+    description: string;
+    isEnabled?: boolean;
+    paramsSchemaJson?: Record<string, unknown> | null;
+  }
+) {
+  await db
+    .insert(fpMacros)
+    .values({
+      ref: values.ref,
+      namespace: values.namespace,
+      name: values.name,
+      version: values.version,
+      description: values.description,
+      isEnabled: values.isEnabled ?? true,
+      paramsSchemaJson: values.paramsSchemaJson ?? null
+    })
+    .onConflictDoUpdate({
+      target: fpMacros.ref,
+      set: {
+        namespace: values.namespace,
+        name: values.name,
+        version: values.version,
+        description: values.description,
+        isEnabled: values.isEnabled ?? true,
+        paramsSchemaJson: values.paramsSchemaJson ?? null
+      }
+    });
 }
 
 async function findSeedTemplateId(db: ReturnType<typeof makeDb>['db']) {
@@ -205,6 +241,30 @@ async function run() {
     }
     const rbacTemplateId = await upsertRbacTestV2Template(db);
     await upsertTemplateAssignment(db, rbacTemplateId, opsId);
+    await upsertMacro(db, {
+      ref: 'macro:erp/createBatch@1',
+      namespace: 'erp',
+      name: 'createBatch',
+      version: 1,
+      description: 'Create ERP batch for a batch product',
+      isEnabled: true
+    });
+    await upsertMacro(db, {
+      ref: 'macro:erp/ensureErpCustomerOrder@1',
+      namespace: 'erp',
+      name: 'ensureErpCustomerOrder',
+      version: 1,
+      description: 'Ensure ERP customer order reference exists',
+      isEnabled: true
+    });
+    await upsertMacro(db, {
+      ref: 'macro:ui/reloadLookup@1',
+      namespace: 'ui',
+      name: 'reloadLookup',
+      version: 1,
+      description: 'UI helper macro to trigger lookup refresh',
+      isEnabled: true
+    });
 
     console.log('Seed ensured groups: ops, qa');
     console.log('Seed ensured users: alice, bob, charly');
@@ -215,6 +275,7 @@ async function run() {
       console.log('Seed note: no published template found for automatic ops assignment.');
     }
     console.log(`Seed ensured template versions: rbac-test-v2 v1 published + v2 draft (published id ${rbacTemplateId})`);
+    console.log('Seed ensured macros: macro:erp/createBatch@1, macro:erp/ensureErpCustomerOrder@1, macro:ui/reloadLookup@1');
   } finally {
     await pool.end();
   }

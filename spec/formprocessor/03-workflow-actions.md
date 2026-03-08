@@ -45,16 +45,26 @@ Status source-of-truth behavior:
 - workflow status must not be mirrored to `data_json.status` or `external_refs_json.status`
 - UI workflow field `status` displays `doc.status` (not `data_json.status`)
 
-### Macro (planned extension)
+### MacroRef execution
 
 ```json
-{ "type": "macro", "name": "assign", "params": {} }
+{ "type": "macro", "ref": "macro:erp/createBatch@1", "params": {} }
 ```
 
-Macro registry concept:
-- TypeScript functions keyed by macro name
-- invoked by the action engine
-- can perform domain logic, API calls, and transitions
+MacroRef syntax:
+- `macro:<namespace>/<name>@<version>`
+- example: `macro:erp/createBatch@1`
+
+Execution semantics:
+1. Action step is resolved by `ref` (legacy `name` may be mapped for backward compatibility).
+2. Engine checks DB catalog table `fp_macros`:
+   - `ref` must exist
+   - `is_enabled` must be `true`
+3. Engine checks in-code macro registry implementation for the same ref.
+4. If catalog entry is missing/disabled or runtime implementation is missing:
+   - fail gracefully with clear error message
+   - no partial document update
+   - no unhandled 500 crash in UI flow
 
 ## Interpolation
 

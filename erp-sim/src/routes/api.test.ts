@@ -27,6 +27,13 @@ function createRepo(overrides: Partial<ApiRepo> = {}): ApiRepo {
       status: 'received',
       createdAt: new Date()
     }),
+    createBatch: async (productId) => ({
+      id: 'b-1',
+      productId,
+      batchNumber: 'B-TEST',
+      status: 'ordered',
+      createdAt: new Date()
+    }),
     randomize: async () => ({
       products: 0,
       customers: 0,
@@ -207,6 +214,75 @@ describe('ERP API', () => {
     });
     expect(missing.statusCode).toBe(404);
 
+    await app.close();
+  });
+
+  it('POST /api/batches creates a batch for batch-type product', async () => {
+    const productId = '00000000-0000-0000-0000-000000000001';
+    const createdAt = new Date('2026-01-03T00:00:00.000Z');
+    const app = await createApp(
+      createRepo({
+        getProductById: async (id) =>
+          id === productId ? { id, name: 'Batch Product', valid: true, productType: 'batch' as const } : undefined,
+        createBatch: async (id) => ({
+          id: '00000000-0000-0000-0000-0000000000b1',
+          productId: id,
+          batchNumber: 'B-00000000-XYZ',
+          status: 'ordered',
+          createdAt
+        })
+      })
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/batches',
+      payload: { product_id: productId }
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      id: '00000000-0000-0000-0000-0000000000b1',
+      product_id: productId,
+      batch_number: 'B-00000000-XYZ',
+      status: 'ordered',
+      created_at: createdAt.toISOString()
+    });
+
+    await app.close();
+  });
+
+  it('POST /api/batches rejects serial product with 400', async () => {
+    const productId = '00000000-0000-0000-0000-000000000002';
+    const app = await createApp(
+      createRepo({
+        getProductById: async (id) =>
+          id === productId ? { id, name: 'Serial Product', valid: true, productType: 'serial' as const } : undefined
+      })
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/batches',
+      payload: { product_id: productId }
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain('product_type must be batch');
+    await app.close();
+  });
+
+  it('POST /api/batches rejects invalid product_id with 400', async () => {
+    const app = await createApp(createRepo());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/batches',
+      payload: { product_id: '00000000-0000-0000-0000-000000000099' }
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain('product not found');
     await app.close();
   });
 });
