@@ -151,7 +151,7 @@ describe('RBAC action permissions', () => {
     await app.close();
   });
 
-  it('denies bob (r) for execute-protected action with 403', async () => {
+  it('denies bob (r) for execute-protected action and redirects with error', async () => {
     const app = await createApp(createMockDb('rwx', 'r'));
     const res = await app.inject({
       method: 'POST',
@@ -162,8 +162,9 @@ describe('RBAC action permissions', () => {
       payload: {}
     });
 
-    expect(res.statusCode).toBe(403);
-    expect(res.json().message).toContain('Forbidden: requires execute (x), user has r');
+    expect(res.statusCode).toBe(303);
+    expect(res.headers.location).toContain('/documents/00000000-0000-0000-0000-0000000000d1?error=');
+    expect(String(res.headers.location)).toContain('Forbidden%3A+requires+execute');
     await app.close();
   });
 

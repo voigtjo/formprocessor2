@@ -37,6 +37,7 @@
       <th>Created</th>
       <th>Group</th>
       <th>Template</th>
+      <th>Task State</th>
       <th>Status</th>
       <th>Role</th>
       <th></th>
@@ -44,13 +45,14 @@
   </thead>
   <tbody>
     <% if (!tasks || tasks.length === 0) { %>
-      <tr><td colspan="6" class="muted">No open tasks.</td></tr>
+      <tr><td colspan="7" class="muted">No tasks.</td></tr>
     <% } %>
     <% (tasks || []).forEach((doc) => { %>
       <tr>
         <td><%= new Date(doc.createdAt).toLocaleString() %></td>
         <td><%= doc.groupName || '—' %></td>
         <td><%= doc.templateName %> (<code><%= doc.templateKey %></code>)</td>
+        <td><span class="badge"><%= doc.taskState %></span></td>
         <td><span class="badge badge-status"><%= doc.status %></span></td>
         <td><%= doc.role %></td>
         <td><a href="/documents/<%= doc.id %>">Open</a></td>

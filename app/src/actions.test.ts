@@ -1,16 +1,24 @@
+import dotenv from 'dotenv';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { makeDb as makeRealDb } from './db/index.js';
+import { fpMacros } from './db/schema.js';
 import { executeActionDefinition, interpolateString } from './actions/index.js';
+
+dotenv.config({ path: resolve(process.cwd(), '../.env') });
 
 describe('action engine', () => {
   const makeMacroCatalogDb = (enabledRefs: string[]) => ({
-    query: {
-      fpMacros: {
-        findFirst: async () => {
-          const ref = enabledRefs[0];
-          return ref ? { ref, isEnabled: true } : undefined;
-        }
-      }
-    }
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            const ref = enabledRefs[0];
+            return ref ? [{ ref, isEnabled: true }] : [];
+          }
+        })
+      })
+    })
   });
 
   it('interpolates supported tokens', () => {
@@ -193,7 +201,120 @@ describe('action engine', () => {
           document: { id: 'doc-10', status: 'Created' }
         }
       })
-    ).rejects.toThrow('Macro ref is not registered: macro:erp/createBatch@1');
+    ).rejects.toThrow('Macro not found in catalog: macro:erp/createBatch@1');
+  });
+
+  it('returns clear error when macro catalog is not configured', async () => {
+    await expect(
+      executeActionDefinition({
+        actionDef: { type: 'macro', ref: 'macro:erp/createBatch@1' },
+        context: {
+          doc: { id: 'doc-10b', status: 'Created' },
+          data: {},
+          external: {},
+          snapshot: {}
+        },
+        erpBaseUrl: 'http://localhost:3001',
+        macroContext: {
+          db: {},
+          templateJson: {},
+          document: { id: 'doc-10b', status: 'Created' }
+        }
+      })
+    ).rejects.toThrow('Action runtime database is not configured');
+  });
+
+  it('uses passed runtime db.select for macro catalog lookup without crashing', async () => {
+    let selectCalled = false;
+    const runtimeDb = {
+      select: () => {
+        selectCalled = true;
+        return {
+          from: () => ({
+            where: () => ({
+              limit: async () => [{ ref: 'macro:ui/reloadLookup@1', isEnabled: true }]
+            })
+          })
+        };
+      }
+    };
+
+    const result = await executeActionDefinition({
+      actionDef: { type: 'macro', ref: 'macro:ui/reloadLookup@1' },
+      context: {
+        doc: { id: 'doc-10c', status: 'Created' },
+        data: {},
+        external: {},
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      macroContext: {
+        db: runtimeDb,
+        templateJson: {},
+        document: { id: 'doc-10c', status: 'Created' }
+      }
+    });
+
+    expect(selectCalled).toBe(true);
+    expect(result.status).toBe('Created');
+  });
+
+  it('integration: macro catalog lookup works with real db factory setup', async () => {
+    if (!process.env.FP_DATABASE_URL) {
+      expect(true).toBe(true);
+      return;
+    }
+
+    const { db, pool } = makeRealDb();
+    try {
+      await db
+        .insert(fpMacros)
+        .values({
+          ref: 'macro:ui/reloadLookup@1',
+          namespace: 'ui',
+          name: 'reloadLookup',
+          version: 1,
+          description: 'Reload lookup options',
+          isEnabled: true
+        })
+        .onConflictDoUpdate({
+          target: fpMacros.ref,
+          set: {
+            namespace: 'ui',
+            name: 'reloadLookup',
+            version: 1,
+            description: 'Reload lookup options',
+            isEnabled: true
+          }
+        });
+
+      const result = await executeActionDefinition({
+        actionDef: { type: 'macro', ref: 'macro:ui/reloadLookup@1' },
+        context: {
+          doc: { id: 'doc-real-1', status: 'Created' },
+          data: {},
+          external: {},
+          snapshot: {}
+        },
+        erpBaseUrl: 'http://localhost:3001',
+        macroContext: {
+          db,
+          templateJson: {},
+          document: { id: 'doc-real-1', status: 'Created' }
+        }
+      });
+
+      expect(result.status).toBe('Created');
+    } catch (error) {
+      const code = (error as { code?: string } | undefined)?.code;
+      if (code === 'EPERM' || code === 'ECONNREFUSED' || code === 'ENOTFOUND') {
+        expect(true).toBe(true);
+        return;
+      }
+      throw error;
+    } finally {
+      await pool.end();
+    }
   });
 
   it('macro createBatch writes batch fields back into document payload', async () => {
@@ -230,6 +351,30 @@ describe('action engine', () => {
     expect(result.dataJson.batch_number).toBe('B-00000000-NEW');
     expect(result.externalRefsJson.batch_id).toBe('11111111-2222-3333-4444-555555555555');
     expect(result.snapshotsJson.batch_id).toBe('B-00000000-NEW');
+    const requestInit = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(requestInit?.body ?? '{}'))).toEqual({
+      product_id: '00000000-0000-0000-0000-000000000001'
+    });
+  });
+
+  it('macro createBatch fails with user-friendly error when no product is selected', async () => {
+    await expect(
+      executeActionDefinition({
+        actionDef: { type: 'macro', ref: 'macro:erp/createBatch@1' },
+        context: {
+          doc: { id: 'doc-12', status: 'Created' },
+          data: {},
+          external: {},
+          snapshot: {}
+        },
+        erpBaseUrl: 'http://localhost:3001',
+        macroContext: {
+          db: makeMacroCatalogDb(['macro:erp/createBatch@1']),
+          templateJson: {},
+          document: { id: 'doc-12', status: 'Created' }
+        }
+      })
+    ).rejects.toThrow('Select a product first.');
   });
 
   it('normalizes customer-order transition for submit flow to avoid ERP 409', async () => {

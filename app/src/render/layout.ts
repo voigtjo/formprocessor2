@@ -22,9 +22,11 @@ type LayoutNode = {
   label?: string;
   action?: string;
   variant?: string;
+  kind?: string;
   width?: string | number;
   targets?: string[];
   params?: Record<string, unknown>;
+  confirm?: string;
   children?: LayoutNode[];
 };
 
@@ -47,6 +49,10 @@ function isCheckedValue(value: unknown) {
     .trim()
     .toLowerCase();
   return normalized === 'true' || normalized === 'yes' || normalized === '1';
+}
+
+function isEditableFieldKind(kind: string) {
+  return kind === 'editable' || kind === 'date' || kind === 'checkbox';
 }
 
 function normalizeLayoutNodes(templateJson: any): LayoutNode[] {
@@ -124,7 +130,7 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
   const field = (params.templateJson?.fields ?? {})[fieldKey] ?? {};
   const label = escapeHtml(field.label ?? fieldKey);
   const kind = String(field.kind ?? 'unknown');
-  const uiInputCandidate = field?.inputType ?? field?.control ?? field?.ui?.input;
+  const uiInputCandidate = field?.inputType ?? field?.control ?? field?.ui?.input ?? kind;
   const uiInput = uiInputCandidate === 'date' || uiInputCandidate === 'checkbox' ? uiInputCandidate : 'text';
   const isWorkflow = kind === 'workflow';
   const isStatusWorkflowField = isWorkflow && fieldKey === 'status';
@@ -138,7 +144,7 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
   const externalValue = params.externalRefsJson?.[fieldKey];
   const inEditable = (params.editableKeys ?? []).includes(fieldKey);
   const inReadonly = (params.readonlyKeys ?? []).includes(fieldKey);
-  const isEditable = !isWorkflow && (inEditable || (!inReadonly && kind === 'editable'));
+  const isEditable = !isWorkflow && (inEditable || (!inReadonly && isEditableFieldKind(kind)));
   const isSystemLike = kind === 'system' || isWorkflow;
   const workflowDisplay = isStatusWorkflowField ? params.documentStatus : dataValue ?? snapshotValue ?? externalValue;
   const systemLikeDisplay = isWorkflow ? workflowDisplay : dataValue ?? snapshotValue ?? externalValue;
@@ -178,22 +184,29 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
     if (kind === 'lookup') {
       const templateId = params.templateId ?? '';
       const hxVals = JSON.stringify({ templateId, fieldKey });
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="#doc-form" hx-trigger="load, change from:#doc-form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="">Loading...</option></select></div>`;
+      if (isEditable) {
+        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="#doc-form" hx-trigger="load, change from:#doc-form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="">Loading...</option></select></div>`;
+      }
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" disabled><option value="">—</option></select></div>`;
     }
 
-    if (kind === 'editable' && field.multiline) {
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"></textarea></div>`;
+    if (isEditableFieldKind(kind) && field.multiline) {
+      const disabledAttr = isEditable ? '' : ' disabled';
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"${disabledAttr}>${escapeHtml(dataValue ?? '')}</textarea></div>`;
     }
 
-    if (kind === 'editable') {
+    if (isEditableFieldKind(kind)) {
       if (uiInput === 'date') {
-        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}" /></div>`;
+        const disabledAttr = isEditable ? '' : ' disabled';
+        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
       }
       if (uiInput === 'checkbox') {
         const checked = isCheckedValue(dataValue) ? ' checked' : '';
-        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked} /></div>`;
+        const disabledAttr = isEditable ? '' : ' disabled';
+        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked}${disabledAttr} /></div>`;
       }
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" /></div>`;
+      const disabledAttr = isEditable ? '' : ' disabled';
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
     }
 
     return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" type="text" disabled value="" /></div>`;
@@ -212,20 +225,19 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
     return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" disabled><option value="${escapeAttr(optionValue)}" selected>${escapeHtml(optionLabel)}</option></select></div>`;
   }
 
-  if (kind === 'editable') {
-    const roAttr = isEditable ? '' : ' readonly';
+  if (isEditableFieldKind(kind)) {
+    const disabledAttr = isEditable ? '' : ' disabled';
     if (field.multiline) {
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"${roAttr}>${escapeHtml(dataValue ?? '')}</textarea></div>`;
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"${disabledAttr}>${escapeHtml(dataValue ?? '')}</textarea></div>`;
     }
     if (uiInput === 'date') {
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${roAttr} /></div>`;
+      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
     }
     if (uiInput === 'checkbox') {
       const checked = isCheckedValue(dataValue) ? ' checked' : '';
-      const disabledAttr = isEditable ? '' : ' disabled';
       return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked}${disabledAttr} /></div>`;
     }
-    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${roAttr} /></div>`;
+    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
   }
 
   if (isSystemLike) {
@@ -332,6 +344,10 @@ function renderButton(node: LayoutNode, params: RenderLayoutParams) {
   const label = escapeHtml(node.label ?? node.key ?? node.action ?? 'Button');
   const action = typeof node.action === 'string' ? node.action : undefined;
   const variantClass = ' btn-secondary';
+  const kind = node.kind === 'process' ? 'process' : 'ui';
+  const confirmAttr = typeof node.confirm === 'string' && node.confirm.trim().length > 0
+    ? ` hx-confirm="${escapeAttr(node.confirm)}"`
+    : '';
 
   if (!action) {
     return `<button type="button" class="btn${variantClass}" disabled>${label}</button>`;
@@ -339,8 +355,12 @@ function renderButton(node: LayoutNode, params: RenderLayoutParams) {
 
   if (params.mode === 'detail' && params.documentId) {
     const controlKey = resolveControlKeyFromAction(params.templateJson, action);
-    const endpoint = `/documents/${encodeURIComponent(params.documentId)}/action/${encodeURIComponent(controlKey)}?source=ui`;
-    return `<button type="button" class="btn${variantClass}" hx-post="${escapeAttr(endpoint)}" hx-include="closest form" hx-swap="none">${label}</button>`;
+    const actionUrl = `/documents/${encodeURIComponent(params.documentId)}/action/${encodeURIComponent(controlKey)}`;
+    if (kind === 'process') {
+      return `<button type="submit" class="btn${variantClass}" form="document-form" formaction="${escapeAttr(actionUrl)}" formmethod="post" data-fp-action-key="${escapeAttr(controlKey)}" data-fp-action-kind="${escapeAttr(kind)}"${confirmAttr}>${label}</button>`;
+    }
+    const endpoint = `${actionUrl}?source=ui`;
+    return `<button type="button" class="btn${variantClass}" hx-post="${escapeAttr(endpoint)}" hx-include="closest form" hx-swap="none" hx-on::after-request="if(event.detail.successful) window.location.reload()" data-fp-action-key="${escapeAttr(controlKey)}" data-fp-action-kind="${escapeAttr(kind)}"${confirmAttr}>${label}</button>`;
   }
 
   if (params.mode === 'new') {

@@ -43,6 +43,15 @@ export type ActionExecutionResult = {
   dataJson: Record<string, unknown>;
   externalRefsJson: Record<string, unknown>;
   snapshotsJson: Record<string, unknown>;
+  macroLogs?: Array<{
+    ref: string;
+    patchKeys: {
+      data: string[];
+      external: string[];
+      snapshot: string[];
+      status?: string;
+    };
+  }>;
 };
 
 export class ExternalCallError extends Error {
@@ -286,19 +295,37 @@ function resolveMacroRef(step: Extract<ActionStep, { type: 'macro' }>) {
 }
 
 async function ensureMacroIsEnabledInCatalog(db: unknown, ref: string) {
-  const dbQuery = (db as { query?: { fpMacros?: { findFirst?: (args: unknown) => Promise<unknown> } } })?.query?.fpMacros
-    ?.findFirst;
-  if (!dbQuery) {
-    throw new Error('Macro execution requires fp_macros catalog access.');
+  const runtimeDb = db as { select?: (...args: unknown[]) => any } | null | undefined;
+  if (!runtimeDb || typeof runtimeDb !== 'object' || typeof runtimeDb.select !== 'function') {
+    throw new Error('Action runtime database is not configured');
   }
 
-  const row = (await dbQuery({ where: eq(fpMacros.ref, ref) })) as { ref?: string; isEnabled?: boolean } | undefined;
+  let rows: Array<{ ref: string; isEnabled: boolean }>;
+  try {
+    rows = (await runtimeDb
+      .select({
+        ref: fpMacros.ref,
+        isEnabled: fpMacros.isEnabled
+      })
+      .from(fpMacros)
+      .where(eq(fpMacros.ref, ref))
+      .limit(1)) as Array<{ ref: string; isEnabled: boolean }>;
+  } catch (error) {
+    throw new Error('Action runtime database is not configured');
+  }
+
+  const row = rows[0];
   if (!row) {
-    throw new Error(`Macro ref is not registered: ${ref}`);
+    console.info('[fp] macro catalog lookup', { macroRef: ref, found: false, enabled: false });
+    throw new Error(`Macro not found in catalog: ${ref}`);
   }
+
   if (!row.isEnabled) {
-    throw new Error(`Macro ref is disabled: ${ref}`);
+    console.info('[fp] macro catalog lookup', { macroRef: ref, found: true, enabled: false });
+    throw new Error(`Macro not enabled: ${ref}`);
   }
+
+  console.info('[fp] macro catalog lookup', { macroRef: ref, found: true, enabled: true });
 }
 
 export async function executeActionDefinition(params: {
@@ -309,14 +336,28 @@ export async function executeActionDefinition(params: {
   macroContext?: {
     db: unknown;
     templateJson: unknown;
+    templateDefinition?: {
+      fullSchema?: unknown;
+      template?: unknown;
+    };
+    schema?: unknown;
     document: { id: string; status: string };
     form?: Record<string, unknown>;
   };
+  onMacroEvent?: (event: {
+    macroRef: string;
+    namespace: string;
+    name: string;
+    version: number | null;
+    outcome: 'success' | 'error';
+    errorMessage?: string;
+  }) => void;
 }): Promise<ActionExecutionResult> {
   const fetchImpl = params.fetchImpl ?? fetch;
   const nextData = { ...params.context.data };
   const nextExternal = { ...params.context.external };
   const nextSnapshot = { ...params.context.snapshot };
+  const macroLogs: NonNullable<ActionExecutionResult['macroLogs']> = [];
   let nextStatus = params.context.doc.status;
 
   const actionContext: ActionContext = {
@@ -368,11 +409,23 @@ export async function executeActionDefinition(params: {
       if (!macroRef) {
         throw new Error('Macro step requires ref (or legacy name).');
       }
+      const runtimeDb = params.macroContext?.db as { select?: unknown; query?: unknown } | undefined;
+      console.info('[fp] action macro runtime db', {
+        macroRef,
+        dbType: typeof runtimeDb,
+        dbExists: !!runtimeDb,
+        hasSelect: typeof runtimeDb?.select === 'function',
+        hasQuery: !!runtimeDb?.query
+      });
       await ensureMacroIsEnabledInCatalog(params.macroContext?.db, macroRef);
       const macro = macroRegistryByRef[macroRef];
       if (!macro) {
         throw new Error(`Macro ref not implemented in runtime: ${macroRef}`);
       }
+      const parsed = /^macro:([^/]+)\/([^@]+)@(\d+)$/.exec(macroRef);
+      const macroNamespace = parsed?.[1] ?? 'unknown';
+      const macroName = parsed?.[2] ?? macroRef;
+      const macroVersion = parsed?.[3] ? Number(parsed[3]) : null;
 
       const macroPatch: MacroPatchContext = {
         dataJson: {},
@@ -413,6 +466,8 @@ export async function executeActionDefinition(params: {
           status: nextStatus
         },
         template: params.macroContext?.templateJson,
+        templateDefinition: params.macroContext?.templateDefinition,
+        schema: params.macroContext?.schema,
         data: {
           get: (key: string) => nextData[key]
         },
@@ -447,9 +502,38 @@ export async function executeActionDefinition(params: {
         form: params.macroContext?.form
       };
 
-      const macroResult = await macro(macroCtx, step.params);
+      let macroResult: MacroResult | void;
+      try {
+        macroResult = await macro(macroCtx, step.params);
+      } catch (error) {
+        params.onMacroEvent?.({
+          macroRef,
+          namespace: macroNamespace,
+          name: macroName,
+          version: macroVersion,
+          outcome: 'error',
+          errorMessage: error instanceof Error ? error.message : 'Macro execution failed'
+        });
+        throw error;
+      }
       applyMacroPatch(macroPatch, nextData, nextExternal, nextSnapshot);
       applyMacroResult(macroResult, nextData, nextExternal, nextSnapshot);
+      params.onMacroEvent?.({
+        macroRef,
+        namespace: macroNamespace,
+        name: macroName,
+        version: macroVersion,
+        outcome: 'success'
+      });
+      macroLogs.push({
+        ref: macroRef,
+        patchKeys: {
+          data: Object.keys(macroPatch.dataJson),
+          external: Object.keys(macroPatch.externalRefsJson),
+          snapshot: Object.keys(macroPatch.snapshotsJson),
+          ...(macroPatch.status ? { status: macroPatch.status } : {})
+        }
+      });
 
       if (macroPatch.status) {
         nextStatus = macroPatch.status;
@@ -470,6 +554,7 @@ export async function executeActionDefinition(params: {
     status: nextStatus,
     dataJson: nextData,
     externalRefsJson: nextExternal,
-    snapshotsJson: nextSnapshot
+    snapshotsJson: nextSnapshot,
+    macroLogs
   };
 }

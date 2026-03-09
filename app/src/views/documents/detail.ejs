@@ -8,52 +8,54 @@
     <p class="workflow-timeline">
       <% workflowTimeline.forEach((state, index) => { %>
         <% if (index > 0) { %><span class="muted">→</span><% } %>
-        <span class="badge <%= state === document.status ? 'badge-status' : '' %>"><%= state %></span>
+        <span class="badge <%= String(state).toLowerCase() === String(document.status).toLowerCase() ? 'badge-status' : '' %>"><%= state %></span>
       <% }) %>
     </p>
   <% } %>
 </header>
 <section class="card">
   <h3 class="card-title">Assignments</h3>
-  <p class="muted">Editor: <strong><%= assignmentEditorName || '—' %></strong></p>
-  <p class="muted">Approver: <strong><%= assignmentApproverName || '—' %></strong></p>
+  <p class="muted">Editor: <strong><%= assignmentEditorName || '—' %></strong> · Approver: <strong><%= assignmentApproverName || '—' %></strong></p>
   <% if (!hasDocumentActorColumns) { %>
     <p class="muted">Assignments unavailable until DB migration is applied.</p>
   <% } else if (!assignmentGroupId) { %>
     <p class="muted">No group assigned</p>
   <% } else { %>
-    <form method="post" action="/documents/<%= document.id %>/assign/editor" class="row">
-      <div class="col col-6">
-        <label for="editor-user-id">Editor</label>
-        <select id="editor-user-id" name="userId">
-          <% (assignmentEditorCandidates || []).forEach((member) => { %>
-            <option value="<%= member.id %>" <%= document.editorUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
-          <% }) %>
-        </select>
-        <% if (assignmentEditorHint) { %>
-          <p class="muted"><%= assignmentEditorHint %></p>
-        <% } %>
-      </div>
-      <div class="col">
-        <button class="btn btn-secondary" type="submit">Set Editor</button>
-      </div>
-    </form>
-    <form method="post" action="/documents/<%= document.id %>/assign/approver" class="row">
-      <div class="col col-6">
-        <label for="approver-user-id">Approver</label>
-        <select id="approver-user-id" name="userId">
-          <% (assignmentApproverCandidates || []).forEach((member) => { %>
-            <option value="<%= member.id %>" <%= document.approverUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
-          <% }) %>
-        </select>
-        <% if (assignmentApproverHint) { %>
-          <p class="muted"><%= assignmentApproverHint %></p>
-        <% } %>
-      </div>
-      <div class="col">
-        <button class="btn btn-secondary" type="submit">Set Approver</button>
-      </div>
-    </form>
+    <details>
+      <summary class="btn btn-secondary"><%= (document.editorUserId || document.approverUserId) ? 'Change assignments' : 'Edit assignments' %></summary>
+      <form method="post" action="/documents/<%= document.id %>/assign/editor" class="row">
+        <div class="col col-6">
+          <label for="editor-user-id">Editor</label>
+          <select id="editor-user-id" name="userId">
+            <% (assignmentEditorCandidates || []).forEach((member) => { %>
+              <option value="<%= member.id %>" <%= document.editorUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
+            <% }) %>
+          </select>
+          <% if (assignmentEditorHint) { %>
+            <p class="muted"><%= assignmentEditorHint %></p>
+          <% } %>
+        </div>
+        <div class="col">
+          <button class="btn btn-secondary" type="submit">Set Editor</button>
+        </div>
+      </form>
+      <form method="post" action="/documents/<%= document.id %>/assign/approver" class="row">
+        <div class="col col-6">
+          <label for="approver-user-id">Approver</label>
+          <select id="approver-user-id" name="userId">
+            <% (assignmentApproverCandidates || []).forEach((member) => { %>
+              <option value="<%= member.id %>" <%= document.approverUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
+            <% }) %>
+          </select>
+          <% if (assignmentApproverHint) { %>
+            <p class="muted"><%= assignmentApproverHint %></p>
+          <% } %>
+        </div>
+        <div class="col">
+          <button class="btn btn-secondary" type="submit">Set Approver</button>
+        </div>
+      </form>
+    </details>
   <% } %>
 </section>
 <% if (errorMessage) { %>
@@ -62,20 +64,32 @@
   </div>
 <% } %>
 
+<div class="actions">
+<% (buttonKeys || []).forEach((controlKey) => {
+  const control = (templateJson.controls || {})[controlKey] || {};
+  const label = control.label || controlKey;
+%>
+  <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= controlKey %>" formmethod="post"><%= label %></button>
+<% }) %>
+</div>
+
 <form id="document-form" method="post" action="/documents/<%= document.id %>/save" class="card">
   <%- layoutHtml %>
-  <div class="actions">
-  <% (buttonKeys || []).forEach((controlKey) => {
-    const control = (templateJson.controls || {})[controlKey] || {};
-    const label = control.label || controlKey;
-  %>
-    <form method="post" action="/documents/<%= document.id %>/action/<%= controlKey %>">
-      <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= controlKey %>" formmethod="post"><%= label %></button>
-    </form>
-  <% }) %>
-  </div>
 </form>
 <div class="actions">
   <a class="btn btn-secondary" href="/documents">Back to Documents</a>
   <a class="btn btn-secondary" href="/templates">Templates</a>
 </div>
+<script>
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    var submitter = event.submitter;
+    if (!(submitter instanceof HTMLElement)) return;
+    var actionKey = submitter.getAttribute('data-fp-action-key');
+    var kind = submitter.getAttribute('data-fp-action-kind');
+    if (!actionKey || !kind) return;
+    var url = submitter.getAttribute('formaction') || form.getAttribute('action') || '';
+    console.log('[fp] submit action ' + actionKey + ' kind=' + kind + ' url=' + url);
+  });
+</script>

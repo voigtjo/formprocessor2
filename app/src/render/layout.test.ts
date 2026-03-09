@@ -49,9 +49,29 @@ describe('layout renderer v2', () => {
     });
 
     expect(html).toContain('hx-post="/documents/doc-1/action/submit?source=ui"');
+    expect(html).toContain('hx-on::after-request="if(event.detail.successful) window.location.reload()"');
     expect(html).toContain('btn btn-secondary');
     expect(html).toContain('type="button"');
     expect(html).toContain('>Submit<');
+  });
+
+  it('renders process-kind detail button as form submit without source=ui', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      documentId: 'doc-1',
+      templateJson: {
+        fields: {},
+        controls: {
+          create_batch: { action: 'create_batch' }
+        },
+        layout: [{ type: 'button', key: 'create_batch', label: 'Create Batch', action: 'create_batch', kind: 'process' }]
+      }
+    });
+
+    expect(html).toContain('type="submit"');
+    expect(html).toContain('formaction="/documents/doc-1/action/create_batch"');
+    expect(html).not.toContain('?source=ui');
+    expect(html).toContain('data-fp-action-kind="process"');
   });
 
   it('renders new button node for lookup reload via targets + htmx trigger', () => {
@@ -191,6 +211,30 @@ describe('layout renderer v2', () => {
     expect(html).toContain('name="data:urgent"');
     expect(html).toContain('type="checkbox"');
     expect(html).toContain('value="1"');
+    expect(html).toContain('checked');
+  });
+
+  it('renders kind=date and kind=checkbox as typed inputs', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      templateId: 'tpl-1',
+      documentId: 'doc-1',
+      editableKeys: ['due_date', 'urgent'],
+      readonlyKeys: [],
+      dataJson: { due_date: '2026-03-09', urgent: true },
+      templateJson: {
+        fields: {
+          due_date: { kind: 'date', label: 'Due Date' },
+          urgent: { kind: 'checkbox', label: 'Urgent' }
+        },
+        layout: [{ type: 'field', key: 'due_date' }, { type: 'field', key: 'urgent' }]
+      }
+    });
+
+    expect(html).toContain('name="data:due_date"');
+    expect(html).toContain('type="date"');
+    expect(html).toContain('name="data:urgent"');
+    expect(html).toContain('type="checkbox"');
     expect(html).toContain('checked');
   });
 });

@@ -18,6 +18,11 @@ export type MacroCtx = {
   db: unknown;
   doc: { id: string; status: string };
   template: unknown;
+  templateDefinition?: {
+    fullSchema?: unknown;
+    template?: unknown;
+  };
+  schema?: unknown;
   data: {
     get: (key: string) => unknown;
   };
@@ -75,10 +80,26 @@ const ensureErpCustomerOrder: MacroHandler = async (ctx) => {
   ctx.patch.data('erp_customer_order_ref', payload.id);
 };
 
-const createBatch: MacroHandler = async (ctx) => {
-  const productId = ctx.external.get('product_id');
-  if (typeof productId !== 'string' || productId.trim().length === 0) {
-    throw new Error('Create Batch requires external.product_id');
+const createBatch: MacroHandler = async (ctx, params) => {
+  const productRefKey =
+    typeof params?.productRefKey === 'string' && params.productRefKey.trim().length > 0
+      ? params.productRefKey.trim()
+      : 'product_id';
+  const writeFieldKey =
+    typeof params?.writeFieldKey === 'string' && params.writeFieldKey.trim().length > 0
+      ? params.writeFieldKey.trim()
+      : 'batch_number';
+
+  const fromExternal = ctx.external.get(productRefKey);
+  const fromData = ctx.data.get(productRefKey);
+  const productId =
+    typeof fromExternal === 'string' && fromExternal.trim().length > 0
+      ? fromExternal.trim()
+      : typeof fromData === 'string' && fromData.trim().length > 0
+        ? fromData.trim()
+        : '';
+  if (!productId) {
+    throw new Error('Select a product first.');
   }
 
   const payload = (await ctx.http.erp.post('/api/batches', {
@@ -92,8 +113,10 @@ const createBatch: MacroHandler = async (ctx) => {
     throw new Error('Macro createBatch received incomplete ERP response');
   }
 
-  ctx.patch.data('batch_number', payload.batch_number);
-  ctx.patch.external('batch_id', payload.id);
+  ctx.patch.data(writeFieldKey, payload.batch_number);
+  if (typeof payload.id === 'string' && payload.id.trim().length > 0) {
+    ctx.patch.external('batch_id', payload.id);
+  }
   ctx.patch.snapshot('batch_id', payload.batch_number);
   return { message: `Batch created: ${payload.batch_number}` };
 };

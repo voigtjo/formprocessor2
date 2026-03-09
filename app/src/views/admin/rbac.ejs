@@ -178,6 +178,28 @@
   </table>
 </section>
 
+<section id="macros" class="card">
+  <h3 class="card-title">Macros (Read-only)</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Ref</th>
+        <th>Enabled</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% (macros || []).forEach((item) => { %>
+        <tr>
+          <td><code><%= item.ref %></code></td>
+          <td><%= item.isEnabled ? 'true' : 'false' %></td>
+          <td><%= item.description || '—' %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>
+
 <section class="card">
   <h3 class="card-title">Latest Documents</h3>
   <table>

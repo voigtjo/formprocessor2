@@ -6,6 +6,7 @@ import {
   fpDocuments,
   fpGroupMembers,
   fpGroups,
+  fpMacros,
   fpTemplateAssignments,
   fpTemplates,
   fpUsers
@@ -287,6 +288,24 @@ async function loadTemplateVersionsByKey(db: FpDb, key: string) {
 
 function parseTemplateJson(raw: unknown): TemplateJson {
   return templateJsonSchema.parse(raw);
+}
+
+function buildActionRuntimeTemplateContext(templateJson: TemplateJson) {
+  const fullSchema = {
+    fields: templateJson.fields,
+    workflow: templateJson.workflow,
+    controls: templateJson.controls ?? {},
+    actions: templateJson.actions ?? {},
+    permissions: templateJson.permissions ?? {}
+  };
+
+  return {
+    templateDefinition: {
+      template: templateJson,
+      fullSchema
+    },
+    schema: fullSchema
+  };
 }
 
 function parseTemplateEditorJson(raw: string) {
@@ -636,8 +655,12 @@ function getFormString(body: Record<string, unknown>, key: string) {
 }
 
 function resolveEditableInputType(field: TemplateField): 'text' | 'date' | 'checkbox' {
-  const input = field.inputType ?? field.control ?? field.ui?.input;
+  const input = field.inputType ?? field.control ?? field.ui?.input ?? field.kind;
   return input === 'date' || input === 'checkbox' ? input : 'text';
+}
+
+function isEditableFieldKind(kind: unknown) {
+  return kind === 'editable' || kind === 'date' || kind === 'checkbox';
 }
 
 function resolveEditableFormValue(form: Record<string, unknown>, field: TemplateField, fieldKey: string) {
@@ -757,7 +780,7 @@ function normalizeRightsString(input: string) {
 
 function allEditableFieldKeys(templateJson: TemplateJson) {
   return Object.entries(templateJson.fields)
-    .filter(([, field]) => (field as TemplateField)?.kind === 'editable')
+    .filter(([, field]) => isEditableFieldKind((field as TemplateField)?.kind))
     .map(([key]) => key);
 }
 
@@ -767,8 +790,8 @@ export function resolveEditableFieldKeys(templateJson: TemplateJson, status: str
   const configured = Array.isArray(state?.editable) ? state.editable : undefined;
   if (!configured) return fallback;
 
-  const editableSet = new Set(fallback);
-  return configured.filter((key: unknown): key is string => typeof key === 'string' && editableSet.has(key));
+  const fieldKeys = new Set(Object.keys(templateJson.fields ?? {}));
+  return configured.filter((key: unknown): key is string => typeof key === 'string' && fieldKeys.has(key));
 }
 
 export function applyEditableDataUpdate(
@@ -780,7 +803,7 @@ export function applyEditableDataUpdate(
   const next = { ...currentData };
   for (const key of editableKeys) {
     const field = templateJson.fields[key] as TemplateField | undefined;
-    if (!field || field.kind !== 'editable') continue;
+    if (!field || !isEditableFieldKind(field.kind)) continue;
     const formKey = `data:${key}`;
     const inputType = resolveEditableInputType(field);
     if (inputType === 'checkbox') {
@@ -817,9 +840,18 @@ function resolveWorkflowTimeline(templateJson: TemplateJson, currentStatus: stri
     : [];
   const fallback = Object.keys(states);
   const ordered = fromOrder.length > 0 ? fromOrder : fallback;
-  const deduped = Array.from(new Set(ordered));
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const state of ordered) {
+    const normalized = state.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(state);
+  }
 
-  if (currentStatus && !deduped.includes(currentStatus)) {
+  const currentNormalized = currentStatus.trim().toLowerCase();
+  const hasCurrent = currentNormalized.length > 0 && deduped.some((state) => state.trim().toLowerCase() === currentNormalized);
+  if (currentStatus && !hasCurrent) {
     deduped.push(currentStatus);
   }
 
@@ -956,6 +988,25 @@ function classifyStatusBucket(status: string): 'Open' | 'In Progress' | 'Done' {
   if (normalized === 'assigned' || normalized === 'submitted') return 'In Progress';
   if (normalized === 'created') return 'Open';
   return 'Open';
+}
+
+function resolveTaskStateForUser(params: {
+  role: 'Editor' | 'Approver';
+  status: string;
+  rights: string;
+}): 'open' | 'waiting' | 'done' {
+  const normalizedStatus = params.status.trim().toLowerCase();
+  const rights = params.rights ?? '';
+
+  if (params.role === 'Editor') {
+    if (normalizedStatus === 'submitted' || normalizedStatus === 'approved') return 'done';
+    if (normalizedStatus === 'assigned' && rights.includes('w')) return 'open';
+    return 'waiting';
+  }
+
+  if (normalizedStatus === 'approved') return 'done';
+  if (normalizedStatus === 'submitted' && rights.includes('x')) return 'open';
+  return 'waiting';
 }
 
 async function resolveTemplateAssignmentContext(db: FpDb, templateId: string) {
@@ -1199,6 +1250,17 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       .from(fpDocuments)
       .orderBy(desc(fpDocuments.createdAt))
       .limit(25);
+    const macros = await db
+      .select({
+        ref: fpMacros.ref,
+        namespace: fpMacros.namespace,
+        name: fpMacros.name,
+        version: fpMacros.version,
+        isEnabled: fpMacros.isEnabled,
+        description: fpMacros.description
+      })
+      .from(fpMacros)
+      .orderBy(asc(fpMacros.namespace), asc(fpMacros.name), asc(fpMacros.version));
 
     const usersById = new Map(users.map((item) => [item.id, item]));
     const groupsById = new Map(groups.map((item) => [item.id, item]));
@@ -1243,6 +1305,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       memberships: membershipRows,
       membershipsByGroup: membershipRowsByGroup,
       assignments: assignmentRows,
+      macros,
       templates,
       latestDocuments: documentRows,
       activeUser: request.currentUser ?? null,
@@ -2054,11 +2117,16 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     const templateJson = parseTemplateJson(template.templateJson);
     const assignmentContext = await resolveTemplateAssignmentContext(db, template.id);
+    const initialStatus = String(templateJson.workflow.initial ?? '').trim();
+    const editableKeys = resolveEditableFieldKeys(templateJson, initialStatus);
+    const readonlyKeys = resolveReadonlyFieldKeys(templateJson, initialStatus);
     const layoutHtml = renderLayout({
       mode: 'new',
       templateJson,
       templateId: template.id,
-      documentStatus: templateJson.workflow.initial
+      documentStatus: initialStatus,
+      editableKeys,
+      readonlyKeys
     });
 
     await reply.renderPage('documents/new.ejs', {
@@ -2199,25 +2267,41 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       .orderBy(desc(fpDocuments.createdAt));
     const taskRows = rawTaskRows
       .map((item) => {
-        const normalizedStatus = item.status.trim().toLowerCase();
         const userGroupRights = item.groupId ? rightsByGroupId.get(item.groupId) ?? '' : '';
-        const canEditInGroup = userGroupRights.includes('w');
-        const canApproveInGroup = userGroupRights.includes('x');
         const editorUserId = item.editorUserId ?? item.assigneeUserId;
         const approverUserId = item.approverUserId ?? item.reviewerUserId;
-        const isEditorTask =
-          editorUserId === currentUser.id &&
-          canEditInGroup &&
-          (normalizedStatus === 'created' || normalizedStatus === 'assigned');
-        const isApproverTask =
-          approverUserId === currentUser.id && canApproveInGroup && normalizedStatus === 'submitted';
+        const isEditorAssigned = editorUserId === currentUser.id;
+        const isApproverAssigned = approverUserId === currentUser.id;
+        if (!isEditorAssigned && !isApproverAssigned) return null;
 
-        if (normalizedStatus === 'approved') return null;
-        if (isEditorTask) return { ...item, role: 'Editor' };
-        if (isApproverTask) return { ...item, role: 'Approver' };
-        return null;
+        const normalizedStatus = item.status.trim().toLowerCase();
+        const role: 'Editor' | 'Approver' =
+          isEditorAssigned && isApproverAssigned
+            ? normalizedStatus === 'submitted' || normalizedStatus === 'approved'
+              ? 'Approver'
+              : 'Editor'
+            : isEditorAssigned
+              ? 'Editor'
+              : 'Approver';
+        const taskState = resolveTaskStateForUser({
+          role,
+          status: item.status,
+          rights: userGroupRights
+        });
+        return { ...item, role, taskState };
       })
-      .filter((item): item is (typeof rawTaskRows)[number] & { role: 'Editor' | 'Approver' } => !!item);
+      .filter(
+        (item): item is (typeof rawTaskRows)[number] & { role: 'Editor' | 'Approver'; taskState: 'open' | 'waiting' | 'done' } =>
+          !!item
+      )
+      .sort((a, b) => {
+        const stateRank: Record<'open' | 'waiting' | 'done', number> = {
+          open: 0,
+          waiting: 1,
+          done: 2
+        };
+        return stateRank[a.taskState] - stateRank[b.taskState];
+      });
 
     await reply.renderPage('workspaces/me.ejs', {
       memberships,
@@ -2362,7 +2446,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         continue;
       }
 
-      if (field.kind === 'editable') {
+      if (isEditableFieldKind(field.kind)) {
         data[fieldKey] = resolveEditableFormValue(form, field, fieldKey);
       }
     }
@@ -2428,6 +2512,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
     const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
+    const query = toFormRecord(request.query);
+    const errorFromQuery = normalizeOptionalFilter(getFormString(query, 'error'));
 
     await renderDocumentDetailPage({
       db,
@@ -2436,7 +2522,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       template,
       document,
       assignmentGroupId,
-      groupName
+      groupName,
+      ...(errorFromQuery ? { errorMessage: errorFromQuery } : {})
     });
   });
 
@@ -2662,60 +2749,58 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const templateJson = parseTemplateJson(template.templateJson);
+    const redirectWithActionError = (message: string) => {
+      const next = new URL(`/documents/${document.id}`, 'http://localhost');
+      next.searchParams.set('error', message.slice(0, 500));
+      reply.code(303);
+      return reply.redirect(`${next.pathname}${next.search}`);
+    };
     const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
     const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
     const query = toFormRecord(request.query);
     const source = getFormString(query, 'source');
     const isUiButtonRequest = source === 'ui';
-    const layoutButtonKinds = isUiButtonRequest ? collectLayoutButtonKinds(templateJson) : null;
-    const layoutButtonKind = isUiButtonRequest ? layoutButtonKinds?.get(paramsParsed.data.controlKey) : null;
+    const layoutButtonKinds = collectLayoutButtonKinds(templateJson);
+    const layoutButtonKind = layoutButtonKinds.get(paramsParsed.data.controlKey);
+    const isLayoutButtonAction = !!layoutButtonKind;
 
     if (isUiButtonRequest && !layoutButtonKind) {
-      return reply.status(400).send({ message: 'UI button is not configured in layout.' });
+      return redirectWithActionError('UI button is not configured in layout.');
     }
     if (isUiButtonRequest && layoutButtonKind === 'process') {
-      return reply.status(400).send({ message: 'UI button cannot execute process action' });
+      return redirectWithActionError('UI button cannot execute process action');
     }
 
     const stateDef = (templateJson.workflow as any)?.states?.[document.status];
     const allowedButtons = Array.isArray(stateDef?.buttons) ? stateDef.buttons : [];
 
-    if (!isUiButtonRequest && !allowedButtons.includes(paramsParsed.data.controlKey)) {
-      await renderDocumentDetailPage({
-        db,
-        hasDocumentActorColumns,
-        reply,
-        template,
-        document,
-        assignmentGroupId,
-        groupName,
-        errorMessage: 'Control is not allowed in the current status.'
-      });
-      return;
+    if (!isUiButtonRequest && !isLayoutButtonAction && !allowedButtons.includes(paramsParsed.data.controlKey)) {
+      return redirectWithActionError('Control is not allowed in the current status.');
     }
 
     const controls = ((templateJson as any).controls ?? {}) as Record<string, { action?: string }>;
-    const actionKey = controls[paramsParsed.data.controlKey]?.action;
+    const actions = ((templateJson as any).actions ?? {}) as Record<string, unknown>;
+    const actionKey =
+      controls[paramsParsed.data.controlKey]?.action ??
+      (isLayoutButtonAction && actions[paramsParsed.data.controlKey] ? paramsParsed.data.controlKey : undefined);
     if (!actionKey) {
-      await renderDocumentDetailPage({
-        db,
-        hasDocumentActorColumns,
-        reply,
-        template,
-        document,
-        assignmentGroupId,
-        groupName,
-        errorMessage: 'Control action is not configured.'
-      });
-      return;
+      return redirectWithActionError('Control action is not configured.');
     }
+    const currentUser = request.currentUser as CurrentUser | null;
+
+    app.log.info({
+      docId: document.id,
+      actionKey,
+      source: isUiButtonRequest ? 'ui' : 'process',
+      activeUser: currentUser?.username ?? null,
+      templateId: document.templateId
+    }, 'Action execution requested');
 
     const required = resolveActionPermissionRequirements(templateJson, paramsParsed.data.controlKey, actionKey);
     const effectiveRequired: PermissionName[] = [...required];
     const rbacGroupId = effectiveRequired.length > 0 ? await resolveDocumentRbacGroupId(db, document) : null;
-    const currentUser = request.currentUser as CurrentUser | null;
     if (!currentUser && effectiveRequired.length > 0 && rbacGroupId) {
-      return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+      return redirectWithActionError('No active user. Go to /admin or use the user dropdown.');
     }
 
     if (effectiveRequired.length > 0 && rbacGroupId) {
@@ -2726,10 +2811,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       const userRights = membership?.rights ?? '';
 
       if (!membership || !hasRequiredRights(userRights, effectiveRequired)) {
-        return sendUiError(
-          request,
-          reply,
-          403,
+        return redirectWithActionError(
           `Forbidden: requires ${describeRequiredRights(effectiveRequired)}, user has ${userRights || '-'}`
         );
       }
@@ -2745,10 +2827,10 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       actionName.includes('reject');
 
     if (isSubmitAction && document.editorUserId && currentUser && currentUser.id !== document.editorUserId) {
-      return sendUiError(request, reply, 403, 'Forbidden: submit is limited to the assigned editor.');
+      return redirectWithActionError('Forbidden: submit is limited to the assigned editor.');
     }
     if (isApproveOrRejectAction && document.approverUserId && currentUser && currentUser.id !== document.approverUserId) {
-      return sendUiError(request, reply, 403, 'Forbidden: approve/reject is limited to the assigned approver.');
+      return redirectWithActionError('Forbidden: approve/reject is limited to the assigned approver.');
     }
 
     const form = toFormRecord(request.body);
@@ -2771,7 +2853,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     };
 
     if (isUiButtonRequest && actionKey === 'save') {
-      return reply.status(400).send({ message: 'UI button cannot execute process action' });
+      return redirectWithActionError('UI button cannot execute process action');
     }
 
     if (actionKey === 'save') {
@@ -2786,25 +2868,33 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.redirect(`/documents/${document.id}`);
     }
 
-    const actions = ((templateJson as any).actions ?? {}) as Record<string, unknown>;
     const actionDef = actions[actionKey];
     if (!actionDef) {
-      await renderDocumentDetailPage({
-        db,
-        hasDocumentActorColumns,
-        reply,
-        template,
-        document,
-        assignmentGroupId,
-        groupName,
-        errorMessage: `Action "${actionKey}" is not defined.`
-      });
-      return;
+      return redirectWithActionError(`Action "${actionKey}" is not defined.`);
     }
 
     if (isUiButtonRequest && !isUiSafeActionDefinition(actionDef)) {
-      return reply.status(400).send({ message: 'UI button cannot execute process action' });
+      return redirectWithActionError('UI button cannot execute process action');
     }
+
+    const runtimeTemplateContext = buildActionRuntimeTemplateContext(templateJson);
+    app.log.info(
+      {
+        docId: document.id,
+        templateId: document.templateId,
+        actionKey,
+        runtime: {
+          templateDefinitionExists: !!runtimeTemplateContext.templateDefinition,
+          templateDefinitionHasFullSchema: !!runtimeTemplateContext.templateDefinition?.fullSchema,
+          schemaExists: !!runtimeTemplateContext.schema,
+          dbType: typeof db,
+          dbExists: !!db,
+          dbHasSelect: typeof (db as any)?.select === 'function',
+          dbHasQuery: !!(db as any)?.query
+        }
+      },
+      'Action runtime schema context'
+    );
 
     try {
       const result = await executeActionDefinition({
@@ -2819,8 +2909,23 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         macroContext: {
           db,
           templateJson,
+          templateDefinition: runtimeTemplateContext.templateDefinition,
+          schema: runtimeTemplateContext.schema,
           document: { id: document.id, status: document.status },
           form
+        },
+        onMacroEvent: (event) => {
+          app.log.info(
+            {
+              docId: document.id,
+              actionKey,
+              macroRef: event.macroRef,
+              macro: `${event.namespace}/${event.name}@${event.version ?? 'n/a'}`,
+              outcome: event.outcome,
+              ...(event.errorMessage ? { error: event.errorMessage } : {})
+            },
+            'Macro execution'
+          );
         }
       });
 
@@ -2845,7 +2950,6 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           })
           .where(eq(fpDocuments.id, document.id));
       });
-
       reply.code(303);
       return reply.redirect(`/documents/${document.id}`);
     } catch (error) {
@@ -2853,17 +2957,31 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       if (error instanceof ExternalCallError && error.status === 409) {
         message = `Action "${actionKey}" is not valid for current document status "${document.status}" (ERP transition rejected with 409).`;
       }
-      await renderDocumentDetailPage({
-        db,
-        hasDocumentActorColumns,
-        reply,
-        template,
-        document,
-        assignmentGroupId,
-        groupName,
-        errorMessage: message
-      });
-      return;
+      if (message.startsWith('Macro not enabled:')) {
+        app.log.warn(
+          {
+            docId: document.id,
+            actionKey,
+            activeUser: currentUser?.username ?? null,
+            error: message
+          },
+          'Macro execution blocked by catalog gate'
+        );
+        return reply.status(400).send({ message });
+      }
+      app.log.info(
+        {
+          docId: document.id,
+          actionKey,
+          source: isUiButtonRequest ? 'ui' : 'process',
+          activeUser: currentUser?.username ?? null,
+          templateId: document.templateId,
+          error: message,
+          stack: error instanceof Error ? error.stack : undefined
+        },
+        'Action execution failed'
+      );
+      return redirectWithActionError(message);
     }
   });
 

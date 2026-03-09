@@ -53,6 +53,17 @@ describe('document save data merge', () => {
     expect(next.urgent).toBe(false);
   });
 
+  it('stores kind=checkbox as false when missing in post', () => {
+    const templateJson = {
+      fields: {
+        urgent: { kind: 'checkbox' }
+      },
+      workflow: { initial: 'created', states: { created: { editable: ['urgent'] } } }
+    } as any;
+    const next = applyEditableDataUpdate(templateJson, { urgent: true }, {}, ['urgent']);
+    expect(next.urgent).toBe(false);
+  });
+
   it('roundtrips date string as submitted', () => {
     const templateJson = {
       fields: {

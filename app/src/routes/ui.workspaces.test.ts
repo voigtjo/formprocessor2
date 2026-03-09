@@ -248,8 +248,9 @@ describe('workplaces / assignment flow', () => {
       payload: {}
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('Submit requires editor assignment first.');
+    expect(res.statusCode).toBe(303);
+    expect(res.headers.location).toContain('/documents/00000000-0000-0000-0000-0000000000d1?error=');
+    expect(String(res.headers.location)).toContain('Submit+requires+editor+assignment+first.');
     await app.close();
   });
 
@@ -279,8 +280,9 @@ describe('workplaces / assignment flow', () => {
       headers: { cookie: `fp_user=${encodeURIComponent(bob.id)}` },
       payload: {}
     });
-    expect(approveRes.statusCode).toBe(200);
-    expect(approveRes.body).toContain('Approve requires approver assignment first.');
+    expect(approveRes.statusCode).toBe(303);
+    expect(approveRes.headers.location).toContain('/documents/00000000-0000-0000-0000-0000000000d1?error=');
+    expect(String(approveRes.headers.location)).toContain('Approve+requires+approver+assignment+first.');
 
     await app.close();
   });
@@ -314,7 +316,7 @@ describe('workplaces / assignment flow', () => {
 
   it('shows my tasks by assignee/reviewer and status rules', async () => {
     const aliceMemberships = [{ groupId: opsGroupId, rights: 'rwx', groupKey: 'ops', groupName: 'Operations' }];
-    const bobMemberships = [{ groupId: opsGroupId, rights: 'r', groupKey: 'ops', groupName: 'Operations' }];
+    const bobMemberships = [{ groupId: opsGroupId, rights: 'rwx', groupKey: 'ops', groupName: 'Operations' }];
     const taskRows = [
       {
         id: 'd-created',
@@ -414,8 +416,13 @@ describe('workplaces / assignment flow', () => {
     });
     expect(aliceRes.statusCode).toBe(200);
     const aliceTasks = (aliceRes.json() as any).tasks as Array<{ id: string; role: string }>;
-    expect(aliceTasks.map((item) => item.id)).toEqual(['d-created', 'd-assigned']);
+    expect(aliceTasks.map((item) => item.id)).toEqual(['d-assigned', 'd-created', 'd-submitted', 'd-approved']);
     expect(aliceTasks.every((item) => item.role === 'Editor')).toBe(true);
+    const aliceById = new Map(
+      aliceTasks.map((item) => [item.id, item as { id: string; role: string; taskState: string; status: string }])
+    );
+    expect(aliceById.get('d-assigned')?.taskState).toBe('open');
+    expect(aliceById.get('d-submitted')?.taskState).toBe('done');
 
     const bobRes = await app.inject({
       method: 'GET',
@@ -423,8 +430,11 @@ describe('workplaces / assignment flow', () => {
       headers: { cookie: `fp_user=${encodeURIComponent(bob.id)}` }
     });
     expect(bobRes.statusCode).toBe(200);
-    const bobTasks = (bobRes.json() as any).tasks as Array<{ id: string; role: string }>;
-    expect(bobTasks).toEqual([]);
+    const bobTasks = (bobRes.json() as any).tasks as Array<{ id: string; role: string; taskState: string; status: string }>;
+    expect(bobTasks.every((item) => item.role === 'Approver')).toBe(true);
+    const bobById = new Map(bobTasks.map((item) => [item.id, item]));
+    expect(bobById.get('d-submitted')?.taskState).toBe('open');
+    expect(bobById.get('d-approved')?.taskState).toBe('done');
 
     await app.close();
   });
