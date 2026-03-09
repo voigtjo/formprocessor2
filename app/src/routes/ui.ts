@@ -144,6 +144,22 @@ const adminTemplateAssignmentCreateSchema = z.object({
 const adminTemplateAssignmentDeleteParamSchema = z.object({
   assignmentId: z.string().uuid()
 });
+const macroRefParamSchema = z.object({
+  ref: z.string().min(1)
+});
+const macroKindSchema = z.enum(['json', 'code', 'builtin']);
+const macroFormSchema = z.object({
+  ref: z.string().min(1),
+  namespace: z.string().min(1),
+  name: z.string().min(1),
+  version: z.coerce.number().int().positive(),
+  description: z.string().optional(),
+  enabled: z.boolean(),
+  kind: macroKindSchema,
+  paramsSchemaJsonText: z.string().optional(),
+  definitionJsonText: z.string().optional(),
+  codeText: z.string().optional()
+});
 
 const documentIdParamSchema = z.object({
   id: z.string().uuid()
@@ -322,6 +338,16 @@ function parseTemplateEditorJson(raw: string) {
   }
 
   return validated.data;
+}
+
+function parseOptionalJsonField(raw: string | undefined, fieldName: string) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`${fieldName} must be valid JSON`);
+  }
 }
 
 function buildUserCookie(userId: string) {
@@ -1684,6 +1710,258 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
   app.get('/admin/debug', async (_request, reply) => {
     reply.code(303);
     return reply.redirect('/admin/rbac');
+  });
+
+  app.get('/macros', async (_request, reply) => {
+    const macros = await db
+      .select({
+        ref: fpMacros.ref,
+        namespace: fpMacros.namespace,
+        name: fpMacros.name,
+        version: fpMacros.version,
+        isEnabled: fpMacros.isEnabled,
+        kind: fpMacros.kind,
+        description: fpMacros.description
+      })
+      .from(fpMacros)
+      .orderBy(asc(fpMacros.namespace), asc(fpMacros.name), desc(fpMacros.version));
+
+    await reply.renderPage('macros/list.ejs', { macros });
+  });
+
+  app.get('/macros/new', async (_request, reply) => {
+    await reply.renderPage('macros/new.ejs', {
+      errorMessage: '',
+      form: {
+        ref: '',
+        namespace: '',
+        name: '',
+        version: '1',
+        description: '',
+        enabled: true,
+        kind: 'json',
+        params_schema_json: '',
+        definition_json: '',
+        code_text: ''
+      }
+    });
+  });
+
+  app.post('/macros', async (request, reply) => {
+    const form = toFormRecord(request.body);
+    const parsed = macroFormSchema.safeParse({
+      ref: getFormString(form, 'ref'),
+      namespace: getFormString(form, 'namespace'),
+      name: getFormString(form, 'name'),
+      version: getFormString(form, 'version'),
+      description: getFormString(form, 'description'),
+      enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
+      kind: getFormString(form, 'kind') || 'json',
+      paramsSchemaJsonText: getFormString(form, 'params_schema_json'),
+      definitionJsonText: getFormString(form, 'definition_json'),
+      codeText: getFormString(form, 'code_text')
+    });
+
+    if (!parsed.success) {
+      return reply.status(400).renderPage('macros/new.ejs', {
+        errorMessage: 'Please provide ref, namespace, name, version and kind.',
+        form: {
+          ref: getFormString(form, 'ref'),
+          namespace: getFormString(form, 'namespace'),
+          name: getFormString(form, 'name'),
+          version: getFormString(form, 'version'),
+          description: getFormString(form, 'description'),
+          enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
+          kind: getFormString(form, 'kind') || 'json',
+          params_schema_json: getFormString(form, 'params_schema_json'),
+          definition_json: getFormString(form, 'definition_json'),
+          code_text: getFormString(form, 'code_text')
+        }
+      });
+    }
+
+    try {
+      const paramsSchemaJson = parseOptionalJsonField(parsed.data.paramsSchemaJsonText, 'params_schema_json');
+      const definitionJson = parseOptionalJsonField(parsed.data.definitionJsonText, 'definition_json');
+      if (parsed.data.kind === 'json' && parsed.data.definitionJsonText?.trim().length && !definitionJson) {
+        return reply.status(400).renderPage('macros/new.ejs', {
+          errorMessage: 'definition_json must be valid JSON',
+          form: {
+            ref: parsed.data.ref,
+            namespace: parsed.data.namespace,
+            name: parsed.data.name,
+            version: String(parsed.data.version),
+            description: parsed.data.description ?? '',
+            enabled: parsed.data.enabled,
+            kind: parsed.data.kind,
+            params_schema_json: parsed.data.paramsSchemaJsonText ?? '',
+            definition_json: parsed.data.definitionJsonText ?? '',
+            code_text: parsed.data.codeText ?? ''
+          }
+        });
+      }
+
+      await db.insert(fpMacros).values({
+        ref: parsed.data.ref.trim(),
+        namespace: parsed.data.namespace.trim(),
+        name: parsed.data.name.trim(),
+        version: parsed.data.version,
+        kind: parsed.data.kind,
+        description: parsed.data.description?.trim() || null,
+        isEnabled: parsed.data.enabled,
+        paramsSchemaJson,
+        definitionJson,
+        codeText: parsed.data.codeText?.trim() || null,
+        updatedAt: new Date()
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid macro input';
+      return reply.status(400).renderPage('macros/new.ejs', {
+        errorMessage: message,
+        form: {
+          ref: getFormString(form, 'ref'),
+          namespace: getFormString(form, 'namespace'),
+          name: getFormString(form, 'name'),
+          version: getFormString(form, 'version'),
+          description: getFormString(form, 'description'),
+          enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
+          kind: getFormString(form, 'kind') || 'json',
+          params_schema_json: getFormString(form, 'params_schema_json'),
+          definition_json: getFormString(form, 'definition_json'),
+          code_text: getFormString(form, 'code_text')
+        }
+      });
+    }
+
+    reply.code(303);
+    return reply.redirect(`/macros/${encodeURIComponent(parsed.data.ref)}/edit`);
+  });
+
+  app.get('/macros/:ref', async (request, reply) => {
+    const parsed = macroRefParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid macro ref' });
+    }
+    const macro = await db.query.fpMacros.findFirst({ where: eq(fpMacros.ref, parsed.data.ref) });
+    if (!macro) {
+      return reply.status(404).send({ message: 'Macro not found' });
+    }
+
+    await reply.renderPage('macros/detail.ejs', { macro });
+  });
+
+  app.get('/macros/:ref/edit', async (request, reply) => {
+    const parsed = macroRefParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid macro ref' });
+    }
+    const macro = await db.query.fpMacros.findFirst({ where: eq(fpMacros.ref, parsed.data.ref) });
+    if (!macro) {
+      return reply.status(404).send({ message: 'Macro not found' });
+    }
+
+    await reply.renderPage('macros/edit.ejs', {
+      macro,
+      errorMessage: '',
+      form: {
+        ref: macro.ref,
+        namespace: macro.namespace,
+        name: macro.name,
+        version: String(macro.version),
+        description: macro.description ?? '',
+        enabled: !!macro.isEnabled,
+        kind: macro.kind ?? 'json',
+        params_schema_json: macro.paramsSchemaJson ? JSON.stringify(macro.paramsSchemaJson, null, 2) : '',
+        definition_json: macro.definitionJson ? JSON.stringify(macro.definitionJson, null, 2) : '',
+        code_text: macro.codeText ?? ''
+      }
+    });
+  });
+
+  app.post('/macros/:ref', async (request, reply) => {
+    const paramsParsed = macroRefParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid macro ref' });
+    }
+    const existing = await db.query.fpMacros.findFirst({ where: eq(fpMacros.ref, paramsParsed.data.ref) });
+    if (!existing) {
+      return reply.status(404).send({ message: 'Macro not found' });
+    }
+
+    const form = toFormRecord(request.body);
+    const parsed = macroFormSchema.safeParse({
+      ref: getFormString(form, 'ref'),
+      namespace: getFormString(form, 'namespace'),
+      name: getFormString(form, 'name'),
+      version: getFormString(form, 'version'),
+      description: getFormString(form, 'description'),
+      enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
+      kind: getFormString(form, 'kind') || 'json',
+      paramsSchemaJsonText: getFormString(form, 'params_schema_json'),
+      definitionJsonText: getFormString(form, 'definition_json'),
+      codeText: getFormString(form, 'code_text')
+    });
+
+    if (!parsed.success) {
+      return reply.status(400).renderPage('macros/edit.ejs', {
+        macro: existing,
+        errorMessage: 'Please provide ref, namespace, name, version and kind.',
+        form: {
+          ref: getFormString(form, 'ref'),
+          namespace: getFormString(form, 'namespace'),
+          name: getFormString(form, 'name'),
+          version: getFormString(form, 'version'),
+          description: getFormString(form, 'description'),
+          enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
+          kind: getFormString(form, 'kind') || 'json',
+          params_schema_json: getFormString(form, 'params_schema_json'),
+          definition_json: getFormString(form, 'definition_json'),
+          code_text: getFormString(form, 'code_text')
+        }
+      });
+    }
+
+    try {
+      const paramsSchemaJson = parseOptionalJsonField(parsed.data.paramsSchemaJsonText, 'params_schema_json');
+      const definitionJson = parseOptionalJsonField(parsed.data.definitionJsonText, 'definition_json');
+
+      await db
+        .update(fpMacros)
+        .set({
+          ref: parsed.data.ref.trim(),
+          namespace: parsed.data.namespace.trim(),
+          name: parsed.data.name.trim(),
+          version: parsed.data.version,
+          kind: parsed.data.kind,
+          description: parsed.data.description?.trim() || null,
+          isEnabled: parsed.data.enabled,
+          paramsSchemaJson,
+          definitionJson,
+          codeText: parsed.data.codeText?.trim() || null,
+          updatedAt: new Date()
+        })
+        .where(eq(fpMacros.ref, existing.ref));
+    } catch (error) {
+      return reply.status(400).renderPage('macros/edit.ejs', {
+        macro: existing,
+        errorMessage: error instanceof Error ? error.message : 'Invalid macro input',
+        form: {
+          ref: getFormString(form, 'ref'),
+          namespace: getFormString(form, 'namespace'),
+          name: getFormString(form, 'name'),
+          version: getFormString(form, 'version'),
+          description: getFormString(form, 'description'),
+          enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
+          kind: getFormString(form, 'kind') || 'json',
+          params_schema_json: getFormString(form, 'params_schema_json'),
+          definition_json: getFormString(form, 'definition_json'),
+          code_text: getFormString(form, 'code_text')
+        }
+      });
+    }
+
+    reply.code(303);
+    return reply.redirect(`/macros/${encodeURIComponent(parsed.data.ref)}/edit`);
   });
 
   app.get('/templates', async (_req, reply) => {

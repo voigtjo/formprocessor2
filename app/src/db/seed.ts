@@ -56,9 +56,12 @@ async function upsertMacro(
     namespace: string;
     name: string;
     version: number;
+    kind?: string;
     description: string;
     isEnabled?: boolean;
     paramsSchemaJson?: Record<string, unknown> | null;
+    definitionJson?: Record<string, unknown> | null;
+    codeText?: string | null;
   }
 ) {
   await db
@@ -68,9 +71,12 @@ async function upsertMacro(
       namespace: values.namespace,
       name: values.name,
       version: values.version,
+      kind: values.kind ?? 'json',
       description: values.description,
       isEnabled: values.isEnabled ?? true,
-      paramsSchemaJson: values.paramsSchemaJson ?? null
+      paramsSchemaJson: values.paramsSchemaJson ?? null,
+      definitionJson: values.definitionJson ?? null,
+      codeText: values.codeText ?? null
     })
     .onConflictDoUpdate({
       target: fpMacros.ref,
@@ -78,9 +84,13 @@ async function upsertMacro(
         namespace: values.namespace,
         name: values.name,
         version: values.version,
+        kind: values.kind ?? 'json',
         description: values.description,
         isEnabled: values.isEnabled ?? true,
-        paramsSchemaJson: values.paramsSchemaJson ?? null
+        paramsSchemaJson: values.paramsSchemaJson ?? null,
+        definitionJson: values.definitionJson ?? null,
+        codeText: values.codeText ?? null,
+        updatedAt: new Date()
       }
     });
 }

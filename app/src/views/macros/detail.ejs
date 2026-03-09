@@ -1,0 +1,35 @@
+<header class="page-header">
+  <h1>Macro</h1>
+</header>
+
+<section class="card">
+  <p><strong>Ref:</strong> <code><%= macro.ref %></code></p>
+  <p><strong>Namespace:</strong> <%= macro.namespace %></p>
+  <p><strong>Name:</strong> <%= macro.name %></p>
+  <p><strong>Version:</strong> <code>v<%= macro.version %></code></p>
+  <p><strong>Enabled:</strong> <%= macro.isEnabled ? 'yes' : 'no' %></p>
+  <p><strong>Kind:</strong> <%= macro.kind || 'json' %></p>
+  <p><strong>Description:</strong> <%= macro.description || '—' %></p>
+  <p><strong>Created:</strong> <%= macro.createdAt ? new Date(macro.createdAt).toLocaleString() : '—' %></p>
+  <p><strong>Updated:</strong> <%= macro.updatedAt ? new Date(macro.updatedAt).toLocaleString() : '—' %></p>
+</section>
+
+<section class="card">
+  <h3 class="card-title">Params Schema JSON</h3>
+  <pre><code><%= macro.paramsSchemaJson ? JSON.stringify(macro.paramsSchemaJson, null, 2) : 'null' %></code></pre>
+</section>
+
+<section class="card">
+  <h3 class="card-title">Definition JSON</h3>
+  <pre><code><%= macro.definitionJson ? JSON.stringify(macro.definitionJson, null, 2) : 'null' %></code></pre>
+</section>
+
+<section class="card">
+  <h3 class="card-title">Code Text</h3>
+  <pre><code><%= macro.codeText || '' %></code></pre>
+</section>
+
+<div class="actions">
+  <a class="btn btn-secondary" href="/macros/<%= encodeURIComponent(macro.ref) %>/edit">Edit</a>
+  <a class="btn btn-secondary" href="/macros">Back to Macros</a>
+</div>

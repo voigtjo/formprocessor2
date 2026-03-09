@@ -108,10 +108,14 @@ export const fpMacros = pgTable(
     namespace: text('namespace').notNull(),
     name: text('name').notNull(),
     version: integer('version').notNull(),
+    kind: text('kind').notNull().default('json'),
     description: text('description'),
     isEnabled: boolean('is_enabled').notNull().default(true),
     paramsSchemaJson: jsonb('params_schema_json'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+    definitionJson: jsonb('definition_json'),
+    codeText: text('code_text'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [index('idx_fp_macros_enabled').on(table.isEnabled)]
 );

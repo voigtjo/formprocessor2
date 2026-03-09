@@ -1,0 +1,39 @@
+<header class="page-header">
+  <h1>Macros</h1>
+  <a class="btn btn-primary" href="/macros/new">New Macro</a>
+</header>
+
+<table>
+  <thead>
+    <tr>
+      <th>Ref</th>
+      <th>Namespace</th>
+      <th>Name</th>
+      <th>Version</th>
+      <th>Enabled</th>
+      <th>Kind</th>
+      <th>Description</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!macros || macros.length === 0) { %>
+      <tr><td colspan="8" class="muted">No macros found.</td></tr>
+    <% } %>
+    <% (macros || []).forEach((macro) => { %>
+      <tr>
+        <td><code><%= macro.ref %></code></td>
+        <td><%= macro.namespace %></td>
+        <td><%= macro.name %></td>
+        <td><code>v<%= macro.version %></code></td>
+        <td><%= macro.isEnabled ? 'yes' : 'no' %></td>
+        <td><%= macro.kind || 'json' %></td>
+        <td><%= macro.description || '—' %></td>
+        <td>
+          <a href="/macros/<%= encodeURIComponent(macro.ref) %>">Open</a>
+          · <a href="/macros/<%= encodeURIComponent(macro.ref) %>/edit">Edit</a>
+        </td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>
