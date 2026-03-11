@@ -102,6 +102,41 @@ describe('layout renderer v2', () => {
     expect(html).toContain('Reload Customers');
   });
 
+  it('renders document action button as disabled with hint in new mode and active in detail mode', () => {
+    const templateJson = {
+      fields: {},
+      controls: {
+        create_customer_order: { label: 'Create Customer Order', action: 'create_customer_order' }
+      },
+      actions: {
+        create_customer_order: {
+          steps: [{ type: 'macro', ref: 'macro:erp/ensureErpCustomerOrder@1' }]
+        }
+      },
+      layout: [{ type: 'button', key: 'create_customer_order', label: 'Create Customer Order', action: 'create_customer_order' }]
+    };
+
+    const newHtml = renderLayout({
+      mode: 'new',
+      templateId: 'tpl-1',
+      templateJson
+    });
+    expect(newHtml).toContain('Create Customer Order');
+    expect(newHtml).toContain('Available after document creation');
+    expect(newHtml).toContain('disabled');
+    expect(newHtml).not.toContain('hx-post=');
+    expect(newHtml).not.toContain('hx-on:click=');
+
+    const detailHtml = renderLayout({
+      mode: 'detail',
+      documentId: 'doc-1',
+      templateId: 'tpl-1',
+      templateJson
+    });
+    expect(detailHtml).toContain('hx-post="/documents/doc-1/action/create_customer_order?source=ui"');
+    expect(detailHtml).not.toContain('Available after document creation');
+  });
+
   it('renders editable lookup in detail mode as select', () => {
     const html = renderLayout({
       mode: 'detail',

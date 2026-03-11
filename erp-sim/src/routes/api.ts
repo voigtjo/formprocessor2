@@ -38,7 +38,7 @@ const listCustomerOrdersQuerySchema = z.object({
 const patchValidityBodySchema = z.object({ valid: z.boolean() });
 const patchMovementStatusBodySchema = z.object({ status: z.enum(movementStatusEnum.enumValues) });
 const patchCustomerOrderStatusBodySchema = z.object({ status: z.enum(customerOrderStatusEnum.enumValues) });
-const createCustomerOrderBodySchema = z.object({ customer_id: z.string().uuid().optional() }).optional();
+const createCustomerOrderBodySchema = z.object({ customer_id: z.string().uuid() });
 const createBatchBodySchema = z.object({ product_id: z.string().uuid() });
 const idParamSchema = z.object({ id: z.string().uuid() });
 
@@ -407,25 +407,20 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiRoutesOptions = {
   app.post('/api/customer-orders', async (request, reply) => {
     const parsed = createCustomerOrderBodySchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ message: 'Invalid body' });
+      return reply.status(400).send({ message: 'Invalid body: customer_id (uuid) is required' });
     }
 
-    let customerId = parsed.data?.customer_id;
-    if (!customerId) {
-      const fallbackCustomer = (await repo.listCustomers(true))[0];
-      if (!fallbackCustomer) {
-        return reply.status(400).send({ message: 'No valid customer available' });
-      }
-      customerId = fallbackCustomer.id;
-    } else {
-      const customer = await repo.getCustomerById(customerId);
-      if (!customer) {
-        return reply.status(404).send({ message: 'Customer not found' });
-      }
+    const customerId = parsed.data.customer_id;
+    const customer = await repo.getCustomerById(customerId);
+    if (!customer) {
+      return reply.status(404).send({ message: 'Customer not found' });
+    }
+    if (!customer.valid) {
+      return reply.status(400).send({ message: 'Invalid customer_id: customer is not valid' });
     }
 
     const created = await repo.createCustomerOrder(customerId);
-    return toCustomerOrderResponse(created);
+    return reply.status(201).send(toCustomerOrderResponse(created));
   });
 
   app.post('/api/randomize', async () => {

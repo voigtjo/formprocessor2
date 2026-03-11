@@ -165,7 +165,7 @@ describe('ERP API', () => {
       payload: { customer_id: customerId }
     });
 
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(201);
     expect(res.json()).toEqual({
       id: '00000000-0000-0000-0000-000000000020',
       customer_id: customerId,
@@ -174,6 +174,94 @@ describe('ERP API', () => {
       created_at: createdAt.toISOString()
     });
 
+    await app.close();
+  });
+
+  it('POST /api/customer-orders rejects missing customer_id', async () => {
+    const app = await createApp(createRepo());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/customer-orders',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain('customer_id');
+    await app.close();
+  });
+
+  it('POST /api/customer-orders rejects invalid customer', async () => {
+    const customerId = '00000000-0000-0000-0000-000000000050';
+    const app = await createApp(
+      createRepo({
+        getCustomerById: async (id) => (id === customerId ? { id, name: 'Invalid Co', valid: false } : undefined)
+      })
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/customer-orders',
+      payload: { customer_id: customerId }
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().message).toContain('not valid');
+    await app.close();
+  });
+
+  it('POST /api/customer-orders persists order visible in GET /api/customer-orders', async () => {
+    const customerId = '00000000-0000-0000-0000-000000000060';
+    const createdAt = new Date('2026-01-05T00:00:00.000Z');
+    const orders: Array<{
+      id: string;
+      customerId: string;
+      orderNumber: string;
+      status: 'received' | 'offer_created' | 'completed';
+      createdAt: Date;
+    }> = [];
+
+    const app = await createApp(
+      createRepo({
+        getCustomerById: async (id) => (id === customerId ? { id, name: 'Acme', valid: true } : undefined),
+        createCustomerOrder: async (id) => {
+          const created = {
+            id: '00000000-0000-0000-0000-000000000061',
+            customerId: id,
+            orderNumber: 'O-PERSIST1',
+            status: 'received' as const,
+            createdAt
+          };
+          orders.push(created);
+          return created;
+        },
+        listCustomerOrders: async (id, status) =>
+          orders.filter((order) => order.customerId === id && (status ? order.status === status : true))
+      })
+    );
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/customer-orders',
+      payload: { customer_id: customerId }
+    });
+    expect(created.statusCode).toBe(201);
+
+    const listed = await app.inject({
+      method: 'GET',
+      url: '/api/customer-orders',
+      query: { customer_id: customerId }
+    });
+
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().items).toEqual([
+      {
+        id: '00000000-0000-0000-0000-000000000061',
+        customer_id: customerId,
+        order_number: 'O-PERSIST1',
+        status: 'received',
+        created_at: createdAt.toISOString()
+      }
+    ]);
     await app.close();
   });
 

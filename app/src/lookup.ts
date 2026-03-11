@@ -1,9 +1,12 @@
 import { z } from 'zod';
+import { resolveServiceBaseUrl } from './services/service-registry.js';
 
 const templateTokenRegex = /\{\{external\.([a-zA-Z0-9_]+)\}\}/g;
 const templateTokenDetectRegex = /\{\{external\.[a-zA-Z0-9_]+\}\}/;
 
 const sourceSchema = z.object({
+  service: z.enum(['erp-sim', 'erp']).default('erp-sim'),
+  method: z.literal('GET').default('GET'),
   path: z.string(),
   query: z.record(z.string()).optional(),
   valueField: z.string().optional(),
@@ -23,6 +26,7 @@ export type LookupFetchResult = {
   options: LookupOption[];
   rawCount: number;
   url: string;
+  source: LookupSource;
 };
 
 function normalizeQueryValue(value: unknown) {
@@ -75,6 +79,8 @@ export function normalizeLookupSource(field: any): LookupSource {
     }
 
     return sourceSchema.parse({
+      service: typeof directSource.service === 'string' ? directSource.service.trim().toLowerCase() : directSource.service,
+      method: typeof directSource.method === 'string' ? directSource.method.trim().toUpperCase() : directSource.method,
       path,
       query: normalizedQuery,
       valueField: directSource.valueField,
@@ -85,6 +91,7 @@ export function normalizeLookupSource(field: any): LookupSource {
   }
 
   const lookup = field?.lookup;
+  // Legacy fallback: historical templates used `lookup.endpoint` instead of `source`.
   if (!lookup?.endpoint || typeof lookup.endpoint !== 'string') {
     throw new Error('Lookup field source is missing');
   }
@@ -96,6 +103,8 @@ export function normalizeLookupSource(field: any): LookupSource {
   });
 
   return sourceSchema.parse({
+    service: 'erp-sim',
+    method: 'GET',
     path: endpointUrl.pathname,
     query,
     valueField: lookup.valueField,
@@ -112,8 +121,14 @@ export async function fetchLookupOptionsDetailed(
   valueField = 'id',
   labelField = 'name'
 ): Promise<LookupFetchResult> {
-  const url = buildLookupUrl(baseUrl, source, externalRefs);
+  const serviceBaseUrl = resolveServiceBaseUrl(source.service, baseUrl);
+  const method = String(source.method ?? 'GET').toUpperCase();
+  if (method !== 'GET') {
+    throw new Error(`Unsupported lookup method: ${source.method}`);
+  }
+  const url = buildLookupUrl(serviceBaseUrl, source, externalRefs);
   const response = await fetch(url, {
+    method: 'GET',
     headers: {
       Accept: 'application/json'
     }
@@ -148,7 +163,8 @@ export async function fetchLookupOptionsDetailed(
   return {
     options,
     rawCount: items.length,
-    url
+    url,
+    source
   };
 }
 

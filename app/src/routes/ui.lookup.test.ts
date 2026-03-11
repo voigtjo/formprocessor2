@@ -31,7 +31,10 @@ describe('lookup api', () => {
                   kind: 'lookup',
                   label: 'Customer',
                   source: {
+                    service: 'erp-sim',
                     path: '/api/customers',
+                    method: 'GET',
+                    query: { valid: true },
                     valueKey: 'id',
                     labelKey: 'name'
                   }

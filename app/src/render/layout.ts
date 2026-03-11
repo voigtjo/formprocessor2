@@ -265,6 +265,32 @@ function resolveControlKeyFromAction(templateJson: any, action: string) {
   return action;
 }
 
+function resolveActionDefinitionFromNode(templateJson: any, nodeAction: string) {
+  const actions = (templateJson?.actions ?? {}) as Record<string, unknown>;
+  const controls = (templateJson?.controls ?? {}) as Record<string, { action?: string }>;
+
+  if (actions[nodeAction]) {
+    return actions[nodeAction];
+  }
+
+  const directControl = controls[nodeAction];
+  if (directControl?.action && actions[directControl.action]) {
+    return actions[directControl.action];
+  }
+
+  for (const controlConfig of Object.values(controls)) {
+    if (controlConfig?.action === nodeAction && actions[nodeAction]) {
+      return actions[nodeAction];
+    }
+  }
+
+  return undefined;
+}
+
+function renderDisabledNewModeActionButton(label: string, variantClass: string) {
+  return `<div><button type="button" class="btn${variantClass}" disabled>${label}</button><div class="muted">Available after document creation</div></div>`;
+}
+
 function findLookupTargetsInActionDef(actionDef: unknown): string[] {
   const found = new Set<string>();
   const visit = (value: unknown) => {
@@ -353,6 +379,8 @@ function renderButton(node: LayoutNode, params: RenderLayoutParams) {
     return `<button type="button" class="btn${variantClass}" disabled>${label}</button>`;
   }
 
+  const hasDocumentBoundAction = resolveActionDefinitionFromNode(params.templateJson, action) !== undefined;
+
   if (params.mode === 'detail' && params.documentId) {
     const controlKey = resolveControlKeyFromAction(params.templateJson, action);
     const actionUrl = `/documents/${encodeURIComponent(params.documentId)}/action/${encodeURIComponent(controlKey)}`;
@@ -364,6 +392,9 @@ function renderButton(node: LayoutNode, params: RenderLayoutParams) {
   }
 
   if (params.mode === 'new') {
+    if (hasDocumentBoundAction) {
+      return renderDisabledNewModeActionButton(label, variantClass);
+    }
     const targetKeys = inferLookupTargets(node, params);
     if (targetKeys.length > 0) {
       const script = targetKeys

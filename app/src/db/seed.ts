@@ -231,6 +231,73 @@ async function upsertRbacTestV2Template(db: ReturnType<typeof makeDb>['db']) {
   return publishedId;
 }
 
+async function upsertCustomerOrderTestTemplate(db: ReturnType<typeof makeDb>['db']) {
+  const templateJson = {
+    fields: {
+      customer_id: {
+        kind: 'lookup',
+        label: 'Customer',
+        source: {
+          service: 'erp-sim',
+          path: '/api/customers',
+          method: 'GET',
+          query: { valid: true },
+          valueKey: 'id',
+          labelKey: 'name'
+        },
+        required: true,
+        snapshot: {
+          labelKey: 'name'
+        }
+      },
+      customer_order_number: {
+        kind: 'editable',
+        label: 'Customer Order Number'
+      }
+    },
+    layout: [
+      { type: 'h1', text: 'Customer Order Test' },
+      { type: 'field', key: 'customer_id' },
+      { type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui', label: 'Create Customer Order' },
+      { type: 'field', key: 'customer_order_number' }
+    ],
+    workflow: {
+      initial: 'Created',
+      states: {
+        Created: {
+          editable: ['customer_id'],
+          readonly: ['customer_order_number'],
+          buttons: []
+        }
+      }
+    },
+    controls: {
+      create_customer_order: { label: 'Create Customer Order', action: 'create_customer_order' }
+    },
+    actions: {
+      create_customer_order: {
+        type: 'macro',
+        ref: 'macro:erp/ensureErpCustomerOrder@1',
+        params: {
+          customerRefKey: 'customer_id',
+          writeFieldKey: 'customer_order_number',
+          writeExternalRefKey: 'customer_order_id',
+          writeSnapshotKey: 'customer_order_number'
+        }
+      }
+    }
+  };
+
+  return upsertTemplateVersion(db, {
+    key: 'customer-order-test',
+    version: 1,
+    name: 'Customer Order Test',
+    description: 'Lookup customer and create ERP customer order via macro',
+    state: 'published',
+    templateJson
+  });
+}
+
 async function run() {
   const { db, pool } = makeDb();
 
@@ -307,7 +374,9 @@ async function run() {
       await upsertTemplateAssignment(db, templateId, opsId);
     }
     const rbacTemplateId = await upsertRbacTestV2Template(db);
+    const customerOrderTemplateId = await upsertCustomerOrderTestTemplate(db);
     await upsertTemplateAssignment(db, rbacTemplateId, opsId);
+    await upsertTemplateAssignment(db, customerOrderTemplateId, opsId);
     await upsertMacro(db, {
       ref: 'macro:erp/createBatch@1',
       namespace: 'erp',
@@ -372,6 +441,7 @@ async function run() {
       console.log('Seed note: no published template found for automatic ops assignment.');
     }
     console.log(`Seed ensured template versions: rbac-test-v2 v1 published + v2 draft (published id ${rbacTemplateId})`);
+    console.log(`Seed ensured template version: customer-order-test v1 published (id ${customerOrderTemplateId})`);
     console.log('Seed ensured macros: macro:erp/createBatch@1, macro:erp/ensureErpCustomerOrder@1, macro:ui/reloadLookup@1');
   } finally {
     await pool.end();

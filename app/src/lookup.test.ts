@@ -33,7 +33,7 @@ describe('lookup url handling', () => {
 
     const options = await fetchLookupOptions('http://localhost:3001', source, externalRefs);
 
-    expect(fetchMock).toHaveBeenCalledWith(url, { headers: { Accept: 'application/json' } });
+    expect(fetchMock).toHaveBeenCalledWith(url, { method: 'GET', headers: { Accept: 'application/json' } });
     expect(options).toEqual([{ value: 'p-1', label: 'Product One' }]);
   });
 
@@ -59,6 +59,63 @@ describe('lookup url handling', () => {
 
     const options = await fetchLookupOptions('http://localhost:3001', source, {}, 'id', 'name');
     expect(options).toEqual([{ value: 'p-2', label: 'Product Two' }]);
+  });
+
+  it('maps customer lookup options from JSON source', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ items: [{ id: 'c-1', name: 'Customer A' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const source = normalizeLookupSource({
+      source: {
+        service: 'erp-sim',
+        method: 'GET',
+        path: '/api/customers',
+        query: { valid: true },
+        valueKey: 'id',
+        labelKey: 'name'
+      }
+    });
+
+    const options = await fetchLookupOptions('http://localhost:3001', source, {}, 'id', 'name');
+    expect(options).toEqual([{ value: 'c-1', label: 'Customer A' }]);
+  });
+
+  it('throws a clear error when source.path is missing', () => {
+    expect(() =>
+      normalizeLookupSource({
+        source: {
+          service: 'erp-sim',
+          method: 'GET'
+        }
+      })
+    ).toThrow('Lookup field source path is missing');
+  });
+
+  it('returns empty options when API response is empty', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const source = normalizeLookupSource({
+      source: {
+        service: 'erp-sim',
+        method: 'GET',
+        path: '/api/customers',
+        query: { valid: true }
+      }
+    });
+
+    const options = await fetchLookupOptions('http://localhost:3001', source, {}, 'id', 'name');
+    expect(options).toEqual([]);
   });
 
   it('interpolates external placeholder in query and keeps fixed params', () => {

@@ -3289,53 +3289,19 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       const externalRefs = collectExternalRefsFromQuery(query);
       const source = normalizeLookupSource(field);
       const { valueField, labelField } = resolveLookupFieldNames(field);
-      let options: Array<{ value: string; label: string }> = [];
-      if (parsed.data.fieldKey === 'customer_id') {
-        app.log.info(
-          {
-            fieldKey: parsed.data.fieldKey
-          },
-          'Lookup customer request'
-        );
-
-        const normalizedCustomerSource = {
-          ...source,
-          query: {
-            ...(source.query ?? {}),
-            valid: (source.query?.valid ?? 'true') as string
-          }
-        };
-
-        try {
-          const customerResult = await fetchLookupOptionsDetailed(
-            erpBaseUrl,
-            normalizedCustomerSource,
-            externalRefs,
-            valueField,
-            labelField
-          );
-          app.log.info(
-            {
-              fieldKey: parsed.data.fieldKey,
-              rawCustomerCount: customerResult.rawCount,
-              mappedOptionCount: customerResult.options.length
-            },
-            'Lookup customer mapping'
-          );
-          options = customerResult.options;
-        } catch (error) {
-          app.log.info(
-            {
-              fieldKey: parsed.data.fieldKey,
-              error: error instanceof Error ? error.message : 'Unknown lookup error'
-            },
-            'Lookup customer failed'
-          );
-          throw error;
-        }
-      } else {
-        options = await fetchLookupOptions(erpBaseUrl, source, externalRefs, valueField, labelField);
-      }
+      const lookupResult = await fetchLookupOptionsDetailed(erpBaseUrl, source, externalRefs, valueField, labelField);
+      app.log.info(
+        {
+          templateId: parsed.data.templateId,
+          fieldKey: parsed.data.fieldKey,
+          resolvedSource: lookupResult.source,
+          resolvedUrl: lookupResult.url,
+          rawItemCount: lookupResult.rawCount,
+          mappedOptionCount: lookupResult.options.length
+        },
+        'Lookup resolved'
+      );
+      const options = lookupResult.options;
       const selectedValue = externalRefs[parsed.data.fieldKey] ?? '';
 
       const html = [
