@@ -3,13 +3,32 @@ import { describe, expect, it, vi } from 'vitest';
 import { uiRoutes } from './ui.js';
 import { macroRegistryByRef } from '../actions/macros/index.js';
 
-function createMacroCatalogSelect(getRow: () => { ref: string; isEnabled: boolean } | undefined) {
+function createMacroCatalogSelect(
+  getRow: () =>
+    | {
+        ref: string;
+        isEnabled: boolean;
+        kind?: string | null;
+        definitionJson?: unknown;
+        paramsSchemaJson?: unknown;
+      }
+    | undefined
+) {
   return () => ({
     from: () => ({
       where: () => ({
         limit: async () => {
           const row = getRow();
-          return row ? [row] : [];
+          if (!row) return [];
+          return [
+            {
+              ref: row.ref,
+              isEnabled: row.isEnabled,
+              kind: row.kind ?? 'json',
+              definitionJson: row.definitionJson ?? null,
+              paramsSchemaJson: row.paramsSchemaJson ?? null
+            }
+          ];
         }
       })
     })
@@ -165,6 +184,127 @@ function createLayoutButtonMockDb(actionDef: unknown) {
   };
 }
 
+function createCustomerOrderLayoutButtonDb() {
+  let currentStatus = 'Created';
+  let currentDataJson: Record<string, unknown> = {};
+  let currentExternalRefsJson: Record<string, unknown> = {
+    customer_id: '99999999-0000-0000-0000-000000000001'
+  };
+  let currentSnapshotsJson: Record<string, unknown> = {};
+
+  const document = {
+    id: '00000000-0000-0000-0000-0000000000d5',
+    templateId: '00000000-0000-0000-0000-0000000000t5',
+    status: currentStatus,
+    dataJson: currentDataJson,
+    externalRefsJson: currentExternalRefsJson,
+    snapshotsJson: currentSnapshotsJson
+  };
+
+  const template = {
+    id: '00000000-0000-0000-0000-0000000000t5',
+    key: 'customer-order-layout-ui',
+    name: 'Customer Order Layout UI',
+    templateJson: {
+      fields: {},
+      layout: [{ type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui' }],
+      workflow: {
+        initial: 'Created',
+        states: {
+          Created: { editable: [], readonly: [], buttons: [] }
+        }
+      },
+      controls: {
+        create_customer_order: { label: 'Create Customer Order', action: 'createCustomerOrderAction' }
+      },
+      actions: {
+        createCustomerOrderAction: { type: 'macro', ref: 'macro:erp/ensureErpCustomerOrder@1' }
+      }
+    }
+  };
+
+  const db = {
+    select: createMacroCatalogSelect(() => ({
+      ref: 'macro:erp/ensureErpCustomerOrder@1',
+      isEnabled: true,
+      kind: 'json',
+      paramsSchemaJson: {
+        properties: {
+          customerRefKey: { default: 'customer_id' },
+          writeFieldKey: { default: 'customer_order_number' },
+          writeExternalRefKey: { default: 'customer_order_id' },
+          writeSnapshotKey: { default: 'customer_order_number' }
+        }
+      },
+      definitionJson: {
+        ops: [
+          { op: 'read', from: 'external.{{params.customerRefKey}}', to: 'vars.customerId' },
+          { op: 'fallback', from: 'data.{{params.customerRefKey}}', to: 'vars.customerId' },
+          { op: 'require', from: 'vars.customerId', message: 'Select a customer first.' },
+          {
+            op: 'http.post',
+            service: 'erp',
+            path: '/api/customer-orders',
+            body: { customer_id: '{{vars.customerId}}' },
+            to: 'vars.response'
+          },
+          { op: 'require', from: 'vars.response.id', message: 'ERP customer order response missing id.' },
+          { op: 'require', from: 'vars.response.order_number', message: 'ERP customer order response missing order_number.' },
+          { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.response.order_number}}' },
+          { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.response.id}}' },
+          { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.response.order_number}}' }
+        ]
+      }
+    })),
+    query: {
+      fpDocuments: {
+        findFirst: async () => ({
+          ...document,
+          status: currentStatus,
+          dataJson: currentDataJson,
+          externalRefsJson: currentExternalRefsJson,
+          snapshotsJson: currentSnapshotsJson
+        })
+      },
+      fpTemplates: {
+        findFirst: async () => template
+      },
+      fpTemplateAssignments: {
+        findMany: async () => []
+      }
+    },
+    transaction: async (cb: (tx: any) => Promise<void>) => {
+      const tx = {
+        update: () => ({
+          set: (values: any) => ({
+            where: async () => {
+              if (typeof values.status === 'string') currentStatus = values.status;
+              if (values.dataJson && typeof values.dataJson === 'object') currentDataJson = values.dataJson;
+              if (values.externalRefsJson && typeof values.externalRefsJson === 'object') {
+                currentExternalRefsJson = values.externalRefsJson;
+              }
+              if (values.snapshotsJson && typeof values.snapshotsJson === 'object') {
+                currentSnapshotsJson = values.snapshotsJson;
+              }
+            }
+          })
+        })
+      };
+      await cb(tx);
+    }
+  };
+
+  return {
+    db,
+    state: () => ({
+      status: currentStatus,
+      dataJson: currentDataJson,
+      externalRefsJson: currentExternalRefsJson,
+      snapshotsJson: currentSnapshotsJson
+    })
+  };
+}
+
 function createCreateBatchMacroMockDb(options?: { includeInStateButtons?: boolean; includeLayoutButton?: boolean }) {
   const includeInStateButtons = options?.includeInStateButtons ?? true;
   const includeLayoutButton = options?.includeLayoutButton ?? false;
@@ -174,7 +314,15 @@ function createCreateBatchMacroMockDb(options?: { includeInStateButtons?: boolea
     product_id: '00000000-0000-0000-0000-000000000001'
   };
   let currentSnapshotsJson: Record<string, unknown> = {};
-  let macroCatalogRow: { ref: string; isEnabled: boolean } | undefined = {
+  let macroCatalogRow:
+    | {
+        ref: string;
+        isEnabled: boolean;
+        kind?: string | null;
+        definitionJson?: unknown;
+        paramsSchemaJson?: unknown;
+      }
+    | undefined = {
     ref: 'macro:erp/createBatch@1',
     isEnabled: true
   };
@@ -257,7 +405,17 @@ function createCreateBatchMacroMockDb(options?: { includeInStateButtons?: boolea
 
   return {
     db,
-    setMacroCatalogRow: (row: { ref: string; isEnabled: boolean } | undefined) => {
+    setMacroCatalogRow: (
+      row:
+        | {
+            ref: string;
+            isEnabled: boolean;
+            kind?: string | null;
+            definitionJson?: unknown;
+            paramsSchemaJson?: unknown;
+          }
+        | undefined
+    ) => {
       macroCatalogRow = row;
     },
     state: () => ({
@@ -490,6 +648,36 @@ describe('workflow action execution', () => {
     await app.close();
   });
 
+  it('allows create_customer_order macro from layout button source=ui', async () => {
+    const mock = createCustomerOrderLayoutButtonDb();
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-ui-1', order_number: 'CO-UI-1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const app = Fastify();
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d5/action/create_customer_order?source=ui',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(String(res.headers.location)).toContain('/documents/00000000-0000-0000-0000-0000000000d5');
+    expect(String(res.headers.location)).not.toContain('error=');
+    expect(mock.state().dataJson.customer_order_number).toBe('CO-UI-1');
+    expect(mock.state().externalRefsJson.customer_order_id).toBe('co-ui-1');
+    expect(mock.state().snapshotsJson.customer_order_number).toBe('CO-UI-1');
+
+    vi.unstubAllGlobals();
+    await app.close();
+  });
+
   it('integration: create_batch macro writes batch_number into document data_json', async () => {
     const mock = createCreateBatchMacroMockDb();
     const fetchMock = vi.fn(async () =>
@@ -516,6 +704,251 @@ describe('workflow action execution', () => {
     expect(mock.state().dataJson.batch_number).toBe('B-00000000-NEW');
     expect(mock.state().externalRefsJson.batch_id).toBe('batch-1');
     expect(mock.state().snapshotsJson.batch_id).toBe('B-00000000-NEW');
+
+    vi.unstubAllGlobals();
+    await app.close();
+  });
+
+  it('shows success banner message after macro action redirect', async () => {
+    const mock = createCreateBatchMacroMockDb();
+    mock.setMacroCatalogRow({
+      ref: 'macro:erp/createBatch@1',
+      isEnabled: true,
+      kind: 'json',
+      definitionJson: {
+        ops: [
+          { op: 'write', to: 'data.batch_number', value: 'B-DB-MSG-1' },
+          { op: 'message', value: 'Batch created via DB macro: B-DB-MSG-1' }
+        ]
+      }
+    });
+
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(view: string, data: Record<string, unknown> = {}) {
+      this.type('application/json').send({ view, data });
+    });
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const actionRes = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d3/action/create_batch',
+      payload: {}
+    });
+
+    expect(actionRes.statusCode).toBe(303);
+    expect(String(actionRes.headers.location)).toContain('message=Batch+created+via+DB+macro%3A+B-DB-MSG-1');
+
+    const detailRes = await app.inject({
+      method: 'GET',
+      url: String(actionRes.headers.location)
+    });
+    expect(detailRes.statusCode).toBe(200);
+    const body = detailRes.json() as any;
+    expect(body.view).toBe('documents/detail.ejs');
+    expect(body.data.successMessage).toBe('Batch created via DB macro: B-DB-MSG-1');
+
+    await app.close();
+  });
+
+  it('existing template create_batch action works unchanged with db-json macro defaults', async () => {
+    const mock = createCreateBatchMacroMockDb();
+    mock.setMacroCatalogRow({
+      ref: 'macro:erp/createBatch@1',
+      isEnabled: true,
+      kind: 'json',
+      paramsSchemaJson: {
+        properties: {
+          productRefKey: { default: 'product_id' },
+          writeFieldKey: { default: 'batch_number' },
+          writeExternalRefKey: { default: 'batch_id' },
+          writeSnapshotKey: { default: 'batch_number' }
+        }
+      },
+      definitionJson: {
+        ops: [
+          { op: 'read', from: 'external.{{params.productRefKey}}', to: 'vars.productId' },
+          { op: 'fallback', from: 'data.{{params.productRefKey}}', to: 'vars.productId' },
+          { op: 'require', from: 'vars.productId', message: 'Select a product first.' },
+          {
+            op: 'http.post',
+            service: 'erp',
+            path: '/api/batches',
+            body: { product_id: '{{vars.productId}}' },
+            to: 'vars.batchResponse'
+          },
+          { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.batchResponse.batch_number}}' },
+          { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.batchResponse.id}}' },
+          { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.batchResponse.batch_number}}' }
+        ]
+      }
+    });
+
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: 'batch-db-default',
+          batch_number: 'B-DB-DEFAULT'
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const app = Fastify();
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d3/action/create_batch',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(mock.state().dataJson.batch_number).toBe('B-DB-DEFAULT');
+    expect(mock.state().externalRefsJson.batch_id).toBe('batch-db-default');
+    expect(mock.state().snapshotsJson.batch_number).toBe('B-DB-DEFAULT');
+    vi.unstubAllGlobals();
+    await app.close();
+  });
+
+  it('shows success message for ensureErpCustomerOrder db-json macro in document UI', async () => {
+    let currentStatus = 'Created';
+    let currentDataJson: Record<string, unknown> = {};
+    let currentExternalRefsJson: Record<string, unknown> = {
+      customer_id: '22222222-0000-0000-0000-000000000001'
+    };
+    let currentSnapshotsJson: Record<string, unknown> = {};
+
+    const db = {
+      select: createMacroCatalogSelect(() => ({
+        ref: 'macro:erp/ensureErpCustomerOrder@1',
+        isEnabled: true,
+        kind: 'json',
+        paramsSchemaJson: {
+          properties: {
+            customerRefKey: { default: 'customer_id' },
+            writeFieldKey: { default: 'customer_order_number' },
+            writeExternalRefKey: { default: 'customer_order_id' },
+            writeSnapshotKey: { default: 'customer_order_number' }
+          }
+        },
+        definitionJson: {
+          ops: [
+            { op: 'read', from: 'external.{{params.customerRefKey}}', to: 'vars.customerId' },
+            { op: 'fallback', from: 'data.{{params.customerRefKey}}', to: 'vars.customerId' },
+            { op: 'require', from: 'vars.customerId', message: 'Select a customer first.' },
+            {
+              op: 'http.post',
+              service: 'erp',
+              path: '/api/customer-orders',
+              body: { customer_id: '{{vars.customerId}}' },
+              to: 'vars.response'
+            },
+            { op: 'require', from: 'vars.response.id', message: 'ERP customer order response missing id.' },
+            {
+              op: 'require',
+              from: 'vars.response.order_number',
+              message: 'ERP customer order response missing order_number.'
+            },
+            { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.response.order_number}}' },
+            { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.response.id}}' },
+            { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.response.order_number}}' },
+            { op: 'message', value: 'Customer order created via DB macro: {{vars.response.order_number}}' }
+          ]
+        }
+      })),
+      query: {
+        fpDocuments: {
+          findFirst: async () => ({
+            id: '00000000-0000-0000-0000-0000000000e1',
+            templateId: '00000000-0000-0000-0000-0000000000te',
+            status: currentStatus,
+            dataJson: currentDataJson,
+            externalRefsJson: currentExternalRefsJson,
+            snapshotsJson: currentSnapshotsJson
+          })
+        },
+        fpTemplates: {
+          findFirst: async () => ({
+            id: '00000000-0000-0000-0000-0000000000te',
+            key: 'customer-order-macro',
+            name: 'Customer Order Macro',
+            templateJson: {
+              fields: {},
+              layout: [],
+              workflow: {
+                initial: 'Created',
+                states: {
+                  Created: { editable: [], readonly: [], buttons: ['ensure_customer_order'] }
+                }
+              },
+              controls: {
+                ensure_customer_order: { label: 'Ensure Customer Order', action: 'ensureCustomerOrderAction' }
+              },
+              actions: {
+                ensureCustomerOrderAction: { type: 'macro', ref: 'macro:erp/ensureErpCustomerOrder@1' }
+              }
+            }
+          })
+        },
+        fpTemplateAssignments: {
+          findMany: async () => []
+        }
+      },
+      transaction: async (cb: (tx: any) => Promise<void>) => {
+        const tx = {
+          update: () => ({
+            set: (values: any) => ({
+              where: async () => {
+                if (typeof values.status === 'string') currentStatus = values.status;
+                if (values.dataJson && typeof values.dataJson === 'object') currentDataJson = values.dataJson;
+                if (values.externalRefsJson && typeof values.externalRefsJson === 'object') {
+                  currentExternalRefsJson = values.externalRefsJson;
+                }
+                if (values.snapshotsJson && typeof values.snapshotsJson === 'object') {
+                  currentSnapshotsJson = values.snapshotsJson;
+                }
+              }
+            })
+          })
+        };
+        await cb(tx);
+      }
+    };
+
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-db-1', order_number: 'CO-DB-1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(view: string, data: Record<string, unknown> = {}) {
+      this.type('application/json').send({ view, data });
+    });
+    await app.register(uiRoutes, { db: db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const actionRes = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000e1/action/ensure_customer_order',
+      payload: {}
+    });
+
+    expect(actionRes.statusCode).toBe(303);
+    expect(String(actionRes.headers.location)).toContain('message=Customer+order+created+via+DB+macro%3A+CO-DB-1');
+    expect(currentDataJson.customer_order_number).toBe('CO-DB-1');
+    expect(currentExternalRefsJson.customer_order_id).toBe('co-db-1');
+    expect(currentSnapshotsJson.customer_order_number).toBe('CO-DB-1');
+
+    const detailRes = await app.inject({
+      method: 'GET',
+      url: String(actionRes.headers.location)
+    });
+    expect(detailRes.statusCode).toBe(200);
+    const body = detailRes.json() as any;
+    expect(body.data.successMessage).toBe('Customer order created via DB macro: CO-DB-1');
 
     vi.unstubAllGlobals();
     await app.close();

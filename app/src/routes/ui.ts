@@ -11,7 +11,7 @@ import {
   fpTemplates,
   fpUsers
 } from '../db/schema.js';
-import { fetchLookupOptions, normalizeLookupSource } from '../lookup.js';
+import { fetchLookupOptions, fetchLookupOptionsDetailed, normalizeLookupSource } from '../lookup.js';
 import { ExternalCallError, executeActionDefinition } from '../actions/index.js';
 import { renderLayout } from '../render/layout.js';
 
@@ -500,23 +500,11 @@ function normalizeActionSteps(actionDef: unknown): Array<Record<string, unknown>
 }
 
 function isUiSafeActionDefinition(actionDef: unknown) {
-  const allowedMacros = new Set([
-    'reloadLookup',
-    'noop',
-    'showToast',
-    'macro:ui/reloadLookup@1',
-    'macro:ui/noop@1',
-    'macro:ui/showToast@1'
-  ]);
   const steps = normalizeActionSteps(actionDef);
   if (steps.length === 0) return false;
 
   for (const step of steps) {
     if (step.type !== 'macro') return false;
-    const macroRef = typeof step.ref === 'string' ? step.ref : '';
-    const macroName = typeof step.name === 'string' ? step.name : '';
-    const normalized = macroRef || macroName;
-    if (!allowedMacros.has(normalized)) return false;
   }
 
   return true;
@@ -903,6 +891,7 @@ async function renderDocumentDetailPage(params: {
   assignmentGroupId?: string | null;
   groupName?: string | null;
   errorMessage?: string;
+  successMessage?: string;
 }) {
   const templateJson = parseTemplateJson(params.template.templateJson);
   const stateDef = (templateJson.workflow as any)?.states?.[params.document.status] ?? {};
@@ -1001,6 +990,7 @@ async function renderDocumentDetailPage(params: {
     assignmentEditorHint,
     assignmentApproverHint,
     errorMessage: params.errorMessage,
+    successMessage: params.successMessage,
     document: params.document,
     dataJson: dataJsonForRender,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
@@ -2792,6 +2782,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
     const query = toFormRecord(request.query);
     const errorFromQuery = normalizeOptionalFilter(getFormString(query, 'error'));
+    const successFromQuery = normalizeOptionalFilter(getFormString(query, 'message'));
 
     await renderDocumentDetailPage({
       db,
@@ -2801,7 +2792,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       document,
       assignmentGroupId,
       groupName,
-      ...(errorFromQuery ? { errorMessage: errorFromQuery } : {})
+      ...(errorFromQuery ? { errorMessage: errorFromQuery } : {}),
+      ...(successFromQuery ? { successMessage: successFromQuery } : {})
     });
   });
 
@@ -3033,6 +3025,12 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       reply.code(303);
       return reply.redirect(`${next.pathname}${next.search}`);
     };
+    const redirectWithActionMessage = (message: string) => {
+      const next = new URL(`/documents/${document.id}`, 'http://localhost');
+      next.searchParams.set('message', message.slice(0, 500));
+      reply.code(303);
+      return reply.redirect(`${next.pathname}${next.search}`);
+    };
     const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
     const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
     const query = toFormRecord(request.query);
@@ -3199,6 +3197,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
               actionKey,
               macroRef: event.macroRef,
               macro: `${event.namespace}/${event.name}@${event.version ?? 'n/a'}`,
+              source: event.source ?? 'builtin',
               outcome: event.outcome,
               ...(event.errorMessage ? { error: event.errorMessage } : {})
             },
@@ -3228,6 +3227,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           })
           .where(eq(fpDocuments.id, document.id));
       });
+      if (typeof result.message === 'string' && result.message.trim().length > 0) {
+        return redirectWithActionMessage(result.message);
+      }
       reply.code(303);
       return reply.redirect(`/documents/${document.id}`);
     } catch (error) {
@@ -3287,7 +3289,53 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       const externalRefs = collectExternalRefsFromQuery(query);
       const source = normalizeLookupSource(field);
       const { valueField, labelField } = resolveLookupFieldNames(field);
-      const options = await fetchLookupOptions(erpBaseUrl, source, externalRefs, valueField, labelField);
+      let options: Array<{ value: string; label: string }> = [];
+      if (parsed.data.fieldKey === 'customer_id') {
+        app.log.info(
+          {
+            fieldKey: parsed.data.fieldKey
+          },
+          'Lookup customer request'
+        );
+
+        const normalizedCustomerSource = {
+          ...source,
+          query: {
+            ...(source.query ?? {}),
+            valid: (source.query?.valid ?? 'true') as string
+          }
+        };
+
+        try {
+          const customerResult = await fetchLookupOptionsDetailed(
+            erpBaseUrl,
+            normalizedCustomerSource,
+            externalRefs,
+            valueField,
+            labelField
+          );
+          app.log.info(
+            {
+              fieldKey: parsed.data.fieldKey,
+              rawCustomerCount: customerResult.rawCount,
+              mappedOptionCount: customerResult.options.length
+            },
+            'Lookup customer mapping'
+          );
+          options = customerResult.options;
+        } catch (error) {
+          app.log.info(
+            {
+              fieldKey: parsed.data.fieldKey,
+              error: error instanceof Error ? error.message : 'Unknown lookup error'
+            },
+            'Lookup customer failed'
+          );
+          throw error;
+        }
+      } else {
+        options = await fetchLookupOptions(erpBaseUrl, source, externalRefs, valueField, labelField);
+      }
       const selectedValue = externalRefs[parsed.data.fieldKey] ?? '';
 
       const html = [

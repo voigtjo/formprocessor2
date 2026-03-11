@@ -45,12 +45,15 @@
   <textarea id="description" name="description" rows="3"><%= form.description %></textarea>
 
   <label for="params_schema_json">Params Schema JSON</label>
+  <p class="hint">Optional JSON Schema for macro params.</p>
   <textarea id="params_schema_json" name="params_schema_json" rows="8"><%= form.params_schema_json %></textarea>
 
   <label for="definition_json">Definition JSON</label>
+  <p class="hint">Executable macro definition for <code>kind=json</code>.</p>
   <textarea id="definition_json" name="definition_json" rows="12"><%= form.definition_json %></textarea>
 
   <label for="code_text">Code Text</label>
+  <p class="hint">Reserved for future/trusted system macros; not used by normal JSON macros.</p>
   <textarea id="code_text" name="code_text" rows="12"><%= form.code_text %></textarea>
 
   <div class="actions">

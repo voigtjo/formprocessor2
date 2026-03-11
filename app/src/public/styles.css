@@ -240,6 +240,12 @@ code {
   color: #8f1f27;
 }
 
+.success-card {
+  border-color: #b9e0c2;
+  background: #eef9f1;
+  color: #1f6a36;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;

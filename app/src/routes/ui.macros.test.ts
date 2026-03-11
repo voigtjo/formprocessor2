@@ -132,6 +132,46 @@ describe('macros ui', () => {
     await app.close();
   });
 
+  it('persists edited definition_json and reloads pretty-printed value on edit page', async () => {
+    const { db } = createMacroDb();
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(view: string, data: Record<string, unknown> = {}) {
+      this.type('application/json').send({ view, data });
+    });
+    await app.register(uiRoutes, { db: db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const ref = encodeURIComponent('macro:erp/createBatch@1');
+    const saveRes = await app.inject({
+      method: 'POST',
+      url: `/macros/${ref}`,
+      payload: {
+        ref: 'macro:erp/createBatch@1',
+        namespace: 'erp',
+        name: 'createBatch',
+        version: '1',
+        kind: 'json',
+        definition_json: '{"ops":[{"op":"message","value":"changed"}]}',
+        params_schema_json: '{"type":"object"}',
+        code_text: '/* stored */'
+      }
+    });
+    expect(saveRes.statusCode).toBe(303);
+
+    const reopenRes = await app.inject({
+      method: 'GET',
+      url: `/macros/${ref}/edit`
+    });
+    expect(reopenRes.statusCode).toBe(200);
+    const body = reopenRes.json() as any;
+    expect(body.view).toBe('macros/edit.ejs');
+    expect(body.data.form.definition_json).toContain('\n');
+    expect(body.data.form.definition_json).toContain('"op": "message"');
+    expect(body.data.form.params_schema_json).toBe('{\n  "type": "object"\n}');
+    expect(body.data.form.code_text).toBe('/* stored */');
+
+    await app.close();
+  });
+
   it('returns validation error on invalid definition_json', async () => {
     const { db } = createMacroDb();
     const app = Fastify();

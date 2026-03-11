@@ -19,6 +19,12 @@ export type LookupOption = {
   label: string;
 };
 
+export type LookupFetchResult = {
+  options: LookupOption[];
+  rawCount: number;
+  url: string;
+};
+
 function normalizeQueryValue(value: unknown) {
   if (typeof value === 'string') return value;
   if (typeof value === 'boolean') return value ? 'true' : 'false';
@@ -99,13 +105,13 @@ export function normalizeLookupSource(field: any): LookupSource {
   });
 }
 
-export async function fetchLookupOptions(
+export async function fetchLookupOptionsDetailed(
   baseUrl: string,
   source: LookupSource,
   externalRefs: Record<string, string>,
   valueField = 'id',
   labelField = 'name'
-): Promise<LookupOption[]> {
+): Promise<LookupFetchResult> {
   const url = buildLookupUrl(baseUrl, source, externalRefs);
   const response = await fetch(url, {
     headers: {
@@ -124,7 +130,7 @@ export async function fetchLookupOptions(
       ? ((data as { items: Record<string, unknown>[] }).items ?? [])
       : [];
 
-  return items
+  const options = items
     .map((item) => {
       const rawValue = item[valueField] ?? item.id;
       const rawLabel = item[labelField] ?? item.name;
@@ -138,4 +144,21 @@ export async function fetchLookupOptions(
       };
     })
     .filter((item): item is LookupOption => item !== undefined);
+
+  return {
+    options,
+    rawCount: items.length,
+    url
+  };
+}
+
+export async function fetchLookupOptions(
+  baseUrl: string,
+  source: LookupSource,
+  externalRefs: Record<string, string>,
+  valueField = 'id',
+  labelField = 'name'
+): Promise<LookupOption[]> {
+  const result = await fetchLookupOptionsDetailed(baseUrl, source, externalRefs, valueField, labelField);
+  return result.options;
 }

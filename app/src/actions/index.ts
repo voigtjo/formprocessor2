@@ -7,6 +7,7 @@ import {
   type MacroPatchContext,
   type MacroResult
 } from './macros/index.js';
+import { executeJsonMacroDefinition } from './macros/json-runtime.js';
 
 export type ActionContext = {
   doc: { id: string; status: string };
@@ -40,6 +41,7 @@ export type ActionDefinition =
 
 export type ActionExecutionResult = {
   status: string;
+  message?: string;
   dataJson: Record<string, unknown>;
   externalRefsJson: Record<string, unknown>;
   snapshotsJson: Record<string, unknown>;
@@ -294,22 +296,48 @@ function resolveMacroRef(step: Extract<ActionStep, { type: 'macro' }>) {
   return legacyName.length > 0 ? `macro:legacy/${legacyName}@1` : '';
 }
 
-async function ensureMacroIsEnabledInCatalog(db: unknown, ref: string) {
+type MacroCatalogRow = {
+  ref: string;
+  isEnabled: boolean;
+  kind: string | null;
+  definitionJson: unknown;
+  paramsSchemaJson: unknown;
+};
+
+function extractMacroParamDefaults(paramsSchemaJson: unknown) {
+  if (!paramsSchemaJson || typeof paramsSchemaJson !== 'object') return {} as Record<string, unknown>;
+  const schema = paramsSchemaJson as Record<string, unknown>;
+  const properties = schema.properties;
+  if (!properties || typeof properties !== 'object') return {} as Record<string, unknown>;
+  const defaults: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    if (Object.prototype.hasOwnProperty.call(value, 'default')) {
+      defaults[key] = (value as Record<string, unknown>).default;
+    }
+  }
+  return defaults;
+}
+
+async function loadMacroCatalogRow(db: unknown, ref: string): Promise<MacroCatalogRow> {
   const runtimeDb = db as { select?: (...args: unknown[]) => any } | null | undefined;
   if (!runtimeDb || typeof runtimeDb !== 'object' || typeof runtimeDb.select !== 'function') {
     throw new Error('Action runtime database is not configured');
   }
 
-  let rows: Array<{ ref: string; isEnabled: boolean }>;
+  let rows: MacroCatalogRow[];
   try {
     rows = (await runtimeDb
       .select({
         ref: fpMacros.ref,
-        isEnabled: fpMacros.isEnabled
+        isEnabled: fpMacros.isEnabled,
+        kind: fpMacros.kind,
+        definitionJson: fpMacros.definitionJson,
+        paramsSchemaJson: fpMacros.paramsSchemaJson
       })
       .from(fpMacros)
       .where(eq(fpMacros.ref, ref))
-      .limit(1)) as Array<{ ref: string; isEnabled: boolean }>;
+      .limit(1)) as MacroCatalogRow[];
   } catch (error) {
     throw new Error('Action runtime database is not configured');
   }
@@ -326,6 +354,7 @@ async function ensureMacroIsEnabledInCatalog(db: unknown, ref: string) {
   }
 
   console.info('[fp] macro catalog lookup', { macroRef: ref, found: true, enabled: true });
+  return row;
 }
 
 export async function executeActionDefinition(params: {
@@ -349,6 +378,7 @@ export async function executeActionDefinition(params: {
     namespace: string;
     name: string;
     version: number | null;
+    source?: 'db-json' | 'builtin-fallback';
     outcome: 'success' | 'error';
     errorMessage?: string;
   }) => void;
@@ -359,6 +389,7 @@ export async function executeActionDefinition(params: {
   const nextSnapshot = { ...params.context.snapshot };
   const macroLogs: NonNullable<ActionExecutionResult['macroLogs']> = [];
   let nextStatus = params.context.doc.status;
+  let resultMessage: string | undefined;
 
   const actionContext: ActionContext = {
     doc: { id: params.context.doc.id, status: nextStatus },
@@ -417,11 +448,7 @@ export async function executeActionDefinition(params: {
         hasSelect: typeof runtimeDb?.select === 'function',
         hasQuery: !!runtimeDb?.query
       });
-      await ensureMacroIsEnabledInCatalog(params.macroContext?.db, macroRef);
-      const macro = macroRegistryByRef[macroRef];
-      if (!macro) {
-        throw new Error(`Macro ref not implemented in runtime: ${macroRef}`);
-      }
+      const macroRow = await loadMacroCatalogRow(params.macroContext?.db, macroRef);
       const parsed = /^macro:([^/]+)\/([^@]+)@(\d+)$/.exec(macroRef);
       const macroNamespace = parsed?.[1] ?? 'unknown';
       const macroName = parsed?.[2] ?? macroRef;
@@ -502,15 +529,35 @@ export async function executeActionDefinition(params: {
         form: params.macroContext?.form
       };
 
+      const hasDbJsonDefinition =
+        String(macroRow.kind ?? '').trim().toLowerCase() === 'json' &&
+        !!macroRow.definitionJson &&
+        typeof macroRow.definitionJson === 'object';
+      const builtInMacro = macroRegistryByRef[macroRef];
+      const macroSource: 'db-json' | 'builtin-fallback' = hasDbJsonDefinition ? 'db-json' : 'builtin-fallback';
+      if (!hasDbJsonDefinition && !builtInMacro) {
+        throw new Error(`Macro ref not implemented: ${macroRef}`);
+      }
+
+      console.info('[fp] macro execution source', { macroRef, source: macroSource });
+
       let macroResult: MacroResult | void;
       try {
-        macroResult = await macro(macroCtx, step.params);
+        const macroDefaultParams = extractMacroParamDefaults(macroRow.paramsSchemaJson);
+        const macroRuntimeParams = {
+          ...macroDefaultParams,
+          ...((step.params ?? {}) as Record<string, unknown>)
+        };
+        macroResult = hasDbJsonDefinition
+          ? await executeJsonMacroDefinition(macroRow.definitionJson, macroCtx, macroRuntimeParams)
+          : await builtInMacro!(macroCtx, macroRuntimeParams);
       } catch (error) {
         params.onMacroEvent?.({
           macroRef,
           namespace: macroNamespace,
           name: macroName,
           version: macroVersion,
+          source: macroSource,
           outcome: 'error',
           errorMessage: error instanceof Error ? error.message : 'Macro execution failed'
         });
@@ -518,11 +565,15 @@ export async function executeActionDefinition(params: {
       }
       applyMacroPatch(macroPatch, nextData, nextExternal, nextSnapshot);
       applyMacroResult(macroResult, nextData, nextExternal, nextSnapshot);
+      if (typeof macroResult?.message === 'string' && macroResult.message.trim().length > 0) {
+        resultMessage = macroResult.message.trim();
+      }
       params.onMacroEvent?.({
         macroRef,
         namespace: macroNamespace,
         name: macroName,
         version: macroVersion,
+        source: macroSource,
         outcome: 'success'
       });
       macroLogs.push({
@@ -552,6 +603,7 @@ export async function executeActionDefinition(params: {
 
   return {
     status: nextStatus,
+    ...(resultMessage ? { message: resultMessage } : {}),
     dataJson: nextData,
     externalRefsJson: nextExternal,
     snapshotsJson: nextSnapshot,

@@ -63,6 +63,11 @@
     <strong>Action failed:</strong> <%= errorMessage %>
   </div>
 <% } %>
+<% if (successMessage) { %>
+  <div class="card success-card">
+    <strong>Success:</strong> <%= successMessage %>
+  </div>
+<% } %>
 
 <div class="actions">
 <% (buttonKeys || []).forEach((controlKey) => {

@@ -235,6 +235,63 @@ async function run() {
   const { db, pool } = makeDb();
 
   try {
+    const createBatchMacroDefinition = {
+      ops: [
+        { op: 'read', from: 'external.{{params.productRefKey}}', to: 'vars.productId' },
+        { op: 'fallback', from: 'data.{{params.productRefKey}}', to: 'vars.productId' },
+        { op: 'require', from: 'vars.productId', message: 'Select a product first.' },
+        {
+          op: 'http.post',
+          service: 'erp',
+          path: '/api/batches',
+          body: { product_id: '{{vars.productId}}' },
+          to: 'vars.batchResponse'
+        },
+        { op: 'require', from: 'vars.batchResponse.id', message: 'ERP create batch response missing id.' },
+        {
+          op: 'require',
+          from: 'vars.batchResponse.batch_number',
+          message: 'ERP create batch response missing batch_number.'
+        },
+        { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.batchResponse.batch_number}}' },
+        { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.batchResponse.id}}' },
+        { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.batchResponse.batch_number}}' },
+        { op: 'message', value: 'Batch created: {{vars.batchResponse.batch_number}}' }
+      ]
+    } satisfies Record<string, unknown>;
+    const ensureErpCustomerOrderDefinition = {
+      ops: [
+        { op: 'read', from: 'external.{{params.customerRefKey}}', to: 'vars.customerId' },
+        { op: 'fallback', from: 'data.{{params.customerRefKey}}', to: 'vars.customerId' },
+        { op: 'require', from: 'vars.customerId', message: 'Select a customer first.' },
+        {
+          op: 'http.post',
+          service: 'erp',
+          path: '/api/customer-orders',
+          body: { customer_id: '{{vars.customerId}}' },
+          to: 'vars.response'
+        },
+        {
+          op: 'require',
+          from: 'vars.response.id',
+          message: 'ERP customer order response missing id.'
+        },
+        {
+          op: 'require',
+          from: 'vars.response.order_number',
+          message: 'ERP customer order response missing order_number.'
+        },
+        { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.response.order_number}}' },
+        { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.response.id}}' },
+        { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.response.order_number}}' },
+        { op: 'message', value: 'Customer order created via DB macro: {{vars.response.order_number}}' }
+      ]
+    } satisfies Record<string, unknown>;
+    const reloadLookupDefinition = {
+      ops: [{ op: 'log', value: 'reloadLookup requested' }],
+      message: 'Lookup reloaded.'
+    } satisfies Record<string, unknown>;
+
     const aliceId = await upsertUser(db, 'alice', 'Alice');
     const bobId = await upsertUser(db, 'bob', 'Bob');
     const charlyId = await upsertUser(db, 'charly', 'Charly');
@@ -256,24 +313,54 @@ async function run() {
       namespace: 'erp',
       name: 'createBatch',
       version: 1,
+      kind: 'json',
       description: 'Create ERP batch for a batch product',
-      isEnabled: true
+      isEnabled: true,
+      paramsSchemaJson: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          productRefKey: { type: 'string', default: 'product_id' },
+          writeFieldKey: { type: 'string', default: 'batch_number' },
+          writeExternalRefKey: { type: 'string', default: 'batch_id' },
+          writeSnapshotKey: { type: 'string', default: 'batch_number' }
+        }
+      },
+      definitionJson: createBatchMacroDefinition
     });
     await upsertMacro(db, {
       ref: 'macro:erp/ensureErpCustomerOrder@1',
       namespace: 'erp',
       name: 'ensureErpCustomerOrder',
       version: 1,
+      kind: 'json',
       description: 'Ensure ERP customer order reference exists',
-      isEnabled: true
+      isEnabled: true,
+      paramsSchemaJson: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          customerRefKey: { type: 'string', default: 'customer_id' },
+          writeFieldKey: { type: 'string', default: 'customer_order_number' },
+          writeExternalRefKey: { type: 'string', default: 'customer_order_id' },
+          writeSnapshotKey: { type: 'string', default: 'customer_order_number' }
+        }
+      },
+      definitionJson: ensureErpCustomerOrderDefinition
     });
     await upsertMacro(db, {
       ref: 'macro:ui/reloadLookup@1',
       namespace: 'ui',
       name: 'reloadLookup',
       version: 1,
+      kind: 'json',
       description: 'UI helper macro to trigger lookup refresh',
-      isEnabled: true
+      isEnabled: true,
+      paramsSchemaJson: {
+        type: 'object',
+        additionalProperties: true
+      },
+      definitionJson: reloadLookupDefinition
     });
 
     console.log('Seed ensured groups: ops, qa');
