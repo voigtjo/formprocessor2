@@ -8,7 +8,7 @@
 <form method="get" action="/documents" class="row">
   <div class="col col-6">
     <label for="filter-status">Status</label>
-    <select id="filter-status" name="status">
+    <select id="filter-status" name="status" onchange="this.form.submit()">
       <option value="">All</option>
       <% (statusOptions || []).forEach((status) => { %>
         <option value="<%= status %>" <%= filters?.status === status ? 'selected' : '' %>><%= status %></option>
@@ -17,7 +17,7 @@
   </div>
   <div class="col col-6">
     <label for="filter-template-id">Template</label>
-    <select id="filter-template-id" name="templateId">
+    <select id="filter-template-id" name="templateId" onchange="this.form.submit()">
       <option value="">All</option>
       <% (templates || []).forEach((tpl) => { %>
         <option value="<%= tpl.id %>" <%= filters?.templateId === tpl.id ? 'selected' : '' %>><%= tpl.name %> (<%= tpl.key %>)</option>
@@ -26,15 +26,18 @@
   </div>
   <div class="col col-6">
     <label for="filter-group-id">Group</label>
-    <select id="filter-group-id" name="groupId">
+    <select id="filter-group-id" name="groupId" onchange="this.form.submit()">
       <option value="">All</option>
       <% (groups || []).forEach((group) => { %>
         <option value="<%= group.id %>" <%= filters?.groupId === group.id ? 'selected' : '' %>><%= group.name %> (<%= group.key %>)</option>
       <% }) %>
     </select>
   </div>
+  <div class="col col-6">
+    <label for="filter-show-archived">Show archived</label>
+    <input id="filter-show-archived" type="checkbox" name="showArchived" value="1" <%= filters?.showArchived ? 'checked' : '' %> onchange="this.form.submit()" />
+  </div>
   <div class="col">
-    <button class="btn btn-secondary" type="submit">Apply Filters</button>
     <a class="btn btn-secondary" href="/documents">Reset</a>
   </div>
 </form>
@@ -46,13 +49,14 @@
       <th>Status</th>
       <th>Group</th>
       <th>Template</th>
+      <th>Template Version</th>
       <th>Snapshots</th>
       <th>Action</th>
     </tr>
   </thead>
   <tbody>
     <% if (!documents || documents.length === 0) { %>
-      <tr><td colspan="6" class="muted">No documents yet.</td></tr>
+      <tr><td colspan="7" class="muted">No documents yet.</td></tr>
     <% } %>
     <% (documents || []).forEach((doc) => { %>
       <tr>
@@ -60,6 +64,7 @@
         <td><span class="badge badge-status"><%= doc.status %></span></td>
         <td><%= doc.groupName || '—' %></td>
         <td><%= doc.templateName %> (<code><%= doc.templateKey %></code>)</td>
+        <td><code>v<%= doc.templateVersion ?? 1 %></code></td>
         <td><%= (doc.snapshotPreview && doc.snapshotPreview.length > 0) ? doc.snapshotPreview.join(' · ') : '—' %></td>
         <td><a href="/documents/<%= doc.id %>">Open</a></td>
       </tr>

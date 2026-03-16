@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
 import { uiRoutes } from './ui.js';
+import { fpMacros, fpTemplateMacros, fpTemplates } from '../db/schema.js';
 
 function createMacroDb() {
   const macros: Array<any> = [
@@ -14,20 +15,56 @@ function createMacroDb() {
       description: 'Create batch',
       paramsSchemaJson: null,
       definitionJson: { steps: [] },
-      codeText: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }
   ];
+  const templates: Array<any> = [
+    {
+      id: '00000000-0000-0000-0000-0000000000a1',
+      key: 'rbac-test',
+      name: 'RBAC Test',
+      version: 1,
+      state: 'published'
+    }
+  ];
+  const templateMacros: Array<any> = [];
+
+  const createSelectChain = (rows: Array<any>) => {
+    const chain: any = {
+      where: (_condition?: unknown) => chain,
+      orderBy: async () => rows,
+      limit: async (count = 1) => rows.slice(0, count),
+      innerJoin: () => {
+        const joined = templateMacros
+          .map((link) => {
+            const template = templates.find((item) => item.id === link.templateId);
+            return template
+              ? {
+                  macroRef: link.macroRef,
+                  templateId: template.id,
+                  templateName: template.name,
+                  templateKey: template.key,
+                  templateVersion: template.version,
+                  templateState: template.state
+                }
+              : null;
+          })
+          .filter(Boolean);
+        return createSelectChain(joined as Array<any>);
+      }
+    };
+    return chain;
+  };
 
   const db = {
     select: () => ({
-      from: () => ({
-        orderBy: async () => macros,
-        where: () => ({
-          limit: async () => macros.slice(0, 1)
-        })
-      })
+      from: (table: unknown) => {
+        if (table === fpMacros) return createSelectChain(macros);
+        if (table === fpTemplates) return createSelectChain(templates);
+        if (table === fpTemplateMacros) return createSelectChain(templateMacros);
+        return createSelectChain([]);
+      }
     }),
     query: {
       fpMacros: {
@@ -91,8 +128,7 @@ describe('macros ui', () => {
         kind: 'json',
         description: 'Test macro',
         params_schema_json: '{"type":"object"}',
-        definition_json: '{"steps":[{"type":"noop"}]}',
-        code_text: ''
+        definition_json: '{"steps":[{"type":"noop"}]}'
       }
     });
 
@@ -120,8 +156,7 @@ describe('macros ui', () => {
         kind: 'json',
         description: 'Updated description',
         definition_json: '{"steps":[{"type":"macro"}]}',
-        params_schema_json: '',
-        code_text: '/* saved only */'
+        params_schema_json: ''
       }
     });
 
@@ -151,8 +186,7 @@ describe('macros ui', () => {
         version: '1',
         kind: 'json',
         definition_json: '{"ops":[{"op":"message","value":"changed"}]}',
-        params_schema_json: '{"type":"object"}',
-        code_text: '/* stored */'
+        params_schema_json: '{"type":"object"}'
       }
     });
     expect(saveRes.statusCode).toBe(303);
@@ -167,7 +201,6 @@ describe('macros ui', () => {
     expect(body.data.form.definition_json).toContain('\n');
     expect(body.data.form.definition_json).toContain('"op": "message"');
     expect(body.data.form.params_schema_json).toBe('{\n  "type": "object"\n}');
-    expect(body.data.form.code_text).toBe('/* stored */');
 
     await app.close();
   });

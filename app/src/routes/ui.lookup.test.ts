@@ -3,7 +3,84 @@ import { describe, expect, it, vi } from 'vitest';
 import { uiRoutes } from './ui.js';
 
 describe('lookup api', () => {
-  it('returns usable customer options for fieldKey=customer_id and defaults valid=true', async () => {
+  it('returns usable product options from generic field.source mapping', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      expect(url).toContain('/api/products');
+      expect(url).toContain('valid=true');
+      return new Response(
+        JSON.stringify([
+          { id: 'p-1', name: 'Product A', valid: true },
+          { id: 'p-2', name: 'Product B', valid: true }
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [
+              {
+                key: 'products.listValid',
+                name: 'List Valid Products',
+                description: null,
+                state: 'active',
+                method: 'GET',
+                baseUrl: 'http://localhost:3001',
+                path: '/api/products',
+                requestSchemaJson: { query: { valid: true } },
+                responseSchemaJson: null,
+                handlerCode: null
+              }
+            ]
+          })
+        })
+      }),
+      query: {
+        fpTemplates: {
+          findFirst: async () => ({
+            id: '00000000-0000-0000-0000-0000000000a1',
+            key: 'product-lookup',
+            name: 'Product Lookup',
+            templateJson: {
+              fields: {
+                item_ref: {
+                  kind: 'lookup',
+                  label: 'Item',
+                  apiRef: 'products.listValid',
+                  valueKey: 'id',
+                  labelKey: 'name'
+                }
+              },
+              layout: [{ type: 'field', key: 'item_ref' }],
+              workflow: { initial: 'created', states: { created: { editable: ['item_ref'], readonly: [], buttons: [] } } },
+              controls: {},
+              actions: {}
+            }
+          })
+        }
+      }
+    };
+
+    const app = Fastify();
+    await app.register(uiRoutes, { db: db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/lookup?templateId=00000000-0000-0000-0000-0000000000a1&fieldKey=item_ref'
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<option value="p-1">Product A</option>');
+    expect(res.body).toContain('<option value="p-2">Product B</option>');
+    vi.unstubAllGlobals();
+    await app.close();
+  });
+
+  it('returns usable customer options for generic customer lookup source mapping', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       expect(url).toContain('/api/customers');
@@ -19,6 +96,26 @@ describe('lookup api', () => {
     vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
 
     const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [
+              {
+                key: 'customers.listValid',
+                name: 'List Valid Customers',
+                description: null,
+                state: 'active',
+                method: 'GET',
+                baseUrl: 'http://localhost:3001',
+                path: '/api/customers',
+                requestSchemaJson: { query: { valid: true } },
+                responseSchemaJson: null,
+                handlerCode: null
+              }
+            ]
+          })
+        })
+      }),
       query: {
         fpTemplates: {
           findFirst: async () => ({
@@ -27,24 +124,19 @@ describe('lookup api', () => {
             name: 'Customer Order Test',
             templateJson: {
               fields: {
-                customer_id: {
+                buyer_customer_ref: {
                   kind: 'lookup',
                   label: 'Customer',
-                  source: {
-                    service: 'erp-sim',
-                    path: '/api/customers',
-                    method: 'GET',
-                    query: { valid: true },
-                    valueKey: 'id',
-                    labelKey: 'name'
-                  }
+                  apiRef: 'customers.listValid',
+                  valueKey: 'id',
+                  labelKey: 'name'
                 }
               },
-              layout: [{ type: 'field', key: 'customer_id' }],
+              layout: [{ type: 'field', key: 'buyer_customer_ref' }],
               workflow: {
                 initial: 'created',
                 states: {
-                  created: { editable: ['customer_id'], readonly: [], buttons: [] }
+                  created: { editable: ['buyer_customer_ref'], readonly: [], buttons: [] }
                 }
               },
               controls: {},
@@ -60,7 +152,7 @@ describe('lookup api', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/api/lookup?templateId=00000000-0000-0000-0000-0000000000c1&fieldKey=customer_id'
+      url: '/api/lookup?templateId=00000000-0000-0000-0000-0000000000c1&fieldKey=buyer_customer_ref'
     });
 
     expect(res.statusCode).toBe(200);

@@ -47,12 +47,26 @@ Common field props in use:
 - `label`
 - `multiline` (editable)
 
-Lookup source compatibility:
-- `source.path` + `source.query`
-- optional value/label mapping via either:
+Lookup source (recommended):
+- `apiRef` references `fp_apis.key` (or `api:<key>` compatibility form)
+- optional mapping keys:
   - `valueField` / `labelField`
   - `valueKey` / `labelKey`
-- legacy-compatible `lookup.endpoint` is supported.
+
+Example:
+```json
+{
+  "kind": "lookup",
+  "label": "Customer",
+  "apiRef": "customers.listValid",
+  "valueKey": "id",
+  "labelKey": "name"
+}
+```
+
+Lookup source legacy fallback (temporary):
+- `source.path` + `source.query`
+- legacy-compatible `lookup.endpoint`
 
 ## layout nodes (Renderer v2)
 
@@ -126,11 +140,40 @@ Two supported definition forms:
 
 2. Macro action:
 ```json
-{ "type": "macro", "name": "assign", "params": {} }
+{ "type": "macro", "ref": "macro:erp/createBatch@1", "params": {} }
 ```
 
-Planned macro names include:
-- `assign`, `start`, `save`, `submit`, `approve`, `reject`
+3. API action (new standard):
+```json
+{
+  "type": "api",
+  "apiRef": "customerOrders.create",
+  "requestMapping": { "customer_id": "{{external.customer_id}}" },
+  "responseMapping": {
+    "data": { "customer_order_number": "order_number" },
+    "external": { "customer_order_id": "id" },
+    "snapshot": { "customer_order_number": "order_number" }
+  },
+  "successMessage": "Customer order created: {{response.order_number}}"
+}
+```
+
+4. System action:
+```json
+{
+  "type": "system",
+  "action": "setStatus",
+  "to": "submitted"
+}
+```
+
+Macro ref format:
+- `macro:<namespace>/<name>@<version>`
+
+Template-to-macro mapping:
+- macro refs are detected from `actions.*` (`type="macro"` and nested `steps`)
+- server syncs `fp_template_macros` automatically on template save
+- no manual mapping maintenance in UI/DB needed
 
 Interpolation tokens usable in action path/body strings:
 - `{{doc.*}}`

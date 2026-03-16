@@ -1,0 +1,53 @@
+<header class="page-header">
+  <h1>APIs</h1>
+</header>
+<div class="actions">
+  <a class="btn btn-primary" href="/apis/new">New API</a>
+</div>
+
+<form method="get" action="/apis" class="row">
+  <div class="col col-6">
+    <label for="api-state-filter">State</label>
+    <select id="api-state-filter" name="state" onchange="this.form.submit()">
+      <% ['active', 'inactive', 'all'].forEach((stateOption) => { %>
+        <option value="<%= stateOption %>" <%= (filters?.state || 'active') === stateOption ? 'selected' : '' %>><%= stateOption %></option>
+      <% }) %>
+    </select>
+  </div>
+  <div class="col">
+    <a class="btn btn-secondary" href="/apis">Reset</a>
+  </div>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Key</th>
+      <th>Name</th>
+      <th>Method</th>
+      <th>Base URL</th>
+      <th>Path</th>
+      <th>State</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!apis || apis.length === 0) { %>
+      <tr><td colspan="7" class="muted">No APIs found.</td></tr>
+    <% } %>
+    <% (apis || []).forEach((api) => { %>
+      <tr>
+        <td><code><%= api.key %></code></td>
+        <td><%= api.name %></td>
+        <td><code><%= api.method %></code></td>
+        <td><code><%= api.baseUrl || '—' %></code></td>
+        <td><code><%= api.path %></code></td>
+        <td><span class="badge"><%= api.state %></span></td>
+        <td>
+          <a href="/apis/<%= api.id %>">Open</a>
+          · <a href="/apis/<%= api.id %>/edit">Edit</a>
+        </td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>

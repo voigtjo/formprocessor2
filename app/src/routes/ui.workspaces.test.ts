@@ -187,7 +187,7 @@ describe('workplaces / assignment flow', () => {
       payload: {}
     });
     expect(assignRes.statusCode).toBe(303);
-    expect(mock.state().currentStatus).toBe('Assigned');
+    expect(mock.state().currentStatus).toBe('assigned');
     expect(mock.state().assigneeUserId).toBe(alice.id);
 
     const assignApproverRes = await app.inject({
@@ -208,7 +208,7 @@ describe('workplaces / assignment flow', () => {
       payload: {}
     });
     expect(submitRes.statusCode).toBe(303);
-    expect(mock.state().currentStatus).toBe('Submitted');
+    expect(mock.state().currentStatus).toBe('submitted');
 
     const approveRes = await app.inject({
       method: 'POST',
@@ -217,7 +217,7 @@ describe('workplaces / assignment flow', () => {
       payload: {}
     });
     expect(approveRes.statusCode).toBe(303);
-    expect(mock.state().currentStatus).toBe('Approved');
+    expect(mock.state().currentStatus).toBe('approved');
 
     await app.close();
   });
@@ -416,12 +416,13 @@ describe('workplaces / assignment flow', () => {
     });
     expect(aliceRes.statusCode).toBe(200);
     const aliceTasks = (aliceRes.json() as any).tasks as Array<{ id: string; role: string }>;
-    expect(aliceTasks.map((item) => item.id)).toEqual(['d-assigned', 'd-created', 'd-submitted', 'd-approved']);
+    expect(aliceTasks.map((item) => item.id)).toEqual(['d-created', 'd-assigned', 'd-submitted']);
     expect(aliceTasks.every((item) => item.role === 'Editor')).toBe(true);
     const aliceById = new Map(
       aliceTasks.map((item) => [item.id, item as { id: string; role: string; taskState: string; status: string }])
     );
     expect(aliceById.get('d-assigned')?.taskState).toBe('open');
+    expect(aliceById.get('d-created')?.taskState).toBe('open');
     expect(aliceById.get('d-submitted')?.taskState).toBe('done');
 
     const bobRes = await app.inject({
@@ -434,7 +435,21 @@ describe('workplaces / assignment flow', () => {
     expect(bobTasks.every((item) => item.role === 'Approver')).toBe(true);
     const bobById = new Map(bobTasks.map((item) => [item.id, item]));
     expect(bobById.get('d-submitted')?.taskState).toBe('open');
-    expect(bobById.get('d-approved')?.taskState).toBe('done');
+
+    const bobShowDoneRes = await app.inject({
+      method: 'GET',
+      url: '/workspaces/me?showDone=1',
+      headers: { cookie: `fp_user=${encodeURIComponent(bob.id)}` }
+    });
+    expect(bobShowDoneRes.statusCode).toBe(200);
+    const bobShowDoneTasks = (bobShowDoneRes.json() as any).tasks as Array<{
+      id: string;
+      role: string;
+      taskState: string;
+      status: string;
+    }>;
+    const bobShowDoneById = new Map(bobShowDoneTasks.map((item) => [item.id, item]));
+    expect(bobShowDoneById.get('d-approved')?.taskState).toBe('done');
 
     await app.close();
   });

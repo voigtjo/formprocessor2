@@ -115,7 +115,7 @@ function createMockDb() {
   };
 }
 
-function createLayoutButtonMockDb(actionDef: unknown) {
+function createLayoutButtonMockDb(actionDef: unknown, buttonKind: 'ui' | 'process' = 'ui') {
   let currentStatus = 'Assigned';
 
   const document = {
@@ -133,7 +133,7 @@ function createLayoutButtonMockDb(actionDef: unknown) {
     name: 'Layout UI',
     templateJson: {
       fields: {},
-      layout: [{ type: 'button', key: 'uiReload', action: 'uiReload' }],
+      layout: [{ type: 'button', key: 'uiReload', action: 'uiReload', kind: buttonKind }],
       workflow: {
         initial: 'Assigned',
         states: {
@@ -285,6 +285,134 @@ function createCustomerOrderLayoutButtonDb() {
               }
               if (values.snapshotsJson && typeof values.snapshotsJson === 'object') {
                 currentSnapshotsJson = values.snapshotsJson;
+              }
+            }
+          })
+        })
+      };
+      await cb(tx);
+    }
+  };
+
+  return {
+    db,
+    state: () => ({
+      status: currentStatus,
+      dataJson: currentDataJson,
+      externalRefsJson: currentExternalRefsJson,
+      snapshotsJson: currentSnapshotsJson
+    })
+  };
+}
+
+function createCustomerOrderApiActionLayoutButtonDb() {
+  let currentStatus = 'Created';
+  let currentDataJson: Record<string, unknown> = {};
+  let currentExternalRefsJson: Record<string, unknown> = {
+    customer_id: '99999999-0000-0000-0000-000000000001'
+  };
+  let currentSnapshotsJson: Record<string, unknown> = {};
+
+  const document = {
+    id: '00000000-0000-0000-0000-0000000000d6',
+    templateId: '00000000-0000-0000-0000-0000000000t6',
+    status: currentStatus,
+    dataJson: currentDataJson,
+    externalRefsJson: currentExternalRefsJson,
+    snapshotsJson: currentSnapshotsJson
+  };
+
+  const template = {
+    id: '00000000-0000-0000-0000-0000000000t6',
+    key: 'customer-order-api-ui',
+    name: 'Customer Order API UI',
+    templateJson: {
+      fields: {},
+      layout: [{ type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui' }],
+      workflow: {
+        initial: 'Created',
+        states: {
+          Created: { editable: [], readonly: [], buttons: [] }
+        }
+      },
+      controls: {
+        create_customer_order: { label: 'Create Customer Order', action: 'createCustomerOrderAction' }
+      },
+      actions: {
+        createCustomerOrderAction: {
+          type: 'composite',
+          steps: [
+            { type: 'require', from: 'external.customer_id', message: 'Select a customer first.' },
+            {
+              type: 'callApi',
+              apiRef: 'customerOrders.create',
+              request: { customer_id: '{{external.customer_id}}' },
+              to: 'vars.customerOrderResponse'
+            },
+            { type: 'write', to: 'data.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
+            { type: 'write', to: 'external.customer_order_id', value: '{{vars.customerOrderResponse.id}}' },
+            { type: 'write', to: 'snapshot.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
+            { type: 'message', value: 'Customer order created: {{vars.customerOrderResponse.order_number}}' }
+          ]
+        }
+      }
+    }
+  };
+
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => [
+            {
+              key: 'customerOrders.create',
+              name: 'Create Customer Order',
+              description: null,
+              state: 'active',
+              method: 'POST',
+              baseUrl: 'http://localhost:3001',
+              path: '/api/customer-orders',
+              requestSchemaJson: null,
+              responseSchemaJson: null,
+              handlerCode: null
+            }
+          ]
+        })
+      })
+    }),
+    query: {
+      fpDocuments: {
+        findFirst: async () => ({
+          ...document,
+          status: currentStatus,
+          dataJson: currentDataJson,
+          externalRefsJson: currentExternalRefsJson,
+          snapshotsJson: currentSnapshotsJson
+        })
+      },
+      fpTemplates: {
+        findFirst: async () => template
+      },
+      fpTemplateAssignments: {
+        findMany: async () => []
+      }
+    },
+    transaction: async (cb: (tx: any) => Promise<void>) => {
+      const tx = {
+        update: () => ({
+          set: (values: any) => ({
+            where: async () => {
+              if (values.dataJson && typeof values.dataJson === 'object') {
+                currentDataJson = values.dataJson;
+              }
+              if (values.externalRefsJson && typeof values.externalRefsJson === 'object') {
+                currentExternalRefsJson = values.externalRefsJson;
+              }
+              if (values.snapshotsJson && typeof values.snapshotsJson === 'object') {
+                currentSnapshotsJson = values.snapshotsJson;
+              }
+              if (typeof values.status === 'string') {
+                currentStatus = values.status;
               }
             }
           })
@@ -576,7 +704,7 @@ describe('workflow action execution', () => {
     });
     expect(startRes.statusCode).toBe(303);
     expect(startRes.headers.location).toBe('/documents/00000000-0000-0000-0000-0000000000d1');
-    expect(mock.getStatus()).toBe('Started');
+    expect(mock.getStatus()).toBe('assigned');
 
     const submitRes = await app.inject({
       method: 'POST',
@@ -585,7 +713,96 @@ describe('workflow action execution', () => {
     });
     expect(submitRes.statusCode).toBe(303);
     expect(submitRes.headers.location).toBe('/documents/00000000-0000-0000-0000-0000000000d1');
-    expect(mock.getStatus()).toBe('Submitted');
+    expect(mock.getStatus()).toBe('submitted');
+
+    await app.close();
+  });
+
+  it('allows standard workflow submit without template workflow/controls action definitions', async () => {
+    let currentStatus = 'assigned';
+    const template = {
+      id: '00000000-0000-0000-0000-0000000000a7',
+      key: 'evidence-group-submit',
+      name: 'Evidence Group Submit',
+      workflowRef: 'evidence.group-submit.v1',
+      templateJson: {
+        fields: {},
+        layout: [],
+        actions: {}
+      }
+    };
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: async () => ({
+            id: '00000000-0000-0000-0000-0000000000a8',
+            templateId: template.id,
+            status: currentStatus,
+            dataJson: {},
+            externalRefsJson: {},
+            snapshotsJson: {}
+          })
+        },
+        fpTemplates: {
+          findFirst: async () => template
+        },
+        fpTemplateAssignments: {
+          findMany: async () => []
+        }
+      },
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: async () => [{
+                id: 'wf-evidence-1',
+                key: 'evidence.group-submit.v1',
+                name: 'Evidence Group Submit',
+                state: 'active',
+                version: 1,
+                workflowJson: {
+                  order: ['created', 'assigned', 'submitted', 'approved'],
+                  initialStatus: 'created',
+                  states: {
+                    created: { buttons: ['assign'] },
+                    assigned: { buttons: ['submit'] },
+                    submitted: { buttons: ['approve'] },
+                    approved: { buttons: [] }
+                  },
+                  semantics: { submit: 'global', approval: 'global' },
+                  actorModel: { editors: 'multiple', approvers: 'multiple' }
+                }
+              }]
+            })
+          })
+        })
+      })),
+      transaction: async (cb: (tx: any) => Promise<void>) => {
+        const tx = {
+          update: () => ({
+            set: (values: any) => ({
+              where: async () => {
+                if (typeof values.status === 'string') currentStatus = values.status;
+              }
+            })
+          })
+        };
+        await cb(tx);
+      }
+    };
+
+    const app = Fastify();
+    await app.register(uiRoutes, { db: db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000a8/action/submit',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(res.headers.location).toBe('/documents/00000000-0000-0000-0000-0000000000a8');
+    expect(currentStatus).toBe('submitted');
 
     await app.close();
   });
@@ -602,7 +819,7 @@ describe('workflow action execution', () => {
     });
 
     expect(startRes.statusCode).toBe(303);
-    expect(mock.getStatus()).toBe('Started');
+    expect(mock.getStatus()).toBe('assigned');
     expect(mock.getDataJson().status).toBeUndefined();
 
     await app.close();
@@ -643,8 +860,25 @@ describe('workflow action execution', () => {
 
     expect(res.statusCode).toBe(303);
     expect(res.headers.location).toBe('/documents/00000000-0000-0000-0000-0000000000d2');
-    expect(mock.getStatus()).toBe('Assigned');
+    expect(mock.getStatus()).toBe('assigned');
 
+    await app.close();
+  });
+
+  it('allows process-kind layout button with composite action without source=ui', async () => {
+    const mock = createLayoutButtonMockDb({ type: 'composite', steps: [{ type: 'setStatus', to: 'Started' }] }, 'process');
+    const app = Fastify();
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d2/action/uiReload',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(res.headers.location).toBe('/documents/00000000-0000-0000-0000-0000000000d2');
+    expect(mock.getStatus()).toBe('assigned');
     await app.close();
   });
 
@@ -673,6 +907,36 @@ describe('workflow action execution', () => {
     expect(mock.state().dataJson.customer_order_number).toBe('CO-UI-1');
     expect(mock.state().externalRefsJson.customer_order_id).toBe('co-ui-1');
     expect(mock.state().snapshotsJson.customer_order_number).toBe('CO-UI-1');
+
+    vi.unstubAllGlobals();
+    await app.close();
+  });
+
+  it('allows create_customer_order composite(api) action from layout button source=ui (no legacy macro ref)', async () => {
+    const mock = createCustomerOrderApiActionLayoutButtonDb();
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-api-1', order_number: 'CO-API-1' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const app = Fastify();
+    await app.register(uiRoutes, { db: mock.db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000d6/action/create_customer_order?source=ui',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(String(res.headers.location)).toContain('/documents/00000000-0000-0000-0000-0000000000d6');
+    expect(String(res.headers.location)).toContain('message=');
+    expect(mock.state().dataJson.customer_order_number).toBe('CO-API-1');
+    expect(mock.state().externalRefsJson.customer_order_id).toBe('co-api-1');
+    expect(mock.state().snapshotsJson.customer_order_number).toBe('CO-API-1');
 
     vi.unstubAllGlobals();
     await app.close();

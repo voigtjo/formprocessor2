@@ -31,6 +31,15 @@
 <% if (tasksUnavailableMessage) { %>
   <p class="muted"><%= tasksUnavailableMessage %></p>
 <% } %>
+<form method="get" action="/workspaces/me" class="row">
+  <div class="col col-6">
+    <label for="show-done">Show done</label>
+    <input id="show-done" type="checkbox" name="showDone" value="1" <%= showDone ? 'checked' : '' %> />
+  </div>
+  <div class="col">
+    <button class="btn btn-secondary" type="submit">Apply</button>
+  </div>
+</form>
 <table>
   <thead>
     <tr>

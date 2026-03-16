@@ -10,12 +10,29 @@ export const fpTemplates = pgTable(
     description: text('description'),
     state: text('state').notNull().default('draft'),
     publishedAt: timestamp('published_at', { withTimezone: true }),
+    workflowRef: text('workflow_ref'),
     templateJson: jsonb('template_json').notNull(),
     version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [uniqueIndex('ux_fp_templates_key_version').on(table.key, table.version)]
+);
+
+export const fpWorkflows = pgTable(
+  'fp_workflows',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    key: text('key').notNull(),
+    name: text('name').notNull(),
+    description: text('description'),
+    state: text('state').notNull().default('draft'),
+    version: integer('version').notNull().default(1),
+    workflowJson: jsonb('workflow_json').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [uniqueIndex('ux_fp_workflows_key_version').on(table.key, table.version), index('idx_fp_workflows_state').on(table.state)]
 );
 
 export const fpUsers = pgTable(
@@ -101,6 +118,72 @@ export const fpDocuments = pgTable(
   ]
 );
 
+export const fpDocumentEditors = pgTable(
+  'fp_document_editors',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => fpDocuments.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => fpUsers.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    uniqueIndex('ux_fp_document_editors_document_user').on(table.documentId, table.userId),
+    index('idx_fp_document_editors_document').on(table.documentId),
+    index('idx_fp_document_editors_user').on(table.userId)
+  ]
+);
+
+export const fpDocumentSubmissions = pgTable(
+  'fp_document_submissions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => fpDocuments.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => fpUsers.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'),
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    uniqueIndex('ux_fp_document_submissions_document_user').on(table.documentId, table.userId),
+    index('idx_fp_document_submissions_document').on(table.documentId),
+    index('idx_fp_document_submissions_user').on(table.userId),
+    index('idx_fp_document_submissions_status').on(table.status)
+  ]
+);
+
+export const fpDocumentApprovals = pgTable(
+  'fp_document_approvals',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => fpDocuments.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => fpUsers.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    uniqueIndex('ux_fp_document_approvals_document_user').on(table.documentId, table.userId),
+    index('idx_fp_document_approvals_document').on(table.documentId),
+    index('idx_fp_document_approvals_user').on(table.userId),
+    index('idx_fp_document_approvals_status').on(table.status)
+  ]
+);
+
 export const fpMacros = pgTable(
   'fp_macros',
   {
@@ -118,4 +201,42 @@ export const fpMacros = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [index('idx_fp_macros_enabled').on(table.isEnabled)]
+);
+
+export const fpApis = pgTable(
+  'fp_apis',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    key: text('key').notNull(),
+    name: text('name').notNull(),
+    description: text('description'),
+    state: text('state').notNull().default('active'),
+    method: text('method').notNull(),
+    baseUrl: text('base_url'),
+    path: text('path').notNull(),
+    requestSchemaJson: jsonb('request_schema_json'),
+    responseSchemaJson: jsonb('response_schema_json'),
+    handlerCode: text('handler_code'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    uniqueIndex('ux_fp_apis_key').on(table.key),
+    index('idx_fp_apis_state').on(table.state)
+  ]
+);
+
+export const fpTemplateMacros = pgTable(
+  'fp_template_macros',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    templateId: uuid('template_id')
+      .notNull()
+      .references(() => fpTemplates.id, { onDelete: 'cascade' }),
+    macroRef: text('macro_ref')
+      .notNull()
+      .references(() => fpMacros.ref, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [uniqueIndex('ux_fp_template_macros_template_macro').on(table.templateId, table.macroRef)]
 );

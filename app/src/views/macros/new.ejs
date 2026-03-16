@@ -1,5 +1,6 @@
 <header class="page-header">
-  <h1>New Macro</h1>
+  <h1>New Legacy Macro</h1>
+  <p class="muted">Primary model is Template Actions + APIs. Use legacy macros only for compatibility.</p>
 </header>
 
 <% if (errorMessage) { %>
@@ -15,7 +16,7 @@
     <div class="col col-6">
       <label for="kind">Kind</label>
       <select id="kind" name="kind" required>
-        <% ['json', 'code', 'builtin'].forEach((kindOption) => { %>
+        <% ['json', 'builtin'].forEach((kindOption) => { %>
           <option value="<%= kindOption %>" <%= form.kind === kindOption ? 'selected' : '' %>><%= kindOption %></option>
         <% }) %>
       </select>
@@ -48,10 +49,8 @@
   <textarea id="params_schema_json" name="params_schema_json" rows="8"><%= form.params_schema_json %></textarea>
 
   <label for="definition_json">Definition JSON</label>
+  <p class="hint">Executable macro definition for <code>kind=json</code>.</p>
   <textarea id="definition_json" name="definition_json" rows="12"><%= form.definition_json %></textarea>
-
-  <label for="code_text">Code Text</label>
-  <textarea id="code_text" name="code_text" rows="12"><%= form.code_text %></textarea>
 
   <div class="actions">
     <button class="btn btn-primary" type="submit">Create Macro</button>

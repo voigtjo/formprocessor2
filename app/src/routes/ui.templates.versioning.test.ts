@@ -8,7 +8,7 @@ type TemplateRecord = {
   key: string;
   name: string;
   description: string | null;
-  state: 'draft' | 'published' | 'archived';
+  state: 'draft' | 'published' | 'inactive';
   version: number;
   publishedAt: Date | null;
   templateJson: Record<string, unknown>;
@@ -76,10 +76,10 @@ function createMockDb(initialTemplates: TemplateRecord[]) {
     update: () => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {
-          if (values.state === 'archived') {
+          if (values.state === 'inactive') {
             for (const item of templates) {
               if (item.key === contextTemplateKey && item.state === 'published') {
-                item.state = 'archived';
+                item.state = 'inactive';
                 item.publishedAt = null;
               }
             }
@@ -188,7 +188,7 @@ describe('template versioning + publish flow', () => {
     const state = db.__state();
     const v1 = state.templates.find((item: TemplateRecord) => item.version === 1);
     const v2 = state.templates.find((item: TemplateRecord) => item.version === 2);
-    expect(v1?.state).toBe('archived');
+    expect(v1?.state).toBe('inactive');
     expect(v2?.state).toBe('published');
     expect(v2?.publishedAt).not.toBeNull();
 
@@ -224,7 +224,7 @@ describe('template versioning + publish flow', () => {
     expect(res.statusCode).toBe(303);
     const inserted = db.__state().insertedDocuments[0];
     expect(inserted.templateId).toBe('00000000-0000-0000-0000-0000000000d2');
-    expect(inserted.status).toBe('submitted');
+    expect(inserted.status).toBe('created');
 
     await app.close();
   });

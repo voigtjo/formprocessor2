@@ -68,6 +68,23 @@ Status source-of-truth rule:
 ### External side effects
 Actions can call ERP-Sim endpoints (e.g. patch movement status).
 
+### Macro catalog + template usage mapping
+- Macros are cataloged in `fp_macros`.
+- Supported macro kinds are `json` (DB-defined DSL) and `builtin` (runtime fallback).
+- Template usage is tracked in `fp_template_macros` (`template_id` <-> `macro_ref`).
+- Source of truth for template macro usage is `template_json.actions`:
+  - all `type="macro"` refs are detected automatically
+  - mapping rows are synchronized when a template is saved
+
+### API catalog (transition target)
+- APIs are centrally managed in `fp_apis` (`active|inactive`).
+- P0 API model includes: key, name, method, base_url, path and optional metadata
+  (`request_schema_json`, `response_schema_json`, `handler_code`).
+- New action path: `callApi` with `apiRef`.
+- Transition rule:
+  - `callApi` + API catalog is the target model
+  - macros and `callExternal` remain supported as compatibility bridge
+
 ## RBAC (P0 minimal, no login)
 
 - Active user is selected in UI (dropdown) and stored in cookie `fp_user`.

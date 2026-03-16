@@ -17,6 +17,31 @@ UI stack: EJS + HTMX (SSR).
 - `GET /templates/:id/edit`
 - `POST /templates/:id`
 - `GET /templates/:id/preview`
+  - edit page shows "Verwendete Macros" list (resolved from `fp_template_macros`)
+  - missing macro refs are shown as warnings (template save still allowed)
+
+## Macro pages
+
+- `GET /macros`
+  - optional filter: `templateId=<uuid>`
+  - optional filter: `templateState=all|published|draft|archived`
+- `GET /macros/new`
+- `POST /macros`
+- `GET /macros/:ref`
+  - shows macro metadata + definition JSON + templates using this macro
+- `GET /macros/:ref/edit`
+- `POST /macros/:ref`
+
+## API pages
+
+- `GET /apis`
+  - filter: `state=active|inactive|all` (default `active`)
+- `GET /apis/new`
+- `POST /apis`
+- `GET /apis/:id`
+  - shows API metadata + JSON fields + templates using this API key
+- `GET /apis/:id/edit`
+- `POST /apis/:id`
 
 ## Document pages
 
@@ -60,7 +85,7 @@ Both resolve through `controls` -> `actions` and execute via the same action rou
 - document create resolves template assignment and sets `fp_documents.group_id`:
   - first assigned group is used (P0)
   - if template is unassigned, `group_id` remains `null` and UI shows `Unassigned template`
-- if `erp_customer_order_id` system field exists, app creates ERP customer order and stores its refs/snapshot
+- external side effects should use actions (`callApi` preferred, macros/callExternal legacy bridge)
 - action errors re-render detail with message (no expected hard 500)
 - workflow `status` field is display-only/read-only and renders from `fp_documents.status` as the canonical status value
 - `source=ui` action requests are restricted to UI-safe actions (e.g. `reloadLookup` macro), process steps return `400`

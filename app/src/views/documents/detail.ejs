@@ -1,9 +1,10 @@
 <%
   const shortId = String(document.id || '').slice(0, 8);
+  const isArchived = String(document.status || '').toLowerCase() === 'archived';
 %>
 <header class="page-header">
   <h1><%= template.name %></h1>
-  <p class="muted">Template: <%= template.name %> (<code><%= template.key %></code>) · Version: <code>v<%= document.templateVersion ?? 1 %></code> · Group: <strong><%= groupName || '—' %></strong> · Status: <span class="badge badge-status"><%= document.status %></span> · Document: <code><%= shortId %></code></p>
+  <p class="muted">Template: <%= template.name %> (<code><%= template.key %></code>) · Version: <code>v<%= document.templateVersion ?? 1 %></code> · Workflow: <code><%= template.workflowRef || workflowRuntime?.ref || 'legacy' %></code> · Group: <strong><%= groupName || '—' %></strong> · Status: <span class="badge badge-status"><%= document.status %></span> · Document: <code><%= shortId %></code></p>
   <% if (workflowTimeline && workflowTimeline.length > 0) { %>
     <p class="workflow-timeline">
       <% workflowTimeline.forEach((state, index) => { %>
@@ -13,16 +14,56 @@
     </p>
   <% } %>
 </header>
+<% if (isArchived) { %>
+  <div class="card">
+    <strong>Archived document:</strong> This document is read-only.
+  </div>
+<% } %>
 <section class="card">
   <h3 class="card-title">Assignments</h3>
-  <p class="muted">Editor: <strong><%= assignmentEditorName || '—' %></strong> · Approver: <strong><%= assignmentApproverName || '—' %></strong></p>
-  <% if (!hasDocumentActorColumns) { %>
+  <p class="muted">Editors: <strong><%= assignmentEditorName || '—' %></strong> · Approvers: <strong><%= assignmentApproverName || '—' %></strong></p>
+  <% if (workflowEvaluation) { %>
+    <p class="muted">Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span> · Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span></p>
+  <% } %>
+  <% if (useMultiAssignments) { %>
+    <div class="row">
+      <div class="col col-6">
+        <label>Assigned Editors</label>
+        <% if ((assignedEditorsDetailed || []).length === 0) { %>
+          <p class="muted">—</p>
+        <% } %>
+        <% (assignedEditorsDetailed || []).forEach((member) => { %>
+          <form method="post" action="/documents/<%= document.id %>/assign/editor/remove" class="row">
+            <input type="hidden" name="userId" value="<%= member.id %>" />
+            <div class="col"><span><%= member.name %> (@<%= member.username %>) · <span class="badge"><%= member.submissionStatus %></span><% if (member.submittedAt) { %> · <span class="muted"><%= new Date(member.submittedAt).toLocaleString() %></span><% } %></span></div>
+            <% if (!isArchived) { %><div class="col"><button class="btn btn-secondary" type="submit">Remove</button></div><% } %>
+          </form>
+        <% }) %>
+      </div>
+      <div class="col col-6">
+        <label>Assigned Approvers</label>
+        <% if ((assignedApprovers || []).length === 0) { %>
+          <p class="muted">—</p>
+        <% } %>
+        <% (assignedApprovers || []).forEach((member) => { %>
+          <form method="post" action="/documents/<%= document.id %>/assign/approver/remove" class="row">
+            <input type="hidden" name="userId" value="<%= member.id %>" />
+            <div class="col"><span><%= member.name %> (@<%= member.username %>) · <span class="badge"><%= member.approvalStatus %></span><% if (member.decidedAt) { %> · <span class="muted"><%= new Date(member.decidedAt).toLocaleString() %></span><% } %></span></div>
+            <% if (!isArchived) { %><div class="col"><button class="btn btn-secondary" type="submit">Remove</button></div><% } %>
+          </form>
+        <% }) %>
+      </div>
+    </div>
+  <% } %>
+  <% if (isArchived) { %>
+    <p class="muted">Assignments are locked for archived documents.</p>
+  <% } else if (!hasDocumentActorColumns) { %>
     <p class="muted">Assignments unavailable until DB migration is applied.</p>
   <% } else if (!assignmentGroupId) { %>
     <p class="muted">No group assigned</p>
   <% } else { %>
-    <details>
-      <summary class="btn btn-secondary"><%= (document.editorUserId || document.approverUserId) ? 'Change assignments' : 'Edit assignments' %></summary>
+    <details <%= assignmentsOpen ? 'open' : '' %>>
+      <summary class="btn btn-secondary"><%= (document.editorUserId || document.approverUserId || (assignedEditors || []).length || (assignedApprovers || []).length) ? 'Change assignments' : 'Edit assignments' %></summary>
       <form method="post" action="/documents/<%= document.id %>/assign/editor" class="row">
         <div class="col col-6">
           <label for="editor-user-id">Editor</label>
@@ -70,12 +111,12 @@
 <% } %>
 
 <div class="actions">
-<% (buttonKeys || []).forEach((controlKey) => {
-  const control = (templateJson.controls || {})[controlKey] || {};
-  const label = control.label || controlKey;
+<% if (!isArchived) { %>
+<% (processButtons || []).forEach((button) => {
 %>
-  <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= controlKey %>" formmethod="post"><%= label %></button>
+  <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= button.key %>" formmethod="post"><%= button.label %></button>
 <% }) %>
+<% } %>
 </div>
 
 <form id="document-form" method="post" action="/documents/<%= document.id %>/save" class="card">

@@ -1,5 +1,6 @@
 <header class="page-header">
-  <h1>Macro</h1>
+  <h1>Legacy Macro</h1>
+  <p class="muted">Compatibility object. Prefer Template Actions + APIs for new template flows.</p>
 </header>
 
 <section class="card">
@@ -25,8 +26,33 @@
 </section>
 
 <section class="card">
-  <h3 class="card-title">Code Text</h3>
-  <pre><code><%= macro.codeText || '' %></code></pre>
+  <h3 class="card-title">Verwendet in Templates</h3>
+  <% if (!templatesUsingMacro || templatesUsingMacro.length === 0) { %>
+    <p class="muted">Dieses Macro ist aktuell keinem Template zugeordnet.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Template</th>
+          <th>Key</th>
+          <th>Version</th>
+          <th>Status</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% templatesUsingMacro.forEach((item) => { %>
+          <tr>
+            <td><%= item.templateName %></td>
+            <td><code><%= item.templateKey %></code></td>
+            <td><code>v<%= item.templateVersion %></code></td>
+            <td><%= item.templateState %></td>
+            <td><a href="/templates/<%= item.templateId %>/edit">Template öffnen</a></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
 </section>
 
 <div class="actions">

@@ -1,0 +1,96 @@
+<header class="page-header">
+  <h1><%= workflow.name %></h1>
+  <p class="muted"><code><%= workflow.key %></code> · <code>v<%= workflow.version %></code> · <span class="badge"><%= workflow.state %></span></p>
+</header>
+
+<div class="card">
+  <h3 class="card-title">Definition</h3>
+  <p><strong>Description:</strong> <%= workflow.description || '—' %></p>
+  <p><strong>Created:</strong> <%= workflow.createdAt ? new Date(workflow.createdAt).toLocaleString() : '—' %></p>
+  <p><strong>Updated:</strong> <%= workflow.updatedAt ? new Date(workflow.updatedAt).toLocaleString() : '—' %></p>
+  <pre><code><%= workflow.workflowJson ? JSON.stringify(workflow.workflowJson, null, 2) : 'null' %></code></pre>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Used In Templates</h3>
+  <% if (!templatesUsingWorkflow || templatesUsingWorkflow.length === 0) { %>
+    <p class="muted">No templates reference this workflow.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Template</th>
+          <th>Key</th>
+          <th>Version</th>
+          <th>State</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% templatesUsingWorkflow.forEach((tpl) => { %>
+          <tr>
+            <td><%= tpl.name %></td>
+            <td><code><%= tpl.key %></code></td>
+            <td><code>v<%= tpl.version %></code></td>
+            <td><span class="badge"><%= tpl.state %></span></td>
+            <td><a href="/templates/<%= tpl.id %>/edit">Template</a></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Workflow Simulation</h3>
+  <form method="get" action="/workflows/<%= workflow.id %>" class="row">
+    <div class="col col-3">
+      <label for="sim-status">Status</label>
+      <select id="sim-status" name="status">
+        <% ['created', 'assigned', 'submitted', 'approved', 'archived'].forEach((statusOption) => { %>
+          <option value="<%= statusOption %>" <%= simulation?.status === statusOption ? 'selected' : '' %>><%= statusOption %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="col col-3">
+      <label for="sim-actor">Actor</label>
+      <select id="sim-actor" name="actor">
+        <% ['editor', 'approver'].forEach((actorOption) => { %>
+          <option value="<%= actorOption %>" <%= simulation?.actor === actorOption ? 'selected' : '' %>><%= actorOption %></option>
+        <% }) %>
+      </select>
+    </div>
+    <div class="col col-2">
+      <label for="sim-submitted-editors">Submitted Editors</label>
+      <input id="sim-submitted-editors" type="number" min="0" name="submittedEditors" value="<%= simulation?.submittedEditors ?? 0 %>" />
+    </div>
+    <div class="col col-2">
+      <label for="sim-assigned">Assigned Approvers</label>
+      <input id="sim-assigned" type="number" min="0" name="assignedApprovers" value="<%= simulation?.assignedApprovers ?? 2 %>" />
+    </div>
+    <div class="col col-2">
+      <label for="sim-approved">Approved</label>
+      <input id="sim-approved" type="number" min="0" name="approvedApprovers" value="<%= simulation?.approvedApprovers ?? 0 %>" />
+    </div>
+    <div class="col col-2">
+      <label for="sim-rejected">Rejected</label>
+      <input id="sim-rejected" type="number" min="0" name="rejectedApprovers" value="<%= simulation?.rejectedApprovers ?? 0 %>" />
+    </div>
+    <div class="col">
+      <button class="btn btn-primary" type="submit">Simulate</button>
+    </div>
+  </form>
+
+  <% if (simulation) { %>
+    <p><strong>Visible buttons:</strong> <code><%= (simulation.visibleButtons || []).join(', ') || '—' %></code></p>
+    <p><strong>Allowed actions:</strong> <code><%= (simulation.allowedActions || []).join(', ') || '—' %></code></p>
+    <p><strong>Submit mode:</strong> <code><%= simulation.submitMode %></code> · <strong>Approval mode:</strong> <code><%= simulation.approvalMode %></code></p>
+    <p><strong>Completion criteria met:</strong> <span class="badge"><%= simulation.completionMet ? 'yes' : 'no' %></span></p>
+    <pre><code><%= JSON.stringify(simulation.nextStatusByAction, null, 2) %></code></pre>
+  <% } %>
+</div>
+
+<div class="actions">
+  <a class="btn btn-primary" href="/workflows/<%= workflow.id %>/edit">Edit Workflow</a>
+  <a class="btn btn-secondary" href="/workflows">Back to Workflows</a>
+</div>

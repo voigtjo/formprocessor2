@@ -72,10 +72,10 @@ describe('action engine', () => {
       erpBaseUrl: 'http://localhost:3001'
     });
 
-    expect(result.status).toBe('offer_created');
+    expect(result.status).toBe('submitted');
     expect(result.dataJson).toEqual({
       note: 'updated received',
-      status_note: 'now offer_created'
+      status_note: 'now submitted'
     });
   });
 
@@ -94,8 +94,29 @@ describe('action engine', () => {
       erpBaseUrl: 'http://localhost:3001'
     });
 
-    expect(result.status).toBe('Approved');
+    expect(result.status).toBe('approved');
     expect(result.dataJson.status).toBeUndefined();
+  });
+
+  it('executes system action before legacy macro path when type=system', async () => {
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'system',
+        action: 'showMessage',
+        message: 'System path',
+        ref: 'macro:erp/createBatch@1'
+      } as any,
+      context: {
+        doc: { id: 'doc-system-1', status: 'created' },
+        data: {},
+        external: {},
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    expect(result.message).toBe('System path');
+    expect(result.status).toBe('created');
   });
 
   it('requireField blocks with friendly message when value is missing', async () => {
@@ -145,6 +166,252 @@ describe('action engine', () => {
     ).rejects.toThrow('Missing interpolation value for external.customer_order_id');
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('executes callApi via central API catalog', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-55', order_number: 'CO-55' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'composite',
+        steps: [
+          {
+            type: 'callApi',
+            apiRef: 'api:erp/createCustomerOrder@1',
+            body: { customer_id: '{{external.customer_id}}' }
+          },
+          {
+            type: 'setStatus',
+            to: 'submitted'
+          }
+        ]
+      },
+      context: {
+        doc: { id: 'doc-call-api-1', status: 'created' },
+        data: {},
+        external: { customer_id: '11111111-1111-1111-1111-111111111111' },
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch
+    });
+
+    expect(result.status).toBe('submitted');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://localhost:3001/api/customer-orders');
+    const requestInit = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(requestInit?.method).toBe('POST');
+    expect(JSON.parse(String(requestInit?.body ?? '{}'))).toEqual({
+      customer_id: '11111111-1111-1111-1111-111111111111'
+    });
+  });
+
+  it('fails clearly when callApi references unknown apiRef', async () => {
+    await expect(
+      executeActionDefinition({
+        actionDef: {
+          type: 'callApi',
+          apiRef: 'api:erp/unknown@1'
+        },
+        context: {
+          doc: { id: 'doc-call-api-2', status: 'created' },
+          data: {},
+          external: {},
+          snapshot: {}
+        },
+        erpBaseUrl: 'http://localhost:3001'
+      })
+    ).rejects.toThrow('API ref not found in catalog: api:erp/unknown@1');
+  });
+
+  it('resolves callApi from fp_apis catalog when runtime db is provided', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    const dbWithApiCatalog = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [
+              {
+                key: 'customerOrders.create',
+                name: 'Create Customer Order',
+                description: null,
+                state: 'active',
+                method: 'POST',
+                baseUrl: 'http://localhost:3999',
+                path: '/api/customer-orders',
+                requestSchemaJson: null,
+                responseSchemaJson: null,
+                handlerCode: null
+              }
+            ]
+          })
+        })
+      })
+    };
+
+    await executeActionDefinition({
+      actionDef: {
+        type: 'callApi',
+        apiRef: 'customerOrders.create',
+        body: { customer_id: 'c-1' }
+      },
+      context: {
+        doc: { id: 'doc-call-api-db-1', status: 'created' },
+        data: {},
+        external: {},
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      macroContext: {
+        db: dbWithApiCatalog,
+        templateJson: {},
+        document: { id: 'doc-call-api-db-1', status: 'created' }
+      }
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://localhost:3999/api/customer-orders');
+  });
+
+  it('executes api action type with response mapping and success message', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-300', order_number: 'CO-300' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    const dbWithApiCatalog = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [
+              {
+                key: 'customerOrders.create',
+                name: 'Create Customer Order',
+                description: null,
+                state: 'active',
+                method: 'POST',
+                baseUrl: 'http://localhost:3999',
+                path: '/api/customer-orders',
+                requestSchemaJson: null,
+                responseSchemaJson: null,
+                handlerCode: null
+              }
+            ]
+          })
+        })
+      })
+    };
+
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'api',
+        apiRef: 'customerOrders.create',
+        requestMapping: { customer_id: '{{external.customer_id}}' },
+        responseMapping: {
+          data: { customer_order_number: 'order_number' },
+          external: { customer_order_id: 'id' },
+          snapshot: { customer_order_number: 'order_number' }
+        },
+        successMessage: 'Customer order created: {{response.order_number}}'
+      },
+      context: {
+        doc: { id: 'doc-api-300', status: 'created' },
+        data: {},
+        external: { customer_id: '11111111-1111-1111-1111-111111111111' },
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      macroContext: {
+        db: dbWithApiCatalog,
+        templateJson: {},
+        document: { id: 'doc-api-300', status: 'created' }
+      }
+    });
+
+    expect(result.dataJson.customer_order_number).toBe('CO-300');
+    expect(result.externalRefsJson.customer_order_id).toBe('co-300');
+    expect(result.snapshotsJson.customer_order_number).toBe('CO-300');
+    expect(result.message).toBe('Customer order created: CO-300');
+  });
+
+  it('executes composite action with require + callApi(request,to) + write + message without macro', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-901', order_number: 'CO-901' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+    const dbWithApiCatalog = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [
+              {
+                key: 'customerOrders.create',
+                name: 'Create Customer Order',
+                description: null,
+                state: 'active',
+                method: 'POST',
+                baseUrl: 'http://localhost:3999',
+                path: '/api/customer-orders',
+                requestSchemaJson: null,
+                responseSchemaJson: null,
+                handlerCode: null
+              }
+            ]
+          })
+        })
+      })
+    };
+
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'composite',
+        steps: [
+          { type: 'require', from: 'external.customer_id', message: 'Select a customer first.' },
+          {
+            type: 'callApi',
+            apiRef: 'customerOrders.create',
+            request: { customer_id: '{{external.customer_id}}' },
+            to: 'vars.customerOrderResponse'
+          },
+          { type: 'write', to: 'data.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
+          { type: 'write', to: 'external.customer_order_id', value: '{{vars.customerOrderResponse.id}}' },
+          { type: 'write', to: 'snapshot.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
+          { type: 'message', value: 'Customer order created: {{vars.customerOrderResponse.order_number}}' }
+        ]
+      },
+      context: {
+        doc: { id: 'doc-comp-901', status: 'created' },
+        data: {},
+        external: { customer_id: '11111111-1111-1111-1111-111111111111' },
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      macroContext: {
+        db: dbWithApiCatalog,
+        templateJson: {},
+        document: { id: 'doc-comp-901', status: 'created' }
+      }
+    });
+
+    expect(result.dataJson.customer_order_number).toBe('CO-901');
+    expect(result.externalRefsJson.customer_order_id).toBe('co-901');
+    expect(result.snapshotsJson.customer_order_number).toBe('CO-901');
+    expect(result.message).toBe('Customer order created: CO-901');
   });
 
   it('macro ensureErpCustomerOrder creates external ref and snapshot when missing', async () => {
@@ -264,6 +531,87 @@ describe('action engine', () => {
         outcome: 'success'
       })
     );
+  });
+
+  it('macro ensureErpCustomerOrder supports custom params without field-specific hardcoding', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-24', order_number: 'CO-24' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'macro',
+        ref: 'macro:erp/ensureErpCustomerOrder@1',
+        params: {
+          customerRefKey: 'buyer_ref',
+          writeFieldKey: 'erp_order_no',
+          writeExternalRefKey: 'erp_order_id',
+          writeSnapshotKey: 'erp_order_no'
+        }
+      },
+      context: {
+        doc: { id: 'doc-4-json-custom-params', status: 'created' },
+        data: { buyer_ref: '11111111-1111-1111-1111-111111111111' },
+        external: {},
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      macroContext: {
+        db: makeMacroCatalogDb([
+          {
+            ref: 'macro:erp/ensureErpCustomerOrder@1',
+            kind: 'json',
+            paramsSchemaJson: {
+              properties: {
+                customerRefKey: { default: 'customer_id' },
+                writeFieldKey: { default: 'customer_order_number' },
+                writeExternalRefKey: { default: 'customer_order_id' },
+                writeSnapshotKey: { default: 'customer_order_number' }
+              }
+            },
+            definitionJson: {
+              ops: [
+                { op: 'read', from: 'external.{{params.customerRefKey}}', to: 'vars.customerId' },
+                { op: 'fallback', from: 'data.{{params.customerRefKey}}', to: 'vars.customerId' },
+                { op: 'require', from: 'vars.customerId', message: 'Select a customer first.' },
+                {
+                  op: 'http.post',
+                  service: 'erp',
+                  path: '/api/customer-orders',
+                  body: { customer_id: '{{vars.customerId}}' },
+                  to: 'vars.response'
+                },
+                { op: 'require', from: 'vars.response.id', message: 'ERP customer order response missing id.' },
+                {
+                  op: 'require',
+                  from: 'vars.response.order_number',
+                  message: 'ERP customer order response missing order_number.'
+                },
+                { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.response.order_number}}' },
+                { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.response.id}}' },
+                { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.response.order_number}}' },
+                { op: 'message', value: 'Customer order created via DB macro: {{vars.response.order_number}}' }
+              ]
+            }
+          }
+        ]),
+        templateJson: {},
+        document: { id: 'doc-4-json-custom-params', status: 'created' }
+      }
+    });
+
+    expect(result.dataJson.erp_order_no).toBe('CO-24');
+    expect(result.externalRefsJson.erp_order_id).toBe('co-24');
+    expect(result.snapshotsJson.erp_order_no).toBe('CO-24');
+    expect(result.message).toBe('Customer order created via DB macro: CO-24');
+    const requestInit = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(requestInit?.body ?? '{}'))).toEqual({
+      customer_id: '11111111-1111-1111-1111-111111111111'
+    });
   });
 
   it('macro ensureErpCustomerOrder does not require builtin fallback for normal db-json execution', async () => {
@@ -435,7 +783,7 @@ describe('action engine', () => {
     });
 
     expect(result.dataJson.from_db_json).toBe('ok');
-    expect(result.status).toBe('Assigned');
+    expect(result.status).toBe('assigned');
   });
 
   it('returns clear error when macro catalog is not configured', async () => {
@@ -490,7 +838,7 @@ describe('action engine', () => {
     });
 
     expect(selectCalled).toBe(true);
-    expect(result.status).toBe('Created');
+    expect(result.status).toBe('created');
   });
 
   it('integration: macro catalog lookup works with real db factory setup', async () => {
@@ -875,7 +1223,7 @@ describe('action engine', () => {
     const sentBody = JSON.parse(String(requestInit?.body ?? '{}')) as { status: string };
 
     expect(sentBody.status).toBe('offer_created');
-    expect(result.status).toBe('Submitted');
+    expect(result.status).toBe('submitted');
   });
 
   it('aborts action on callExternal failure and keeps original context status unchanged', async () => {

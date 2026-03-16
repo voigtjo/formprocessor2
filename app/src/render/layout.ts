@@ -380,6 +380,15 @@ function renderButton(node: LayoutNode, params: RenderLayoutParams) {
   }
 
   const hasDocumentBoundAction = resolveActionDefinitionFromNode(params.templateJson, action) !== undefined;
+  const isArchivedDocument = String(params.documentStatus ?? '')
+    .trim()
+    .toLowerCase() === 'archived';
+
+  if (params.mode === 'detail' && isArchivedDocument) {
+    if (hasDocumentBoundAction) {
+      return `<div><button type="button" class="btn${variantClass}" disabled>${label}</button><div class="muted">Archived document (read-only)</div></div>`;
+    }
+  }
 
   if (params.mode === 'detail' && params.documentId) {
     const controlKey = resolveControlKeyFromAction(params.templateJson, action);

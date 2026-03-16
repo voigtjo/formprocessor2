@@ -1,12 +1,23 @@
 import dotenv from 'dotenv';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { resolve } from 'node:path';
 import { makeDb } from './index.js';
-import { fpGroupMembers, fpGroups, fpMacros, fpTemplateAssignments, fpTemplates, fpUsers } from './schema.js';
+import {
+  fpApis,
+  fpGroupMembers,
+  fpGroups,
+  fpTemplateAssignments,
+  fpTemplateMacros,
+  fpTemplates,
+  fpUsers,
+  fpWorkflows
+} from './schema.js';
 
 dotenv.config({ path: resolve(process.cwd(), '../.env') });
 
-async function upsertUser(db: ReturnType<typeof makeDb>['db'], username: string, displayName: string) {
+type Db = ReturnType<typeof makeDb>['db'];
+
+async function upsertUser(db: Db, username: string, displayName: string) {
   const rows = await db
     .insert(fpUsers)
     .values({ username, displayName })
@@ -18,7 +29,7 @@ async function upsertUser(db: ReturnType<typeof makeDb>['db'], username: string,
   return rows[0].id;
 }
 
-async function upsertGroup(db: ReturnType<typeof makeDb>['db'], key: string, name: string) {
+async function upsertGroup(db: Db, key: string, name: string) {
   const rows = await db
     .insert(fpGroups)
     .values({ key, name })
@@ -30,12 +41,7 @@ async function upsertGroup(db: ReturnType<typeof makeDb>['db'], key: string, nam
   return rows[0].id;
 }
 
-async function upsertMembership(
-  db: ReturnType<typeof makeDb>['db'],
-  groupId: string,
-  userId: string,
-  rights: string
-) {
+async function upsertMembership(db: Db, groupId: string, userId: string, rights: string) {
   await db
     .insert(fpGroupMembers)
     .values({ groupId, userId, rights })
@@ -45,74 +51,14 @@ async function upsertMembership(
     });
 }
 
-async function upsertTemplateAssignment(db: ReturnType<typeof makeDb>['db'], templateId: string, groupId: string) {
-  await db.insert(fpTemplateAssignments).values({ templateId, groupId }).onConflictDoNothing();
-}
-
-async function upsertMacro(
-  db: ReturnType<typeof makeDb>['db'],
-  values: {
-    ref: string;
-    namespace: string;
-    name: string;
-    version: number;
-    kind?: string;
-    description: string;
-    isEnabled?: boolean;
-    paramsSchemaJson?: Record<string, unknown> | null;
-    definitionJson?: Record<string, unknown> | null;
-    codeText?: string | null;
-  }
-) {
-  await db
-    .insert(fpMacros)
-    .values({
-      ref: values.ref,
-      namespace: values.namespace,
-      name: values.name,
-      version: values.version,
-      kind: values.kind ?? 'json',
-      description: values.description,
-      isEnabled: values.isEnabled ?? true,
-      paramsSchemaJson: values.paramsSchemaJson ?? null,
-      definitionJson: values.definitionJson ?? null,
-      codeText: values.codeText ?? null
-    })
-    .onConflictDoUpdate({
-      target: fpMacros.ref,
-      set: {
-        namespace: values.namespace,
-        name: values.name,
-        version: values.version,
-        kind: values.kind ?? 'json',
-        description: values.description,
-        isEnabled: values.isEnabled ?? true,
-        paramsSchemaJson: values.paramsSchemaJson ?? null,
-        definitionJson: values.definitionJson ?? null,
-        codeText: values.codeText ?? null,
-        updatedAt: new Date()
-      }
-    });
-}
-
-async function findSeedTemplateId(db: ReturnType<typeof makeDb>['db']) {
-  const byKey = await db.query.fpTemplates.findFirst({
-    where: and(eq(fpTemplates.key, 'customer-order'), eq(fpTemplates.state, 'published'))
-  });
-  if (byKey) return byKey.id;
-
-  const published = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.state, 'published') });
-  return published?.id;
-}
-
 async function upsertTemplateVersion(
-  db: ReturnType<typeof makeDb>['db'],
+  db: Db,
   values: {
     key: string;
     version: number;
     name: string;
     description: string;
-    state: 'draft' | 'published' | 'archived';
+    state: 'draft' | 'published' | 'inactive';
     templateJson: Record<string, unknown>;
   }
 ) {
@@ -141,114 +87,194 @@ async function upsertTemplateVersion(
   return rows[0].id;
 }
 
-async function upsertRbacTestV2Template(db: ReturnType<typeof makeDb>['db']) {
-  const templateJson = {
-    fields: {
-      assignee_user_id: { kind: 'workflow', label: 'Editor' },
-      reviewer_user_id: { kind: 'workflow', label: 'Approver' }
-    },
-    layout: [],
-    workflow: {
-      initial: 'Created',
-      order: ['Created', 'Assigned', 'Submitted', 'Approved'],
-      states: {
-        Created: { editable: [], readonly: [], buttons: ['assign_editor', 'assign_approver', 'submit'] },
-        Assigned: { editable: [], readonly: [], buttons: ['assign_approver', 'submit'] },
-        Submitted: { editable: [], readonly: [], buttons: ['approve'] },
-        Approved: { editable: [], readonly: [], buttons: [] }
-      }
-    },
-    controls: {
-      assign_editor: { label: 'Assign Editor', action: 'assign_editor' },
-      assign_approver: { label: 'Assign Approver', action: 'assign_approver' },
-      submit: { label: 'Submit', action: 'submit' },
-      approve: { label: 'Approve', action: 'approve' }
-    },
-    actions: {
-      assign_editor: {
-        type: 'composite',
-        steps: [
-          { type: 'requireField', key: 'assignee_user_id', message: 'Assign Editor requires selecting an editor first.' },
-          { type: 'setField', key: 'assignee_user_id', value: '{{data.assignee_user_id}}' },
-          { type: 'setStatus', to: 'Assigned' }
-        ]
-      },
-      assign_approver: {
-        type: 'composite',
-        steps: [
-          { type: 'requireField', key: 'reviewer_user_id', message: 'Assign Approver requires selecting an approver first.' },
-          { type: 'setField', key: 'reviewer_user_id', value: '{{data.reviewer_user_id}}' }
-        ]
-      },
-      submit: {
-        type: 'composite',
-        steps: [
-          { type: 'requireField', key: 'assignee_user_id', message: 'Submit requires editor assignment first.' },
-          { type: 'setStatus', to: 'Submitted' }
-        ]
-      },
-      approve: {
-        type: 'composite',
-        steps: [
-          { type: 'requireField', key: 'reviewer_user_id', message: 'Approve requires approver assignment first.' },
-          { type: 'setStatus', to: 'Approved' }
-        ]
-      }
-    },
-    permissions: {
-      actions: {
-        approve: { requires: ['execute'] }
-      }
-    }
-  };
-  const draftTemplateJson = {
-    ...templateJson,
-    workflow: {
-      ...templateJson.workflow,
-      states: {
-        ...templateJson.workflow.states,
-        Created: { editable: [], readonly: [], buttons: ['assign_editor'] }
-      }
-    }
-  };
-
-  const publishedId = await upsertTemplateVersion(db, {
-    key: 'rbac-test-v2',
-    version: 1,
-    name: 'RBAC Test v2',
-    description: 'RBAC workflow with explicit editor/approver assignment',
-    state: 'published',
-    templateJson
-  });
-  await upsertTemplateVersion(db, {
-    key: 'rbac-test-v2',
-    version: 2,
-    name: 'RBAC Test v2',
-    description: 'Draft next version for RBAC workflow',
-    state: 'draft',
-    templateJson: draftTemplateJson
-  });
-  return publishedId;
+async function upsertTemplateAssignment(db: Db, templateId: string, groupId: string) {
+  await db.insert(fpTemplateAssignments).values({ templateId, groupId }).onConflictDoNothing();
 }
 
-async function upsertCustomerOrderTestTemplate(db: ReturnType<typeof makeDb>['db']) {
-  const templateJson = {
+async function clearTemplateMacroLinks(db: Db, templateId: string) {
+  await db.delete(fpTemplateMacros).where(eq(fpTemplateMacros.templateId, templateId));
+}
+
+async function upsertApi(
+  db: Db,
+  values: {
+    key: string;
+    name: string;
+    description?: string;
+    state?: 'active' | 'inactive';
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+    baseUrl?: string | null;
+    path: string;
+    requestSchemaJson?: Record<string, unknown> | null;
+    responseSchemaJson?: Record<string, unknown> | null;
+  }
+) {
+  await db
+    .insert(fpApis)
+    .values({
+      key: values.key,
+      name: values.name,
+      description: values.description ?? null,
+      state: values.state ?? 'active',
+      method: values.method,
+      baseUrl: values.baseUrl ?? null,
+      path: values.path,
+      requestSchemaJson: values.requestSchemaJson ?? null,
+      responseSchemaJson: values.responseSchemaJson ?? null
+    })
+    .onConflictDoUpdate({
+      target: fpApis.key,
+      set: {
+        name: values.name,
+        description: values.description ?? null,
+        state: values.state ?? 'active',
+        method: values.method,
+        baseUrl: values.baseUrl ?? null,
+        path: values.path,
+        requestSchemaJson: values.requestSchemaJson ?? null,
+        responseSchemaJson: values.responseSchemaJson ?? null,
+        updatedAt: new Date()
+      }
+    });
+}
+
+async function upsertWorkflow(
+  db: FpDb,
+  values: {
+    key: string;
+    version: number;
+    name: string;
+    description?: string;
+    state?: 'draft' | 'active' | 'inactive';
+    workflowJson: Record<string, unknown>;
+  }
+) {
+  const rows = await db
+    .insert(fpWorkflows)
+    .values({
+      key: values.key,
+      version: values.version,
+      name: values.name,
+      description: values.description ?? null,
+      state: values.state ?? 'active',
+      workflowJson: values.workflowJson,
+      updatedAt: new Date()
+    })
+    .onConflictDoUpdate({
+      target: [fpWorkflows.key, fpWorkflows.version],
+      set: {
+        name: values.name,
+        description: values.description ?? null,
+        state: values.state ?? 'active',
+        workflowJson: values.workflowJson,
+        updatedAt: new Date()
+      }
+    })
+    .returning({ id: fpWorkflows.id, key: fpWorkflows.key });
+
+  return rows[0];
+}
+
+function buildProductionStandardWorkflowJson() {
+  return {
+    statuses: ['created', 'assigned', 'approved', 'archived'],
+    initialStatus: 'created',
+    order: ['created', 'assigned', 'approved', 'archived'],
+    states: {
+      created: { buttons: ['assign'], editable: ['product_id'], readonly: ['batch_number'] },
+      assigned: { buttons: ['approve'], editable: [], readonly: ['product_id', 'batch_number'] },
+      approved: { buttons: ['archive'], editable: [], readonly: ['product_id', 'batch_number'] },
+      archived: { buttons: [] }
+    },
+    semantics: {
+      submit: 'global',
+      approval: 'global',
+      completionRule: 'global_approval'
+    },
+    actorModel: {
+      editors: 'single',
+      approvers: 'multiple'
+    }
+  } satisfies Record<string, unknown>;
+}
+
+function buildEvidenceGroupSubmitWorkflowJson() {
+  return {
+    statuses: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+    initialStatus: 'created',
+    order: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+    states: {
+      created: { buttons: ['assign'], editable: ['customer_id'], readonly: ['customer_order_number'] },
+      assigned: { buttons: ['submit'], editable: ['customer_id'], readonly: ['customer_order_number'] },
+      submitted: { buttons: ['approve'], editable: [], readonly: ['customer_id', 'customer_order_number'] },
+      approved: { buttons: ['archive'], editable: [], readonly: ['customer_id', 'customer_order_number'] },
+      archived: { buttons: [] }
+    },
+    semantics: {
+      submit: 'individual',
+      approval: 'individual',
+      completionRule: 'all_required_approvers'
+    },
+    actorModel: {
+      editors: 'multiple',
+      approvers: 'multiple'
+    }
+  } satisfies Record<string, unknown>;
+}
+
+function buildProductionBatchTemplateJson() {
+  return {
+    fields: {
+      product_id: {
+        kind: 'lookup',
+        label: 'Product',
+        apiRef: 'products.listValid',
+        valueKey: 'id',
+        labelKey: 'name',
+        required: true
+      },
+      batch_number: {
+        kind: 'editable',
+        label: 'Batch Number'
+      }
+    },
+    layout: [
+      { type: 'h1', text: 'Production Batch' },
+      { type: 'field', key: 'product_id' },
+      { type: 'button', key: 'create_batch', action: 'create_batch', kind: 'ui', label: 'Create Batch' },
+      { type: 'field', key: 'batch_number' }
+    ],
+    actions: {
+      create_batch: {
+        type: 'composite',
+        steps: [
+          { type: 'require', from: 'external.product_id', message: 'Select a product first.' },
+          {
+            type: 'callApi',
+            apiRef: 'batches.create',
+            request: { product_id: '{{external.product_id}}' },
+            to: 'vars.batchResponse'
+          },
+          { type: 'write', to: 'data.batch_number', value: '{{vars.batchResponse.batch_number}}' },
+          { type: 'write', to: 'external.batch_id', value: '{{vars.batchResponse.id}}' },
+          { type: 'write', to: 'snapshot.batch_number', value: '{{vars.batchResponse.batch_number}}' },
+          { type: 'message', value: 'Batch created: {{vars.batchResponse.batch_number}}' }
+        ]
+      }
+    }
+  } satisfies Record<string, unknown>;
+}
+
+function buildCustomerOrderTemplateJson() {
+  return {
     fields: {
       customer_id: {
         kind: 'lookup',
         label: 'Customer',
-        source: {
-          service: 'erp-sim',
-          path: '/api/customers',
-          method: 'GET',
-          query: { valid: true },
-          valueKey: 'id',
-          labelKey: 'name'
-        },
-        required: true,
-        snapshot: {
-          labelKey: 'name'
-        }
+        apiRef: 'customers.listValid',
+        valueKey: 'id',
+        labelKey: 'name',
+        required: true
       },
       customer_order_number: {
         kind: 'editable',
@@ -261,188 +287,129 @@ async function upsertCustomerOrderTestTemplate(db: ReturnType<typeof makeDb>['db
       { type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui', label: 'Create Customer Order' },
       { type: 'field', key: 'customer_order_number' }
     ],
-    workflow: {
-      initial: 'Created',
-      states: {
-        Created: {
-          editable: ['customer_id'],
-          readonly: ['customer_order_number'],
-          buttons: []
-        }
-      }
-    },
-    controls: {
-      create_customer_order: { label: 'Create Customer Order', action: 'create_customer_order' }
-    },
     actions: {
       create_customer_order: {
-        type: 'macro',
-        ref: 'macro:erp/ensureErpCustomerOrder@1',
-        params: {
-          customerRefKey: 'customer_id',
-          writeFieldKey: 'customer_order_number',
-          writeExternalRefKey: 'customer_order_id',
-          writeSnapshotKey: 'customer_order_number'
-        }
+        type: 'composite',
+        steps: [
+          { type: 'require', from: 'external.customer_id', message: 'Select a customer first.' },
+          {
+            type: 'callApi',
+            apiRef: 'customerOrders.create',
+            request: { customer_id: '{{external.customer_id}}' },
+            to: 'vars.customerOrderResponse'
+          },
+          { type: 'write', to: 'data.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
+          { type: 'write', to: 'external.customer_order_id', value: '{{vars.customerOrderResponse.id}}' },
+          { type: 'write', to: 'snapshot.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
+          { type: 'message', value: 'Customer order created: {{vars.customerOrderResponse.order_number}}' }
+        ]
       }
     }
-  };
-
-  return upsertTemplateVersion(db, {
-    key: 'customer-order-test',
-    version: 1,
-    name: 'Customer Order Test',
-    description: 'Lookup customer and create ERP customer order via macro',
-    state: 'published',
-    templateJson
-  });
+  } satisfies Record<string, unknown>;
 }
 
 async function run() {
   const { db, pool } = makeDb();
 
   try {
-    const createBatchMacroDefinition = {
-      ops: [
-        { op: 'read', from: 'external.{{params.productRefKey}}', to: 'vars.productId' },
-        { op: 'fallback', from: 'data.{{params.productRefKey}}', to: 'vars.productId' },
-        { op: 'require', from: 'vars.productId', message: 'Select a product first.' },
-        {
-          op: 'http.post',
-          service: 'erp',
-          path: '/api/batches',
-          body: { product_id: '{{vars.productId}}' },
-          to: 'vars.batchResponse'
-        },
-        { op: 'require', from: 'vars.batchResponse.id', message: 'ERP create batch response missing id.' },
-        {
-          op: 'require',
-          from: 'vars.batchResponse.batch_number',
-          message: 'ERP create batch response missing batch_number.'
-        },
-        { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.batchResponse.batch_number}}' },
-        { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.batchResponse.id}}' },
-        { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.batchResponse.batch_number}}' },
-        { op: 'message', value: 'Batch created: {{vars.batchResponse.batch_number}}' }
-      ]
-    } satisfies Record<string, unknown>;
-    const ensureErpCustomerOrderDefinition = {
-      ops: [
-        { op: 'read', from: 'external.{{params.customerRefKey}}', to: 'vars.customerId' },
-        { op: 'fallback', from: 'data.{{params.customerRefKey}}', to: 'vars.customerId' },
-        { op: 'require', from: 'vars.customerId', message: 'Select a customer first.' },
-        {
-          op: 'http.post',
-          service: 'erp',
-          path: '/api/customer-orders',
-          body: { customer_id: '{{vars.customerId}}' },
-          to: 'vars.response'
-        },
-        {
-          op: 'require',
-          from: 'vars.response.id',
-          message: 'ERP customer order response missing id.'
-        },
-        {
-          op: 'require',
-          from: 'vars.response.order_number',
-          message: 'ERP customer order response missing order_number.'
-        },
-        { op: 'write', to: 'data.{{params.writeFieldKey}}', value: '{{vars.response.order_number}}' },
-        { op: 'write', to: 'external.{{params.writeExternalRefKey}}', value: '{{vars.response.id}}' },
-        { op: 'write', to: 'snapshot.{{params.writeSnapshotKey}}', value: '{{vars.response.order_number}}' },
-        { op: 'message', value: 'Customer order created via DB macro: {{vars.response.order_number}}' }
-      ]
-    } satisfies Record<string, unknown>;
-    const reloadLookupDefinition = {
-      ops: [{ op: 'log', value: 'reloadLookup requested' }],
-      message: 'Lookup reloaded.'
-    } satisfies Record<string, unknown>;
+    const erpBaseUrl = process.env.ERP_SIM_BASE_URL ?? 'http://localhost:3001';
 
     const aliceId = await upsertUser(db, 'alice', 'Alice');
     const bobId = await upsertUser(db, 'bob', 'Bob');
-    const charlyId = await upsertUser(db, 'charly', 'Charly');
     const opsId = await upsertGroup(db, 'ops', 'Operations');
-    await upsertGroup(db, 'qa', 'QA');
 
     await upsertMembership(db, opsId, aliceId, 'rwx');
     await upsertMembership(db, opsId, bobId, 'rwx');
-    await upsertMembership(db, opsId, charlyId, 'rw');
 
-    const templateId = await findSeedTemplateId(db);
-    if (templateId) {
-      await upsertTemplateAssignment(db, templateId, opsId);
-    }
-    const rbacTemplateId = await upsertRbacTestV2Template(db);
-    const customerOrderTemplateId = await upsertCustomerOrderTestTemplate(db);
-    await upsertTemplateAssignment(db, rbacTemplateId, opsId);
+    const productionWorkflow = await upsertWorkflow(db, {
+      key: 'production.standard.v1',
+      version: 1,
+      name: 'Production Standard V1',
+      description: 'Simple production workflow with assign, approve and archive.',
+      state: 'active',
+      workflowJson: buildProductionStandardWorkflowJson()
+    });
+    const evidenceWorkflow = await upsertWorkflow(db, {
+      key: 'evidence.group-submit.v1',
+      version: 1,
+      name: 'Evidence Group Submit V1',
+      description: 'Individual editor submit and person-specific approvals until all required approvers approved.',
+      state: 'active',
+      workflowJson: buildEvidenceGroupSubmitWorkflowJson()
+    });
+
+    const productionTemplateId = await upsertTemplateVersion(db, {
+      key: 'production-batch',
+      version: 1,
+      name: 'Production Batch',
+      description: 'Reference template for production batch workflow',
+      state: 'published',
+      templateJson: buildProductionBatchTemplateJson()
+    });
+    await db
+      .update(fpTemplates)
+      .set({ workflowRef: productionWorkflow.key })
+      .where(eq(fpTemplates.id, productionTemplateId));
+    await clearTemplateMacroLinks(db, productionTemplateId);
+    await upsertTemplateAssignment(db, productionTemplateId, opsId);
+
+    const customerOrderTemplateId = await upsertTemplateVersion(db, {
+      key: 'customer-order-test',
+      version: 1,
+      name: 'Customer Order Test',
+      description: 'Reference template for evidence/customer-order workflow',
+      state: 'published',
+      templateJson: buildCustomerOrderTemplateJson()
+    });
+    await db
+      .update(fpTemplates)
+      .set({ workflowRef: evidenceWorkflow.key })
+      .where(eq(fpTemplates.id, customerOrderTemplateId));
+    await clearTemplateMacroLinks(db, customerOrderTemplateId);
     await upsertTemplateAssignment(db, customerOrderTemplateId, opsId);
-    await upsertMacro(db, {
-      ref: 'macro:erp/createBatch@1',
-      namespace: 'erp',
-      name: 'createBatch',
-      version: 1,
-      kind: 'json',
-      description: 'Create ERP batch for a batch product',
-      isEnabled: true,
-      paramsSchemaJson: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          productRefKey: { type: 'string', default: 'product_id' },
-          writeFieldKey: { type: 'string', default: 'batch_number' },
-          writeExternalRefKey: { type: 'string', default: 'batch_id' },
-          writeSnapshotKey: { type: 'string', default: 'batch_number' }
-        }
-      },
-      definitionJson: createBatchMacroDefinition
+
+    await upsertApi(db, {
+      key: 'products.listValid',
+      name: 'List Valid Products',
+      description: 'Fetch products with valid=true from ERP',
+      method: 'GET',
+      baseUrl: erpBaseUrl,
+      path: '/api/products',
+      requestSchemaJson: { query: { valid: true } }
     });
-    await upsertMacro(db, {
-      ref: 'macro:erp/ensureErpCustomerOrder@1',
-      namespace: 'erp',
-      name: 'ensureErpCustomerOrder',
-      version: 1,
-      kind: 'json',
-      description: 'Ensure ERP customer order reference exists',
-      isEnabled: true,
-      paramsSchemaJson: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          customerRefKey: { type: 'string', default: 'customer_id' },
-          writeFieldKey: { type: 'string', default: 'customer_order_number' },
-          writeExternalRefKey: { type: 'string', default: 'customer_order_id' },
-          writeSnapshotKey: { type: 'string', default: 'customer_order_number' }
-        }
-      },
-      definitionJson: ensureErpCustomerOrderDefinition
+    await upsertApi(db, {
+      key: 'customers.listValid',
+      name: 'List Valid Customers',
+      description: 'Fetch customers with valid=true from ERP',
+      method: 'GET',
+      baseUrl: erpBaseUrl,
+      path: '/api/customers',
+      requestSchemaJson: { query: { valid: true } }
     });
-    await upsertMacro(db, {
-      ref: 'macro:ui/reloadLookup@1',
-      namespace: 'ui',
-      name: 'reloadLookup',
-      version: 1,
-      kind: 'json',
-      description: 'UI helper macro to trigger lookup refresh',
-      isEnabled: true,
-      paramsSchemaJson: {
-        type: 'object',
-        additionalProperties: true
-      },
-      definitionJson: reloadLookupDefinition
+    await upsertApi(db, {
+      key: 'customerOrders.create',
+      name: 'Create Customer Order',
+      description: 'Create customer order in ERP',
+      method: 'POST',
+      baseUrl: erpBaseUrl,
+      path: '/api/customer-orders',
+      requestSchemaJson: { body: { customer_id: 'uuid' } },
+      responseSchemaJson: { id: 'uuid', order_number: 'string', status: 'string' }
+    });
+    await upsertApi(db, {
+      key: 'batches.create',
+      name: 'Create Batch',
+      description: 'Create batch in ERP',
+      method: 'POST',
+      baseUrl: erpBaseUrl,
+      path: '/api/batches',
+      requestSchemaJson: { body: { product_id: 'uuid' } },
+      responseSchemaJson: { id: 'uuid', batch_number: 'string', status: 'string' }
     });
 
-    console.log('Seed ensured groups: ops, qa');
-    console.log('Seed ensured users: alice, bob, charly');
-    console.log('Seed ensured memberships: alice->ops(rwx), bob->ops(rwx), charly->ops(rw)');
-    if (templateId) {
-      console.log(`Seed ensured assignment: template ${templateId} -> ops`);
-    } else {
-      console.log('Seed note: no published template found for automatic ops assignment.');
-    }
-    console.log(`Seed ensured template versions: rbac-test-v2 v1 published + v2 draft (published id ${rbacTemplateId})`);
-    console.log(`Seed ensured template version: customer-order-test v1 published (id ${customerOrderTemplateId})`);
-    console.log('Seed ensured macros: macro:erp/createBatch@1, macro:erp/ensureErpCustomerOrder@1, macro:ui/reloadLookup@1');
+    console.log(
+      'Seed complete: users(alice,bob), group(ops), 2 workflows, 2 published templates, 4 APIs.'
+    );
   } finally {
     await pool.end();
   }

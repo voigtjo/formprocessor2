@@ -1,13 +1,15 @@
 import { z } from 'zod';
+import { resolveApiCatalogEntry } from './actions/api-catalog.js';
 import { resolveServiceBaseUrl } from './services/service-registry.js';
 
 const templateTokenRegex = /\{\{external\.([a-zA-Z0-9_]+)\}\}/g;
 const templateTokenDetectRegex = /\{\{external\.[a-zA-Z0-9_]+\}\}/;
 
 const sourceSchema = z.object({
-  service: z.enum(['erp-sim', 'erp']).default('erp-sim'),
+  service: z.enum(['erp-sim', 'erp', 'custom']).default('erp-sim'),
   method: z.literal('GET').default('GET'),
   path: z.string(),
+  baseUrl: z.string().optional(),
   query: z.record(z.string()).optional(),
   valueField: z.string().optional(),
   labelField: z.string().optional(),
@@ -27,6 +29,10 @@ export type LookupFetchResult = {
   rawCount: number;
   url: string;
   source: LookupSource;
+};
+
+export type LookupResolveContext = {
+  db?: unknown;
 };
 
 function normalizeQueryValue(value: unknown) {
@@ -93,7 +99,7 @@ export function normalizeLookupSource(field: any): LookupSource {
   const lookup = field?.lookup;
   // Legacy fallback: historical templates used `lookup.endpoint` instead of `source`.
   if (!lookup?.endpoint || typeof lookup.endpoint !== 'string') {
-    throw new Error('Lookup field source is missing');
+    throw new Error('Lookup field source is missing (use apiRef as primary model)');
   }
 
   const endpointUrl = new URL(lookup.endpoint, 'http://placeholder.local');
@@ -114,6 +120,54 @@ export function normalizeLookupSource(field: any): LookupSource {
   });
 }
 
+function inferLookupService(baseUrl: string | undefined) {
+  const normalized = String(baseUrl ?? '').toLowerCase();
+  if (normalized.includes('localhost:3001')) return 'erp' as const;
+  if (normalized.length > 0) return 'custom' as const;
+  return 'erp-sim' as const;
+}
+
+export async function resolveLookupSource(field: any, context?: LookupResolveContext): Promise<LookupSource> {
+  // Primary model: lookup fields should use apiRef.
+  // Legacy compatibility (fallback only): source / lookup.endpoint.
+  const apiRef = typeof field?.apiRef === 'string' ? field.apiRef.trim() : '';
+  if (!apiRef) {
+    return normalizeLookupSource(field);
+  }
+
+  const entry = await resolveApiCatalogEntry(apiRef, context?.db);
+  const method = String(entry.method ?? 'GET')
+    .trim()
+    .toUpperCase();
+  if (method !== 'GET') {
+    throw new Error(`Lookup apiRef must use GET: ${apiRef}`);
+  }
+
+  const requestSchema = entry.requestSchemaJson;
+  const rawQuery =
+    requestSchema && typeof requestSchema === 'object' && !Array.isArray(requestSchema)
+      ? (requestSchema as Record<string, unknown>).query
+      : undefined;
+  const query: Record<string, string> = {};
+  if (rawQuery && typeof rawQuery === 'object' && !Array.isArray(rawQuery)) {
+    for (const [key, value] of Object.entries(rawQuery as Record<string, unknown>)) {
+      query[key] = normalizeQueryValue(value);
+    }
+  }
+
+  return sourceSchema.parse({
+    service: inferLookupService(entry.baseUrl),
+    method: 'GET',
+    path: entry.path,
+    baseUrl: entry.baseUrl,
+    query,
+    valueField: field?.valueField,
+    labelField: field?.labelField,
+    valueKey: field?.valueKey,
+    labelKey: field?.labelKey
+  });
+}
+
 export async function fetchLookupOptionsDetailed(
   baseUrl: string,
   source: LookupSource,
@@ -121,7 +175,15 @@ export async function fetchLookupOptionsDetailed(
   valueField = 'id',
   labelField = 'name'
 ): Promise<LookupFetchResult> {
-  const serviceBaseUrl = resolveServiceBaseUrl(source.service, baseUrl);
+  const configuredBaseUrl = typeof source.baseUrl === 'string' ? source.baseUrl.trim() : '';
+  const serviceBaseUrl =
+    configuredBaseUrl.length > 0
+      ? configuredBaseUrl
+      : source.service === 'custom'
+        ? (() => {
+            throw new Error('Lookup source baseUrl is missing for custom service');
+          })()
+        : resolveServiceBaseUrl(source.service, baseUrl);
   const method = String(source.method ?? 'GET').toUpperCase();
   if (method !== 'GET') {
     throw new Error(`Unsupported lookup method: ${source.method}`);

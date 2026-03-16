@@ -6,37 +6,47 @@
   <a class="btn btn-primary" href="/templates/new">Create Template</a>
 </div>
 
+<form method="get" action="/templates" class="row">
+  <div class="col col-6">
+    <label for="template-state-filter">State</label>
+    <select id="template-state-filter" name="state" onchange="this.form.submit()">
+      <% ['published', 'draft', 'inactive', 'all'].forEach((stateOption) => { %>
+        <option value="<%= stateOption %>" <%= (filters?.state || '') === stateOption ? 'selected' : '' %>><%= stateOption %></option>
+      <% }) %>
+    </select>
+  </div>
+  <div class="col">
+    <a class="btn btn-secondary" href="/templates">Reset</a>
+  </div>
+</form>
+
 <table>
   <thead>
     <tr>
-      <th>Name</th>
       <th>Key</th>
-      <th>Published</th>
-      <th>Versions</th>
+      <th>Name</th>
+      <th>Version</th>
+      <th>State</th>
+      <th>Workflow</th>
       <th>Assigned Groups</th>
+      <th>Actions</th>
+      <th>APIs</th>
+      <th>Legacy Macros</th>
       <th>Actions</th>
     </tr>
   </thead>
   <tbody>
     <% if (!templates || templates.length === 0) { %>
-      <tr><td colspan="6" class="muted">No templates found.</td></tr>
+      <tr><td colspan="10" class="muted">No templates found.</td></tr>
     <% } %>
     <% (templates || []).forEach((tpl) => { %>
+      <% const normalizedTemplateState = String(tpl.state || '').toLowerCase() === 'archived' ? 'inactive' : String(tpl.state || '').toLowerCase(); %>
       <tr>
-        <td><%= tpl.name %></td>
         <td><code><%= tpl.key %></code></td>
-        <td><span class="badge">v<%= tpl.version %> · <%= tpl.state %></span></td>
-        <td>
-          <% if (tpl.versions && tpl.versions.length > 0) { %>
-            <select onchange="if (this.value) { window.location.href = '/templates/' + this.value + '/edit'; }">
-              <% tpl.versions.forEach((versionItem) => { %>
-                <option value="<%= versionItem.id %>" <%= versionItem.id === tpl.id ? 'selected' : '' %>>
-                  v<%= versionItem.version %> (<%= versionItem.state %>)
-                </option>
-              <% }) %>
-            </select>
-          <% } %>
-        </td>
+        <td><%= tpl.name %></td>
+        <td><code>v<%= tpl.version %></code></td>
+        <td><span class="badge"><%= normalizedTemplateState %></span></td>
+        <td><code><%= tpl.workflowRef || '—' %></code></td>
         <td>
           <% if (tpl.assignedGroups && tpl.assignedGroups.length > 0) { %>
             <%= tpl.assignedGroups.map((g) => `${g.name} (${g.key})`).join(', ') %>
@@ -44,10 +54,18 @@
             <span class="muted">0</span>
           <% } %>
         </td>
+        <td><%= tpl.actionCount || 0 %></td>
+        <td><%= tpl.apiCount || 0 %></td>
+        <td><%= tpl.macroCount || 0 %></td>
         <td>
           <a href="/templates/<%= tpl.id %>/preview">Preview</a>
           · <a href="/templates/<%= tpl.id %>/edit">Edit JSON</a>
-          · <a href="/documents/new?templateId=<%= tpl.id %>">New Doc</a>
+          · <a href="/templates/<%= tpl.id %>/versions">Versions</a>
+          <% if (normalizedTemplateState === 'published') { %>
+            · <a href="/documents/new?templateId=<%= tpl.id %>">New Doc</a>
+          <% } else { %>
+            · <span class="muted">New Doc disabled</span>
+          <% } %>
         </td>
       </tr>
     <% }) %>

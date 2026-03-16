@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildLookupUrl, fetchLookupOptions, normalizeLookupSource } from './lookup.js';
+import { buildLookupUrl, fetchLookupOptions, normalizeLookupSource, resolveLookupSource } from './lookup.js';
 
 describe('lookup url handling', () => {
   afterEach(() => {
@@ -116,6 +116,45 @@ describe('lookup url handling', () => {
 
     const options = await fetchLookupOptions('http://localhost:3001', source, {}, 'id', 'name');
     expect(options).toEqual([]);
+  });
+
+  it('resolves lookup source via apiRef from api catalog', async () => {
+    const resolved = await resolveLookupSource(
+      {
+        kind: 'lookup',
+        apiRef: 'customers.listValid',
+        valueKey: 'id',
+        labelKey: 'name'
+      },
+      {
+        db: {
+          select: () => ({
+            from: () => ({
+              where: () => ({
+                limit: async () => [
+                  {
+                    key: 'customers.listValid',
+                    name: 'Customers',
+                    description: null,
+                    state: 'active',
+                    method: 'GET',
+                    baseUrl: 'http://localhost:3001',
+                    path: '/api/customers',
+                    requestSchemaJson: { query: { valid: true } },
+                    responseSchemaJson: null,
+                    handlerCode: null
+                  }
+                ]
+              })
+            })
+          })
+        }
+      }
+    );
+
+    expect(resolved.path).toBe('/api/customers');
+    expect(resolved.query).toEqual({ valid: 'true' });
+    expect(resolved.baseUrl).toBe('http://localhost:3001');
   });
 
   it('interpolates external placeholder in query and keeps fixed params', () => {

@@ -76,3 +76,49 @@ CREATE INDEX IF NOT EXISTS idx_fp_documents_template_status ON fp_documents(temp
 CREATE INDEX IF NOT EXISTS idx_fp_documents_group ON fp_documents(group_id);
 CREATE INDEX IF NOT EXISTS idx_fp_documents_assignee ON fp_documents(assignee_user_id);
 CREATE INDEX IF NOT EXISTS idx_fp_documents_reviewer ON fp_documents(reviewer_user_id);
+
+CREATE TABLE IF NOT EXISTS fp_macros (
+  ref text PRIMARY KEY,
+  namespace text NOT NULL,
+  name text NOT NULL,
+  version int NOT NULL,
+  kind text NOT NULL DEFAULT 'json',
+  description text,
+  is_enabled boolean NOT NULL DEFAULT true,
+  params_schema_json jsonb,
+  definition_json jsonb,
+  code_text text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_fp_macros_enabled ON fp_macros(is_enabled);
+
+CREATE TABLE IF NOT EXISTS fp_template_macros (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_id uuid NOT NULL REFERENCES fp_templates(id) ON DELETE CASCADE,
+  macro_ref text NOT NULL REFERENCES fp_macros(ref) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fp_template_macros_template_macro
+  ON fp_template_macros(template_id, macro_ref);
+
+CREATE TABLE IF NOT EXISTS fp_apis (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  key text NOT NULL,
+  name text NOT NULL,
+  description text,
+  state text NOT NULL DEFAULT 'active',
+  method text NOT NULL,
+  base_url text,
+  path text NOT NULL,
+  request_schema_json jsonb,
+  response_schema_json jsonb,
+  handler_code text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fp_apis_key ON fp_apis(key);
+CREATE INDEX IF NOT EXISTS idx_fp_apis_state ON fp_apis(state);

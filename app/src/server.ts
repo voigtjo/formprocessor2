@@ -80,7 +80,7 @@ async function renderErrorDocument(params: {
 async function checkDocumentColumns(pool: { query: (sqlText: string, params?: unknown[]) => Promise<any> }) {
   const tableCheck = await pool.query(`select to_regclass('public.fp_documents') as rel`);
   const rel = tableCheck.rows?.[0]?.rel;
-  if (!rel) return { hasActorColumns: false, hasTemplateVersion: false };
+  if (!rel) return { hasActorColumns: false, hasTemplateVersion: false, hasMultiAssignments: false };
 
   const columnCheck = await pool.query(
     `
@@ -92,9 +92,20 @@ async function checkDocumentColumns(pool: { query: (sqlText: string, params?: un
     `
   );
   const names = new Set((columnCheck.rows ?? []).map((row: { column_name?: string }) => row.column_name));
+  const multiTables = await pool.query(
+    `
+      select to_regclass('public.fp_document_editors') as editors_rel,
+             to_regclass('public.fp_document_approvals') as approvals_rel,
+             to_regclass('public.fp_document_submissions') as submissions_rel
+    `
+  );
   return {
     hasActorColumns: names.has('editor_user_id') && names.has('approver_user_id'),
-    hasTemplateVersion: names.has('template_version')
+    hasTemplateVersion: names.has('template_version'),
+    hasMultiAssignments:
+      !!multiTables.rows?.[0]?.editors_rel &&
+      !!multiTables.rows?.[0]?.approvals_rel &&
+      !!multiTables.rows?.[0]?.submissions_rel
   };
 }
 
@@ -103,19 +114,25 @@ export async function buildApp() {
   const { db, pool } = makeDb();
   let hasDocumentActorColumns = false;
   let hasDocumentTemplateVersion = false;
+  let hasDocumentMultiAssignments = false;
   try {
     const checked = await checkDocumentColumns(pool);
     hasDocumentActorColumns = checked.hasActorColumns;
     hasDocumentTemplateVersion = checked.hasTemplateVersion;
+    hasDocumentMultiAssignments = checked.hasMultiAssignments;
   } catch {
     hasDocumentActorColumns = false;
     hasDocumentTemplateVersion = false;
+    hasDocumentMultiAssignments = false;
   }
   if (!hasDocumentActorColumns) {
     app.log.warn('DB missing editor_user_id/approver_user_id. Run: cd app && npm run db:push');
   }
   if (!hasDocumentTemplateVersion) {
     app.log.warn('DB missing template_version. Run: cd app && npm run db:push');
+  }
+  if (!hasDocumentMultiAssignments) {
+    app.log.warn('DB missing fp_document_editors/fp_document_approvals/fp_document_submissions. Run: cd app && npm run db:push');
   }
 
   const __filename = fileURLToPath(import.meta.url);
@@ -255,7 +272,8 @@ export async function buildApp() {
     db,
     erpBaseUrl: process.env.ERP_SIM_BASE_URL ?? 'http://localhost:3001',
     hasDocumentActorColumns,
-    hasDocumentTemplateVersion
+    hasDocumentTemplateVersion,
+    hasDocumentMultiAssignments
   });
 
   return app;

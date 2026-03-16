@@ -147,7 +147,7 @@ describe('RBAC action permissions', () => {
     });
 
     expect(res.statusCode).toBe(303);
-    expect(db.__updates.some((item) => item.status === 'Approved')).toBe(true);
+    expect(db.__updates.some((item) => item.status === 'approved')).toBe(true);
     await app.close();
   });
 

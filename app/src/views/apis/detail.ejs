@@ -1,0 +1,82 @@
+<header class="page-header">
+  <h1><%= api.name %></h1>
+  <p class="muted"><code><%= api.key %></code> · <span class="badge"><%= api.state %></span> · <code><%= api.method %></code> <code><%= api.path %></code></p>
+</header>
+
+<div class="card">
+  <h3 class="card-title">Definition</h3>
+  <p><strong>Base URL:</strong> <code><%= api.baseUrl %></code></p>
+  <p><strong>Description:</strong> <%= api.description || '—' %></p>
+  <p><strong>Created:</strong> <%= api.createdAt ? new Date(api.createdAt).toLocaleString() : '—' %></p>
+  <p><strong>Updated:</strong> <%= api.updatedAt ? new Date(api.updatedAt).toLocaleString() : '—' %></p>
+</div>
+
+<div class="card">
+  <h3 class="card-title">JSON</h3>
+  <p><strong>request_schema_json</strong></p>
+  <pre><code><%= api.requestSchemaJson ? JSON.stringify(api.requestSchemaJson, null, 2) : 'null' %></code></pre>
+  <p><strong>response_schema_json</strong></p>
+  <pre><code><%= api.responseSchemaJson ? JSON.stringify(api.responseSchemaJson, null, 2) : 'null' %></code></pre>
+  <p><strong>handler_code</strong></p>
+  <pre><code><%= api.handlerCode || 'null' %></code></pre>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Test API</h3>
+  <% if (apiTest?.errorMessage) { %>
+    <div class="error-card"><strong>Test error:</strong> <%= apiTest.errorMessage %></div>
+  <% } %>
+  <form method="post" action="/apis/<%= api.id %>/test" class="row">
+    <div class="col">
+      <label for="request_json">Request JSON</label>
+      <textarea id="request_json" name="request_json" rows="8"><%= apiTest?.requestJson ?? '' %></textarea>
+      <p class="muted">For GET APIs: JSON keys become query parameters. For POST/PUT/PATCH: JSON is sent as body.</p>
+    </div>
+    <div class="col">
+      <button class="btn btn-primary" type="submit">Test API</button>
+    </div>
+  </form>
+  <% if (apiTest && apiTest.responseStatus !== null) { %>
+    <p><strong>Request Method:</strong> <code><%= apiTest.requestMethod %></code></p>
+    <p><strong>Request URL:</strong> <code><%= apiTest.requestUrl %></code></p>
+    <p><strong>Request Payload:</strong></p>
+    <pre><code><%= apiTest.requestPayload || '{}' %></code></pre>
+    <p><strong>HTTP Status:</strong> <code><%= apiTest.responseStatus %></code></p>
+    <pre><code><%= apiTest.responseBody || '' %></code></pre>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Used In Templates</h3>
+  <% if (!templatesUsingApi || templatesUsingApi.length === 0) { %>
+    <p class="muted">No template references found.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Template</th>
+          <th>Key</th>
+          <th>Version</th>
+          <th>State</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% templatesUsingApi.forEach((tpl) => { %>
+          <tr>
+            <td><%= tpl.name %></td>
+            <td><code><%= tpl.key %></code></td>
+            <td><code>v<%= tpl.version %></code></td>
+            <td><span class="badge"><%= tpl.state %></span></td>
+            <td><a href="/templates/<%= tpl.id %>/edit">Template</a></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<div class="actions">
+  <a class="btn btn-primary" href="/apis/<%= api.id %>/edit">Edit API</a>
+  <a class="btn btn-secondary" href="/apis">Back to APIs</a>
+</div>

@@ -1,0 +1,43 @@
+<header class="page-header">
+  <h1>Template Versions</h1>
+  <p class="muted">
+    <strong><%= selected.name %></strong> (<code><%= selected.key %></code>)
+  </p>
+</header>
+
+<table>
+  <thead>
+    <tr>
+      <th>Version</th>
+      <th>State</th>
+      <th>Name</th>
+      <th>Published</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!versions || versions.length === 0) { %>
+      <tr><td colspan="5" class="muted">No versions found.</td></tr>
+    <% } %>
+    <% (versions || []).forEach((tpl) => { %>
+      <% const normalizedTemplateState = String(tpl.state || '').toLowerCase() === 'archived' ? 'inactive' : String(tpl.state || '').toLowerCase(); %>
+      <tr>
+        <td><code>v<%= tpl.version %></code></td>
+        <td><span class="badge"><%= normalizedTemplateState %></span></td>
+        <td><%= tpl.name %></td>
+        <td><%= tpl.publishedAt ? new Date(tpl.publishedAt).toLocaleString() : '—' %></td>
+        <td>
+          <a href="/templates/<%= tpl.id %>/preview">Preview</a>
+          · <a href="/templates/<%= tpl.id %>/edit">Edit JSON</a>
+          <% if (normalizedTemplateState === 'published') { %>
+            · <a href="/documents/new?templateId=<%= tpl.id %>">New Doc</a>
+          <% } %>
+        </td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>
+
+<div class="actions">
+  <a class="btn btn-secondary" href="/templates">Back to Templates</a>
+</div>

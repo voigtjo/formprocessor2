@@ -1,27 +1,57 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { FpDb } from '../db/index.js';
 import {
+  fpDocumentApprovals,
+  fpDocumentEditors,
+  fpDocumentSubmissions,
   fpDocuments,
+  fpApis,
   fpGroupMembers,
   fpGroups,
   fpMacros,
+  fpTemplateMacros,
   fpTemplateAssignments,
   fpTemplates,
-  fpUsers
+  fpUsers,
+  fpWorkflows
 } from '../db/schema.js';
-import { fetchLookupOptions, fetchLookupOptionsDetailed, normalizeLookupSource } from '../lookup.js';
+import { fetchLookupOptions, fetchLookupOptionsDetailed, resolveLookupSource } from '../lookup.js';
 import { ExternalCallError, executeActionDefinition } from '../actions/index.js';
+import { collectMacroRefsFromActionDefinition, isUiSafeActionDefinition, resolveActionType } from '../actions/policy.js';
 import { renderLayout } from '../render/layout.js';
+import { extractTemplateUsage } from '../template-analysis.js';
+import {
+  DOCUMENT_STATES,
+  DOCUMENT_WORKFLOW_INITIAL,
+  DOCUMENT_WORKFLOW_ORDER,
+  TEMPLATE_STATES,
+  isArchivedDocumentStatus,
+  isDoneDocumentStatus,
+  normalizeDocumentStatus,
+  normalizeTemplateState
+} from '../domain/status-model.js';
+import {
+  evaluateWorkflow,
+  normalizeWorkflowRuntimeModel,
+  resolveVisibleButtons,
+  resolveNextStatus,
+  resolveSubmissionCompletion,
+  resolveApprovalCompletion,
+  type WorkflowRuntimeModel,
+  type EditorSubmissionState,
+  type ApproverDecisionState
+} from '../domain/workflow-runtime.js';
 
 type UiRouteOptions = {
   db: FpDb;
   erpBaseUrl: string;
   hasDocumentActorColumns?: boolean;
   hasDocumentTemplateVersion?: boolean;
+  hasDocumentMultiAssignments?: boolean;
 };
-const templateStateSchema = z.enum(['draft', 'published', 'archived']);
+const templateStateSchema = z.enum(TEMPLATE_STATES);
 const permissionRequiresSchema = z.union([
   z.enum(['read', 'write', 'execute', 'r', 'w', 'x']),
   z.array(z.enum(['read', 'write', 'execute', 'r', 'w', 'x']))
@@ -43,11 +73,12 @@ const layoutNodesSchema = z.array(z.object({ type: z.string() }).passthrough());
 const templateJsonSchema = z.object({
   fields: z.record(z.any()),
   layout: z.union([layoutSectionsSchema, layoutNodesSchema]).default({}),
+  fieldAccess: z.record(z.any()).optional(),
   workflow: z.object({
-    initial: z.string(),
+    initial: z.string().optional(),
     order: z.array(z.string()).optional(),
     states: z.record(z.any()).optional()
-  }),
+  }).optional(),
   controls: z.record(z.any()).optional(),
   actions: z.record(z.any()).optional(),
   permissions: z
@@ -66,13 +97,14 @@ const templateJsonSchema = z.object({
 const templateEditorJsonSchema = z.object({
   fields: z.record(z.any()),
   layout: z.array(z.any()),
+  fieldAccess: z.record(z.any()).optional(),
   workflow: z.object({
-    initial: z.string(),
+    initial: z.string().optional(),
     order: z.array(z.string()).optional(),
-    states: z.record(z.any())
-  }),
-  controls: z.record(z.any()),
-  actions: z.record(z.any()),
+    states: z.record(z.any()).optional()
+  }).optional(),
+  controls: z.record(z.any()).optional(),
+  actions: z.record(z.any()).optional(),
   permissions: z
     .object({
       actions: z
@@ -91,6 +123,7 @@ const templateFormSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   state: templateStateSchema,
+  workflow_ref: z.string().optional(),
   template_json: z.string().min(1)
 });
 
@@ -114,6 +147,15 @@ const assignmentParamSchema = z.object({
 
 const assignmentBodySchema = z.object({
   groupId: z.string().uuid()
+});
+
+const workflowStateSchema = z.enum(['draft', 'active', 'inactive']);
+const workflowFormSchema = z.object({
+  key: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  state: workflowStateSchema,
+  workflow_json: z.string().min(1)
 });
 
 const adminUserCreateSchema = z.object({
@@ -147,7 +189,11 @@ const adminTemplateAssignmentDeleteParamSchema = z.object({
 const macroRefParamSchema = z.object({
   ref: z.string().min(1)
 });
-const macroKindSchema = z.enum(['json', 'code', 'builtin']);
+const macroListQuerySchema = z.object({
+  templateId: z.string().uuid().optional(),
+  templateState: z.enum(['all', 'draft', 'published', 'inactive', 'archived']).optional()
+});
+const macroKindSchema = z.enum(['json', 'builtin']);
 const macroFormSchema = z.object({
   ref: z.string().min(1),
   namespace: z.string().min(1),
@@ -157,8 +203,24 @@ const macroFormSchema = z.object({
   enabled: z.boolean(),
   kind: macroKindSchema,
   paramsSchemaJsonText: z.string().optional(),
-  definitionJsonText: z.string().optional(),
-  codeText: z.string().optional()
+  definitionJsonText: z.string().optional()
+});
+const apiStateSchema = z.enum(['active', 'inactive']);
+const apiMethodSchema = z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+const apiListQuerySchema = z.object({
+  state: z.enum(['active', 'inactive', 'all']).optional()
+});
+const apiFormSchema = z.object({
+  key: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  state: apiStateSchema,
+  method: apiMethodSchema,
+  baseUrl: z.string().url(),
+  path: z.string().min(1),
+  requestSchemaJsonText: z.string().optional(),
+  responseSchemaJsonText: z.string().optional(),
+  handlerCodeText: z.string().optional()
 });
 
 const documentIdParamSchema = z.object({
@@ -184,10 +246,17 @@ type TemplateField = {
   multiline?: boolean;
   inputType?: 'text' | 'date' | 'checkbox' | 'select';
   control?: 'text' | 'date' | 'checkbox';
+  apiRef?: string;
+  valueField?: string;
+  valueKey?: string;
+  labelField?: string;
+  labelKey?: string;
   ui?: {
     input?: 'text' | 'date' | 'checkbox';
   };
   source?: {
+    service?: string;
+    method?: string;
     path?: string;
     query?: Record<string, unknown>;
     valueField?: string;
@@ -214,12 +283,9 @@ const starterTemplate = {
     customer_id: {
       kind: 'lookup',
       label: 'Customer',
-      source: {
-        path: '/api/customers',
-        query: { valid: true },
-        valueKey: 'id',
-        labelKey: 'name'
-      }
+      apiRef: 'customers.listValid',
+      valueKey: 'id',
+      labelKey: 'name'
     },
     comment: {
       kind: 'editable',
@@ -232,30 +298,99 @@ const starterTemplate = {
     { type: 'field', key: 'customer_id' },
     { type: 'field', key: 'comment' }
   ],
-  workflow: {
-    initial: 'received',
-    states: {
-      received: {
-        editable: ['comment'],
-        readonly: [],
-        buttons: []
-      }
-    }
-  },
-  controls: {},
   actions: {}
 };
 
-function resolvePublishedAtForStateChange(nextState: 'draft' | 'published' | 'archived', existing?: Date | null) {
+const STANDARD_PROCESS_ACTIONS = ['assign', 'submit', 'approve', 'reject', 'archive'] as const;
+type StandardProcessAction = (typeof STANDARD_PROCESS_ACTIONS)[number];
+
+function isStandardProcessAction(value: string): value is StandardProcessAction {
+  return (STANDARD_PROCESS_ACTIONS as readonly string[]).includes(value);
+}
+
+function resolveProcessButtonLabel(controlKey: string, templateJson?: TemplateJson) {
+  const normalized = String(controlKey ?? '').trim().toLowerCase();
+  const legacyLabel =
+    templateJson && typeof (templateJson as any).controls?.[controlKey]?.label === 'string'
+      ? String((templateJson as any).controls[controlKey].label)
+      : '';
+  if (legacyLabel) return legacyLabel;
+  if (normalized === 'assign') return 'Assign';
+  if (normalized === 'submit') return 'Submit';
+  if (normalized === 'approve') return 'Approve';
+  if (normalized === 'reject') return 'Reject';
+  if (normalized === 'archive') return 'Archive';
+  return controlKey;
+}
+
+function normalizeTemplateJsonForV1Storage(templateJson: TemplateJson) {
+  const next = { ...templateJson } as Record<string, unknown>;
+  delete next.workflow;
+  delete next.controls;
+  delete next.fieldAccess;
+
+  if (next.actions && typeof next.actions === 'object' && !Array.isArray(next.actions)) {
+    const filteredActions = Object.fromEntries(
+      Object.entries(next.actions as Record<string, unknown>).filter(([actionKey]) => !isStandardProcessAction(actionKey))
+    );
+    if (Object.keys(filteredActions).length > 0) {
+      next.actions = filteredActions;
+    } else {
+      delete next.actions;
+    }
+  }
+
+  return next as TemplateJson;
+}
+
+function resolvePublishedAtForStateChange(nextState: 'draft' | 'published' | 'inactive', existing?: Date | null) {
   if (nextState !== 'published') return null;
   return existing ?? new Date();
 }
 
-function normalizeTemplateState(raw: unknown): 'draft' | 'published' | 'archived' {
-  if (raw === 'active') return 'published';
-  if (raw === 'draft' || raw === 'published' || raw === 'archived') return raw;
-  return 'draft';
+function pickRelevantTemplatesByKey(
+  templates: Array<{
+    id: string;
+    key: string;
+    name: string;
+    description: string | null;
+    state: string;
+    version: number;
+  }>,
+  stateFilter: 'published' | 'draft' | 'inactive' | 'all'
+) {
+  if (stateFilter !== 'all') {
+    const byKey = new Map<string, (typeof templates)[number]>();
+    for (const tpl of templates) {
+      if (normalizeTemplateState(tpl.state) !== stateFilter) continue;
+      if (!byKey.has(tpl.key)) byKey.set(tpl.key, tpl);
+    }
+    return Array.from(byKey.values());
+  }
+
+  const rank = (state: string) => {
+    const normalized = normalizeTemplateState(state);
+    if (normalized === 'published') return 3;
+    if (normalized === 'draft') return 2;
+    return 1;
+  };
+
+  const byKey = new Map<string, (typeof templates)[number]>();
+  for (const tpl of templates) {
+    const current = byKey.get(tpl.key);
+    if (!current) {
+      byKey.set(tpl.key, tpl);
+      continue;
+    }
+    const currentRank = rank(current.state);
+    const nextRank = rank(tpl.state);
+    if (nextRank > currentRank || (nextRank === currentRank && tpl.version > current.version)) {
+      byKey.set(tpl.key, tpl);
+    }
+  }
+  return Array.from(byKey.values());
 }
+
 
 async function sendUiError(
   request: FastifyRequest,
@@ -293,6 +428,7 @@ async function loadTemplateVersionsByKey(db: FpDb, key: string) {
       description: fpTemplates.description,
       state: fpTemplates.state,
       version: fpTemplates.version,
+      workflowRef: fpTemplates.workflowRef,
       templateJson: fpTemplates.templateJson,
       publishedAt: fpTemplates.publishedAt,
       createdAt: fpTemplates.createdAt
@@ -302,8 +438,54 @@ async function loadTemplateVersionsByKey(db: FpDb, key: string) {
     .orderBy(desc(fpTemplates.version));
 }
 
+async function loadWorkflowOptions(db: FpDb) {
+  try {
+    return await db
+      .select({
+        id: fpWorkflows.id,
+        key: fpWorkflows.key,
+        name: fpWorkflows.name,
+        version: fpWorkflows.version,
+        state: fpWorkflows.state
+      })
+      .from(fpWorkflows)
+      .where(sql`lower(${fpWorkflows.state}) in ('active', 'draft')`)
+      .orderBy(asc(fpWorkflows.key), desc(fpWorkflows.version));
+  } catch {
+    return [];
+  }
+}
+
+const workflowJsonSchema = z.object({
+  statuses: z.array(z.string()).optional(),
+  initialStatus: z.string().optional(),
+  order: z.array(z.string()).optional(),
+  states: z.record(z.any()).optional(),
+  semantics: z.record(z.any()).optional(),
+  actorModel: z.record(z.any()).optional()
+});
+
+function parseWorkflowJson(raw: unknown): WorkflowRuntimeModel {
+  const parsed = workflowJsonSchema.safeParse(raw);
+  if (!parsed.success) {
+    return normalizeWorkflowRuntimeModel({});
+  }
+  return normalizeWorkflowRuntimeModel({
+    order: parsed.data.order,
+    initialStatus: parsed.data.initialStatus,
+    states: parsed.data.states,
+    semantics: parsed.data.semantics as Record<string, unknown> | undefined,
+    actorModel: parsed.data.actorModel as Record<string, unknown> | undefined
+  });
+}
+
 function parseTemplateJson(raw: unknown): TemplateJson {
-  return templateJsonSchema.parse(raw);
+  const parsed = templateJsonSchema.parse(raw) as any;
+  return {
+    ...parsed,
+    controls: parsed.controls ?? {},
+    actions: parsed.actions ?? {}
+  };
 }
 
 function buildActionRuntimeTemplateContext(templateJson: TemplateJson) {
@@ -334,10 +516,14 @@ function parseTemplateEditorJson(raw: string) {
 
   const validated = templateEditorJsonSchema.safeParse(parsed);
   if (!validated.success) {
-    throw new Error('template_json must contain fields, layout, workflow.initial, workflow.states, controls, actions');
+    throw new Error('template_json must contain at least fields and layout');
   }
 
-  return validated.data;
+  return {
+    ...validated.data,
+    controls: validated.data.controls ?? {},
+    actions: validated.data.actions ?? {}
+  };
 }
 
 function parseOptionalJsonField(raw: string | undefined, fieldName: string) {
@@ -348,6 +534,78 @@ function parseOptionalJsonField(raw: string | undefined, fieldName: string) {
   } catch {
     throw new Error(`${fieldName} must be valid JSON`);
   }
+}
+
+function collectTemplateWarnings(templateJson: unknown) {
+  const warnings: string[] = [];
+  const root = templateJson && typeof templateJson === 'object' && !Array.isArray(templateJson)
+    ? (templateJson as Record<string, unknown>)
+    : {};
+  if (root.fieldAccess && typeof root.fieldAccess === 'object') {
+    warnings.push('template_json.fieldAccess is legacy. Field editability should come from the referenced workflow.');
+  }
+  if (root.workflow && typeof root.workflow === 'object') {
+    warnings.push('template_json.workflow is legacy. Use template.workflowRef + workflow definitions instead.');
+  }
+  if (root.controls && typeof root.controls === 'object') {
+    warnings.push('template_json.controls is legacy. Standard process buttons come from the workflow.');
+  }
+  const fields = root.fields && typeof root.fields === 'object' ? (root.fields as Record<string, unknown>) : {};
+  for (const [fieldKey, fieldValue] of Object.entries(fields)) {
+    if (!fieldValue || typeof fieldValue !== 'object' || Array.isArray(fieldValue)) continue;
+    const field = fieldValue as Record<string, unknown>;
+    if (field.kind === 'lookup' && !field.apiRef && (field.source || field.lookup)) {
+      warnings.push(`lookup field "${fieldKey}" uses legacy source config. Prefer apiRef.`);
+    }
+  }
+  const usage = extractTemplateUsage(root);
+  if (usage.macroRefs.length > 0) {
+    warnings.push(`legacy macro refs detected: ${usage.macroRefs.join(', ')}`);
+  }
+  return warnings;
+}
+
+function buildApiTestExample(requestSchemaJson: unknown) {
+  if (!requestSchemaJson || typeof requestSchemaJson !== 'object' || Array.isArray(requestSchemaJson)) return '{}';
+  const schema = requestSchemaJson as Record<string, unknown>;
+  const source = (schema.body ?? schema.query) as Record<string, unknown> | undefined;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return '{}';
+  const example = Object.fromEntries(
+    Object.keys(source).map((key) => [key, key.endsWith('_id') ? '00000000-0000-0000-0000-000000000000' : ''])
+  );
+  return JSON.stringify(example, null, 2);
+}
+
+function normalizeMacroKind(raw: unknown): 'json' | 'builtin' {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase() === 'builtin'
+    ? 'builtin'
+    : 'json';
+}
+
+function normalizeApiState(raw: unknown): 'active' | 'inactive' {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase() === 'inactive'
+    ? 'inactive'
+    : 'active';
+}
+
+function normalizeApiMethod(raw: unknown): 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' {
+  const method = String(raw ?? '')
+    .trim()
+    .toUpperCase();
+  if (method === 'GET' || method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+    return method;
+  }
+  return 'GET';
+}
+
+function isMissingRelationError(error: unknown, relationName: string) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const code = typeof error === 'object' && error !== null ? String((error as { code?: unknown }).code ?? '') : '';
+  return code === '42P01' || message.toLowerCase().includes(`relation "${relationName}" does not exist`);
 }
 
 function buildUserCookie(userId: string) {
@@ -489,25 +747,210 @@ function collectLayoutButtonKinds(templateJson: TemplateJson) {
   return byControlKey;
 }
 
-function normalizeActionSteps(actionDef: unknown): Array<Record<string, unknown>> {
-  if (!actionDef || typeof actionDef !== 'object') return [];
-  const def = actionDef as Record<string, unknown>;
-  const nestedSteps = def.steps;
-  if (Array.isArray(nestedSteps)) {
-    return nestedSteps.filter((step): step is Record<string, unknown> => !!step && typeof step === 'object');
+function resolveActionInvocation(params: {
+  source: string;
+  layoutButtonKind?: LayoutButtonKind;
+  isLayoutButtonAction: boolean;
+}) {
+  const isUiButtonRequest = params.source === 'ui';
+  if (!isUiButtonRequest) {
+    return { executionSource: 'process' as const };
   }
-  return [def];
+
+  if (!params.layoutButtonKind) {
+    return { error: 'UI button is not configured in layout.' };
+  }
+
+  if (params.layoutButtonKind !== 'ui') {
+    return { error: 'UI button cannot execute process action' };
+  }
+
+  return { executionSource: 'ui' as const };
 }
 
-function isUiSafeActionDefinition(actionDef: unknown) {
-  const steps = normalizeActionSteps(actionDef);
-  if (steps.length === 0) return false;
+function collectTemplateMacroRefs(templateJson: TemplateJson): string[] {
+  return extractTemplateUsage(templateJson).macroRefs;
+}
 
-  for (const step of steps) {
-    if (step.type !== 'macro') return false;
+function collectTemplateActionUsage(templateJson: TemplateJson) {
+  return extractTemplateUsage(templateJson).actions.map((item) => ({
+    actionKey: item.actionKey,
+    actionType: item.actionType,
+    stepTypes: item.stepTypes,
+    apiRefs: item.apiRefs,
+    legacyMacro: item.hasLegacyMacro
+  }));
+}
+
+function safeCollectTemplateActionUsage(rawTemplateJson: unknown) {
+  try {
+    return collectTemplateActionUsage(parseTemplateJson(rawTemplateJson));
+  } catch {
+    return [] as ReturnType<typeof collectTemplateActionUsage>;
+  }
+}
+
+async function syncTemplateMacroRefs(
+  db: FpDb,
+  templateId: string,
+  templateJson: TemplateJson,
+  logger?: FastifyRequest['log']
+) {
+  const macroRefs = collectTemplateMacroRefs(templateJson);
+  const canWriteLinks = typeof (db as any).delete === 'function' && typeof (db as any).insert === 'function';
+  let syncedCount = 0;
+
+  if (canWriteLinks) {
+    try {
+      await db.delete(fpTemplateMacros).where(eq(fpTemplateMacros.templateId, templateId));
+      if (macroRefs.length > 0) {
+        await db
+          .insert(fpTemplateMacros)
+          .values(macroRefs.map((macroRef) => ({ templateId, macroRef })))
+          .onConflictDoNothing({ target: [fpTemplateMacros.templateId, fpTemplateMacros.macroRef] });
+        syncedCount = macroRefs.length;
+      }
+    } catch (error) {
+      logger?.warn({ templateId, error }, 'Template macro refs sync skipped (table unavailable?)');
+    }
   }
 
-  return true;
+  logger?.info(
+    { templateId, macroRefs, syncedCount },
+    'Template macro refs synchronized'
+  );
+
+  return { macroRefs, syncedCount };
+}
+
+async function loadTemplateMacroUsageView(db: FpDb, templateId: string) {
+  let links: Array<{ macroRef: string; linkedAt: Date }> = [];
+  try {
+    links = await db
+      .select({
+        macroRef: fpTemplateMacros.macroRef,
+        linkedAt: fpTemplateMacros.createdAt
+      })
+      .from(fpTemplateMacros)
+      .where(eq(fpTemplateMacros.templateId, templateId))
+      .orderBy(asc(fpTemplateMacros.macroRef));
+  } catch {
+    return { usedMacros: [] as Array<Record<string, unknown>>, missingMacroRefs: [] as string[] };
+  }
+
+  const refs = links.map((item) => item.macroRef);
+  if (refs.length === 0) {
+    return { usedMacros: [] as Array<Record<string, unknown>>, missingMacroRefs: [] as string[] };
+  }
+
+  const macroRows = await db
+    .select({
+      ref: fpMacros.ref,
+      namespace: fpMacros.namespace,
+      name: fpMacros.name,
+      version: fpMacros.version,
+      kind: fpMacros.kind,
+      isEnabled: fpMacros.isEnabled
+    })
+    .from(fpMacros)
+    .where(inArray(fpMacros.ref, refs));
+  const macroByRef = new Map(macroRows.map((item) => [item.ref, item]));
+
+  const usedMacros = links.map((link) => {
+    const macro = macroByRef.get(link.macroRef);
+    return {
+      ref: link.macroRef,
+      name: macro?.name ?? null,
+      kind: macro?.kind ?? null,
+      isEnabled: macro?.isEnabled ?? null,
+      exists: !!macro
+    };
+  });
+  const missingMacroRefs = usedMacros.filter((item) => !item.exists).map((item) => String(item.ref));
+
+  return { usedMacros, missingMacroRefs };
+}
+
+function collectApiRefsFromTemplateJson(templateJson: unknown) {
+  return extractTemplateUsage(templateJson).apiRefs;
+}
+
+function normalizeApiRefCandidates(input: string) {
+  const raw = String(input ?? '').trim();
+  if (!raw) return [];
+  const values = new Set<string>();
+  values.add(raw);
+  if (raw.startsWith('api:')) values.add(raw.slice('api:'.length));
+  values.add(raw.replace(/@\d+$/, ''));
+  if (raw.startsWith('api:')) values.add(raw.slice('api:'.length).replace(/@\d+$/, ''));
+  return Array.from(values).filter((item) => item.length > 0);
+}
+
+async function loadTemplatesUsingApi(db: FpDb, apiKey: string) {
+  const candidates = new Set<string>([apiKey, `api:${apiKey}`]);
+  const templates = await db
+    .select({
+      id: fpTemplates.id,
+      key: fpTemplates.key,
+      name: fpTemplates.name,
+      version: fpTemplates.version,
+      state: fpTemplates.state,
+      templateJson: fpTemplates.templateJson
+    })
+    .from(fpTemplates)
+    .orderBy(asc(fpTemplates.name), desc(fpTemplates.version));
+
+  const usedIn: Array<{ id: string; key: string; name: string; version: number; state: string }> = [];
+  for (const tpl of templates) {
+    const refs = collectApiRefsFromTemplateJson(tpl.templateJson);
+    const refCandidates = refs.flatMap((ref) => normalizeApiRefCandidates(ref));
+    const match = refCandidates.some((ref) => candidates.has(ref));
+    if (!match) continue;
+    usedIn.push({
+      id: tpl.id,
+      key: tpl.key,
+      name: tpl.name,
+      version: tpl.version,
+      state: tpl.state
+    });
+  }
+  return usedIn;
+}
+
+async function loadTemplateApiUsageView(db: FpDb, template: { templateJson: unknown }) {
+  const refs = collectApiRefsFromTemplateJson(template.templateJson).sort((a, b) => a.localeCompare(b));
+  if (refs.length === 0) {
+    return { usedApis: [] as Array<{ ref: string; key: string | null; name: string | null; state: string | null; exists: boolean }>, missingApiRefs: [] as string[] };
+  }
+
+  const directKeys = refs.flatMap((item) => normalizeApiRefCandidates(item));
+  const uniqueKeys = Array.from(new Set(directKeys));
+  const rows = uniqueKeys.length
+    ? await db
+        .select({
+          key: fpApis.key,
+          name: fpApis.name,
+          state: fpApis.state
+        })
+        .from(fpApis)
+        .where(inArray(fpApis.key, uniqueKeys))
+    : [];
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+
+  const usedApis = refs.map((ref) => {
+    const match = normalizeApiRefCandidates(ref)
+      .map((candidate) => byKey.get(candidate))
+      .find(Boolean);
+    return {
+      ref,
+      key: match?.key ?? null,
+      name: match?.name ?? null,
+      state: match?.state ?? null,
+      exists: !!match
+    };
+  });
+  const missingApiRefs = usedApis.filter((item) => !item.exists).map((item) => item.ref);
+  return { usedApis, missingApiRefs };
 }
 
 async function loadTemplateAssignmentView(db: FpDb, templateId: string) {
@@ -713,6 +1156,8 @@ function collectExternalRefsFromQuery(query: Record<string, unknown>) {
 
 function resolveLookupFieldNames(field: TemplateField) {
   const valueField =
+    (field as any).valueField ??
+    (field as any).valueKey ??
     field.source?.valueField ??
     field.source?.valueKey ??
     field.lookup?.valueField ??
@@ -720,6 +1165,8 @@ function resolveLookupFieldNames(field: TemplateField) {
     'id';
 
   const labelField =
+    (field as any).labelField ??
+    (field as any).labelKey ??
     field.source?.labelField ??
     field.source?.labelKey ??
     field.lookup?.labelField ??
@@ -798,9 +1245,34 @@ function allEditableFieldKeys(templateJson: TemplateJson) {
     .map(([key]) => key);
 }
 
-export function resolveEditableFieldKeys(templateJson: TemplateJson, status: string): string[] {
+function resolveTemplateFieldAccessState(templateJson: TemplateJson, status: string) {
+  const normalized = normalizeDocumentStatus(status);
+  const fromFieldAccess =
+    (templateJson as any).fieldAccess && typeof (templateJson as any).fieldAccess === 'object'
+      ? (templateJson as any).fieldAccess[normalized]
+      : undefined;
+  if (fromFieldAccess && typeof fromFieldAccess === 'object') return fromFieldAccess as Record<string, unknown>;
+  const legacyWorkflowState = (templateJson as any).workflow?.states?.[normalized];
+  if (legacyWorkflowState && typeof legacyWorkflowState === 'object') return legacyWorkflowState as Record<string, unknown>;
+  return {};
+}
+
+function resolveWorkflowFieldAccessState(workflowRuntime: WorkflowRuntimeModel | undefined, status: string) {
+  if (!workflowRuntime) return {} as Record<string, unknown>;
+  const normalized = normalizeDocumentStatus(status);
+  const state = workflowRuntime.states?.[normalized] as Record<string, unknown> | undefined;
+  if (!state || typeof state !== 'object') return {} as Record<string, unknown>;
+  return state;
+}
+
+export function resolveEditableFieldKeys(
+  templateJson: TemplateJson,
+  status: string,
+  workflowRuntime?: WorkflowRuntimeModel
+): string[] {
   const fallback = allEditableFieldKeys(templateJson);
-  const state = (templateJson.workflow as any)?.states?.[status];
+  const workflowState = resolveWorkflowFieldAccessState(workflowRuntime, status);
+  const state = Object.keys(workflowState).length > 0 ? workflowState : resolveTemplateFieldAccessState(templateJson, status);
   const configured = Array.isArray(state?.editable) ? state.editable : undefined;
   if (!configured) return fallback;
 
@@ -831,8 +1303,9 @@ export function applyEditableDataUpdate(
   return next;
 }
 
-function resolveReadonlyFieldKeys(templateJson: TemplateJson, status: string): string[] {
-  const state = (templateJson.workflow as any)?.states?.[status];
+function resolveReadonlyFieldKeys(templateJson: TemplateJson, status: string, workflowRuntime?: WorkflowRuntimeModel): string[] {
+  const workflowState = resolveWorkflowFieldAccessState(workflowRuntime, status);
+  const state = Object.keys(workflowState).length > 0 ? workflowState : resolveTemplateFieldAccessState(templateJson, status);
   const readonly = Array.isArray(state?.readonly) ? state.readonly : [];
   return readonly.filter((key: unknown): key is string => typeof key === 'string');
 }
@@ -846,35 +1319,29 @@ function snapshotPreviewList(snapshotsJson: unknown) {
 }
 
 function resolveWorkflowTimeline(templateJson: TemplateJson, currentStatus: string) {
-  const workflow = (templateJson.workflow ?? {}) as Record<string, unknown>;
-  const rawOrder = workflow.order;
-  const states = (workflow.states ?? {}) as Record<string, unknown>;
-  const fromOrder = Array.isArray(rawOrder)
-    ? rawOrder.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-    : [];
-  const fallback = Object.keys(states);
-  const ordered = fromOrder.length > 0 ? fromOrder : fallback;
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-  for (const state of ordered) {
-    const normalized = state.trim().toLowerCase();
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    deduped.push(state);
+  const states = (templateJson.workflow?.states ?? {}) as Record<string, unknown>;
+  const configured = DOCUMENT_WORKFLOW_ORDER.filter((status) => {
+    const stateDef = states[status];
+    if (!stateDef || typeof stateDef !== 'object' || Array.isArray(stateDef)) return false;
+    const record = stateDef as Record<string, unknown>;
+    return (
+      (Array.isArray(record.buttons) && record.buttons.length > 0) ||
+      (Array.isArray(record.editable) && record.editable.length > 0) ||
+      (Array.isArray(record.readonly) && record.readonly.length > 0)
+    );
+  });
+  const ordered = configured.length > 0 ? configured : [...DOCUMENT_WORKFLOW_ORDER];
+  const current = normalizeDocumentStatus(currentStatus);
+  if (current === 'archived' && !ordered.includes('archived')) {
+    return [...ordered, 'archived'];
   }
-
-  const currentNormalized = currentStatus.trim().toLowerCase();
-  const hasCurrent = currentNormalized.length > 0 && deduped.some((state) => state.trim().toLowerCase() === currentNormalized);
-  if (currentStatus && !hasCurrent) {
-    deduped.push(currentStatus);
-  }
-
-  return deduped;
+  return ordered;
 }
 
 async function renderDocumentDetailPage(params: {
   db: FpDb;
   hasDocumentActorColumns: boolean;
+  hasDocumentMultiAssignments: boolean;
   reply: FastifyReply;
   template: { id: string; key: string; name: string; templateJson: unknown };
   document: {
@@ -890,17 +1357,35 @@ async function renderDocumentDetailPage(params: {
   };
   assignmentGroupId?: string | null;
   groupName?: string | null;
+  workflowRuntime: WorkflowRuntimeModel;
   errorMessage?: string;
   successMessage?: string;
+  assignmentsOpen?: boolean;
 }) {
   const templateJson = parseTemplateJson(params.template.templateJson);
-  const stateDef = (templateJson.workflow as any)?.states?.[params.document.status] ?? {};
-  const editableKeys = resolveEditableFieldKeys(templateJson, params.document.status);
-  const readonlyKeys = resolveReadonlyFieldKeys(templateJson, params.document.status);
-  const buttonKeys = Array.isArray(stateDef?.buttons)
+  const normalizedDocumentStatus = normalizeDocumentStatus(params.document.status);
+  const stateDef = params.workflowRuntime.states?.[normalizedDocumentStatus] ?? {};
+  const archived = isArchivedDocumentStatus(normalizedDocumentStatus);
+  const editableKeys = archived ? [] : resolveEditableFieldKeys(templateJson, normalizedDocumentStatus, params.workflowRuntime);
+  const readonlyKeys = archived
+    ? Object.keys(templateJson.fields ?? {})
+    : resolveReadonlyFieldKeys(templateJson, normalizedDocumentStatus, params.workflowRuntime);
+  const buttonKeys = isArchivedDocumentStatus(normalizedDocumentStatus)
+    ? []
+    : Array.isArray(stateDef?.buttons)
     ? stateDef.buttons.filter((key: unknown): key is string => typeof key === 'string')
     : [];
-  const workflowTimeline = resolveWorkflowTimeline(templateJson, params.document.status);
+  const processButtons = buttonKeys.map((key) => ({
+    key,
+    label: resolveProcessButtonLabel(key, templateJson)
+  }));
+  const workflowTimeline = (() => {
+    const order = Array.isArray(params.workflowRuntime.order) && params.workflowRuntime.order.length > 0
+      ? params.workflowRuntime.order
+      : [...DOCUMENT_WORKFLOW_ORDER];
+    if (normalizedDocumentStatus === 'archived' && !order.includes('archived')) return [...order, 'archived'];
+    return order;
+  })();
   const dataJsonForRender = {
     ...((params.document.dataJson ?? {}) as Record<string, unknown>),
     ...(params.document.editorUserId
@@ -915,7 +1400,7 @@ async function renderDocumentDetailPage(params: {
     templateJson,
     templateId: params.template.id,
     documentId: params.document.id,
-    documentStatus: params.document.status,
+    documentStatus: normalizedDocumentStatus,
     dataJson: dataJsonForRender,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
     snapshotsJson: (params.document.snapshotsJson ?? {}) as Record<string, unknown>,
@@ -928,8 +1413,16 @@ async function renderDocumentDetailPage(params: {
   let assignmentApproverCandidates: Array<{ id: string; name: string; username: string }> = [];
   let assignmentEditorName = '—';
   let assignmentApproverName = '—';
+  let assignedEditors: Array<{ id: string; name: string; username: string }> = [];
+  let assignedEditorsDetailed: Array<{ id: string; name: string; username: string; submissionStatus: string; submittedAt?: Date | null }> = [];
+  let assignedApprovers: Array<{ id: string; name: string; username: string; approvalStatus: string; decidedAt?: Date | null }> = [];
   let assignmentEditorHint = '';
   let assignmentApproverHint = '';
+  const useMultiAssignments =
+    params.hasDocumentMultiAssignments &&
+    typeof (params.db as any).query?.fpDocumentEditors?.findMany === 'function' &&
+    typeof (params.db as any).query?.fpDocumentApprovals?.findMany === 'function' &&
+    typeof (params.db as any).query?.fpDocumentSubmissions?.findMany === 'function';
   if (params.hasDocumentActorColumns && params.assignmentGroupId && typeof (params.db as any).select === 'function') {
     const members = await params.db
       .select({
@@ -960,13 +1453,40 @@ async function renderDocumentDetailPage(params: {
       assignmentApproverHint = 'No eligible users with execute rights';
     }
     const membersById = new Map(assignmentMembers.map((item) => [item.id, item]));
-    if (params.document.editorUserId) {
-      const editor = membersById.get(params.document.editorUserId);
-      assignmentEditorName = editor ? editor.name : params.document.editorUserId;
-    }
-    if (params.document.approverUserId) {
-      const approver = membersById.get(params.document.approverUserId);
-      assignmentApproverName = approver ? approver.name : params.document.approverUserId;
+    if (useMultiAssignments) {
+      const editorRows = await (params.db as any).query.fpDocumentEditors.findMany({
+        where: eq(fpDocumentEditors.documentId, params.document.id)
+      });
+      const submissionRows = await loadEditorSubmissionStates(params.db, params.document.id);
+      const approvalRows = await loadApproverDecisionStates(params.db, params.document.id);
+      assignedEditors = editorRows.map((row: { userId: string }) => {
+        const member = membersById.get(row.userId);
+        return member ?? { id: row.userId, name: row.userId, username: row.userId };
+      });
+      assignedEditorsDetailed = assignedEditors.map((member) => {
+        const submission = submissionRows.find((row) => row.userId === member.id);
+        return {
+          ...member,
+          submissionStatus: submission?.status ?? 'pending',
+          submittedAt: submission?.submittedAt ?? null
+        };
+      });
+      assignedApprovers = approvalRows.map((row: { userId: string; status: string; decidedAt?: Date | null }) => {
+        const member = membersById.get(row.userId);
+        const base = member ?? { id: row.userId, name: row.userId, username: row.userId };
+        return { ...base, approvalStatus: row.status, decidedAt: row.decidedAt ?? null };
+      });
+      assignmentEditorName = assignedEditors.length > 0 ? assignedEditors.map((item) => item.name).join(', ') : '—';
+      assignmentApproverName = assignedApprovers.length > 0 ? assignedApprovers.map((item) => item.name).join(', ') : '—';
+    } else {
+      if (params.document.editorUserId) {
+        const editor = membersById.get(params.document.editorUserId);
+        assignmentEditorName = editor ? editor.name : params.document.editorUserId;
+      }
+      if (params.document.approverUserId) {
+        const approver = membersById.get(params.document.approverUserId);
+        assignmentApproverName = approver ? approver.name : params.document.approverUserId;
+      }
     }
   } else {
     if (params.document.editorUserId) assignmentEditorName = params.document.editorUserId;
@@ -976,22 +1496,34 @@ async function renderDocumentDetailPage(params: {
   await params.reply.renderPage('documents/detail.ejs', {
     template: params.template,
     templateJson,
+    workflowRuntime: params.workflowRuntime,
     layoutHtml,
     workflowTimeline,
-    buttonKeys,
+    processButtons,
     groupName: params.groupName ?? null,
     assignmentGroupId: params.assignmentGroupId ?? null,
     hasDocumentActorColumns: params.hasDocumentActorColumns,
     assignmentMembers,
     assignmentEditorCandidates,
     assignmentApproverCandidates,
+    assignedEditors,
+    assignedEditorsDetailed,
+    assignedApprovers,
+    useMultiAssignments,
     assignmentEditorName,
     assignmentApproverName,
     assignmentEditorHint,
     assignmentApproverHint,
+    assignmentsOpen: params.assignmentsOpen ?? false,
     errorMessage: params.errorMessage,
     successMessage: params.successMessage,
-    document: params.document,
+    workflowEvaluation: evaluateWorkflow({
+      workflow: params.workflowRuntime,
+      status: normalizedDocumentStatus,
+      editorSubmissions: useMultiAssignments ? await loadEditorSubmissionStates(params.db, params.document.id) : [],
+      approverDecisions: useMultiAssignments ? await loadApproverDecisionStates(params.db, params.document.id) : []
+    }),
+    document: { ...params.document, status: normalizedDocumentStatus },
     dataJson: dataJsonForRender,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
     snapshotsJson: (params.document.snapshotsJson ?? {}) as Record<string, unknown>
@@ -999,8 +1531,9 @@ async function renderDocumentDetailPage(params: {
 }
 
 function classifyStatusBucket(status: string): 'Open' | 'In Progress' | 'Done' {
-  const normalized = status.trim().toLowerCase();
+  const normalized = normalizeDocumentStatus(status);
   if (normalized === 'approved') return 'Done';
+  if (normalized === 'archived') return 'Done';
   if (normalized === 'assigned' || normalized === 'submitted') return 'In Progress';
   if (normalized === 'created') return 'Open';
   return 'Open';
@@ -1011,16 +1544,16 @@ function resolveTaskStateForUser(params: {
   status: string;
   rights: string;
 }): 'open' | 'waiting' | 'done' {
-  const normalizedStatus = params.status.trim().toLowerCase();
+  const normalizedStatus = normalizeDocumentStatus(params.status);
   const rights = params.rights ?? '';
 
   if (params.role === 'Editor') {
-    if (normalizedStatus === 'submitted' || normalizedStatus === 'approved') return 'done';
-    if (normalizedStatus === 'assigned' && rights.includes('w')) return 'open';
+    if (normalizedStatus === 'submitted' || normalizedStatus === 'approved' || normalizedStatus === 'archived') return 'done';
+    if ((normalizedStatus === 'created' || normalizedStatus === 'assigned') && rights.includes('w')) return 'open';
     return 'waiting';
   }
 
-  if (normalizedStatus === 'approved') return 'done';
+  if (normalizedStatus === 'approved' || normalizedStatus === 'archived') return 'done';
   if (normalizedStatus === 'submitted' && rights.includes('x')) return 'open';
   return 'waiting';
 }
@@ -1057,6 +1590,122 @@ async function resolveDocumentRbacGroupId(
   if (document.groupId) return document.groupId;
   const assignment = await resolveTemplateAssignmentContext(db, document.templateId);
   return assignment.chosenGroupId;
+}
+
+function buildLegacyWorkflowRuntime(templateJson: TemplateJson): WorkflowRuntimeModel {
+  const legacy = (templateJson as any).workflow;
+  const order =
+    legacy && Array.isArray(legacy.order) && legacy.order.length > 0
+      ? legacy.order
+          .filter((item: unknown): item is string => typeof item === 'string')
+          .map((item: string) => normalizeDocumentStatus(item))
+      : [...DOCUMENT_WORKFLOW_ORDER, 'archived'];
+  const initialStatus = DOCUMENT_WORKFLOW_INITIAL;
+  const legacyStates = legacy && legacy.states && typeof legacy.states === 'object' ? legacy.states : {};
+  const states = Object.entries(legacyStates).reduce(
+    (acc, [key, value]) => {
+      const normalizedKey = normalizeDocumentStatus(key);
+      const buttons =
+        value && typeof value === 'object' && Array.isArray((value as any).buttons)
+          ? (value as any).buttons.filter((x: unknown): x is string => typeof x === 'string')
+          : [];
+      const editable =
+        value && typeof value === 'object' && Array.isArray((value as any).editable)
+          ? (value as any).editable.filter((x: unknown): x is string => typeof x === 'string')
+          : [];
+      const readonly =
+        value && typeof value === 'object' && Array.isArray((value as any).readonly)
+          ? (value as any).readonly.filter((x: unknown): x is string => typeof x === 'string')
+          : [];
+      const existing = acc[normalizedKey]?.buttons ?? [];
+      acc[normalizedKey] = { buttons: Array.from(new Set([...existing, ...buttons])), editable, readonly };
+      return acc;
+    },
+    {} as Record<string, { buttons: string[]; editable?: string[]; readonly?: string[] }>
+  );
+  return {
+    ref: 'legacy/template-workflow',
+    name: 'Legacy Template Workflow',
+    order,
+    initialStatus,
+    states,
+    semantics: {},
+    actorModel: {}
+  };
+}
+
+async function loadWorkflowRuntimeForTemplate(
+  db: FpDb,
+  template: { workflowRef?: string | null; templateJson: unknown }
+): Promise<WorkflowRuntimeModel> {
+  const workflowRef = String((template as any).workflowRef ?? '').trim();
+  const templateJson = parseTemplateJson(template.templateJson);
+  if (!workflowRef) {
+    return buildLegacyWorkflowRuntime(templateJson);
+  }
+  let rows: Array<{
+    id: string;
+    key: string;
+    name: string;
+    state: string;
+    version: number;
+    workflowJson: unknown;
+  }> = [];
+  try {
+    rows = await db
+      .select({
+        id: fpWorkflows.id,
+        key: fpWorkflows.key,
+        name: fpWorkflows.name,
+        state: fpWorkflows.state,
+        version: fpWorkflows.version,
+        workflowJson: fpWorkflows.workflowJson
+      })
+      .from(fpWorkflows)
+      .where(and(eq(fpWorkflows.key, workflowRef), sql`lower(${fpWorkflows.state}) in ('active', 'published')`))
+      .orderBy(desc(fpWorkflows.version))
+      .limit(1);
+  } catch {
+    return buildLegacyWorkflowRuntime(templateJson);
+  }
+  const row = rows[0];
+  if (!row) {
+    return buildLegacyWorkflowRuntime(templateJson);
+  }
+  const parsed = parseWorkflowJson(row.workflowJson);
+  return {
+    ...parsed,
+    ref: row.key,
+    name: row.name
+  };
+}
+
+async function loadEditorSubmissionStates(db: FpDb, documentId: string): Promise<EditorSubmissionState[]> {
+  if (typeof (db as any).query?.fpDocumentSubmissions?.findMany === 'function') {
+    const rows = await (db as any).query.fpDocumentSubmissions.findMany({
+      where: eq(fpDocumentSubmissions.documentId, documentId)
+    });
+    return rows.map((row: any) => ({
+      userId: row.userId,
+      status: row.status === 'submitted' ? 'submitted' : 'pending',
+      submittedAt: row.submittedAt ?? null
+    }));
+  }
+  return [];
+}
+
+async function loadApproverDecisionStates(db: FpDb, documentId: string): Promise<ApproverDecisionState[]> {
+  if (typeof (db as any).query?.fpDocumentApprovals?.findMany === 'function') {
+    const rows = await (db as any).query.fpDocumentApprovals.findMany({
+      where: eq(fpDocumentApprovals.documentId, documentId)
+    });
+    return rows.map((row: any) => ({
+      userId: row.userId,
+      status: row.status === 'approved' || row.status === 'rejected' ? row.status : 'pending',
+      decidedAt: row.decidedAt ?? row.approvedAt ?? null
+    }));
+  }
+  return [];
 }
 
 async function loadDocumentById(db: FpDb, id: string, withActorColumns: boolean, withTemplateVersion: boolean) {
@@ -1154,7 +1803,18 @@ async function fetchErpCollection(params: {
 }
 
 export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
-  const { db, erpBaseUrl, hasDocumentActorColumns = true, hasDocumentTemplateVersion = true } = opts;
+  const {
+    db,
+    erpBaseUrl,
+    hasDocumentActorColumns = true,
+    hasDocumentTemplateVersion = true,
+    hasDocumentMultiAssignments = true
+  } = opts;
+  const supportsMultiAssignments =
+    hasDocumentMultiAssignments &&
+    typeof (db as any).query?.fpDocumentEditors?.findMany === 'function' &&
+    typeof (db as any).query?.fpDocumentApprovals?.findMany === 'function' &&
+    typeof (db as any).query?.fpDocumentSubmissions?.findMany === 'function';
 
   app.get('/', async (_req, reply) => {
     return reply.redirect('/templates');
@@ -1702,8 +2362,49 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     return reply.redirect('/admin/rbac');
   });
 
-  app.get('/macros', async (_request, reply) => {
-    const macros = await db
+  app.get('/macros', async (request, reply) => {
+    const parsedQuery = macroListQuerySchema.safeParse(request.query);
+    const selectedTemplateId = parsedQuery.success ? parsedQuery.data.templateId ?? '' : '';
+    const selectedTemplateStateRaw = parsedQuery.success ? parsedQuery.data.templateState ?? 'all' : 'all';
+    const selectedTemplateState = selectedTemplateStateRaw === 'archived' ? 'inactive' : selectedTemplateStateRaw;
+
+    const templateOptions = await db
+      .select({
+        id: fpTemplates.id,
+        key: fpTemplates.key,
+        name: fpTemplates.name,
+        version: fpTemplates.version,
+        state: fpTemplates.state
+      })
+      .from(fpTemplates)
+      .orderBy(asc(fpTemplates.name), desc(fpTemplates.version));
+
+    const whereClauses: any[] = [];
+    if (selectedTemplateId) whereClauses.push(eq(fpTemplateMacros.templateId, selectedTemplateId));
+    if (selectedTemplateState !== 'all') {
+      if (selectedTemplateState === 'inactive') {
+        whereClauses.push(sql`lower(${fpTemplates.state}) in ('inactive', 'archived')`);
+      } else {
+        whereClauses.push(sql`lower(${fpTemplates.state}) = ${selectedTemplateState}`);
+      }
+    }
+
+    const filterActive = whereClauses.length > 0;
+    let linkedMacroRows: Array<{ macroRef: string }> = [];
+    if (filterActive) {
+      try {
+        linkedMacroRows = await db
+          .select({ macroRef: fpTemplateMacros.macroRef })
+          .from(fpTemplateMacros)
+          .innerJoin(fpTemplates, eq(fpTemplates.id, fpTemplateMacros.templateId))
+          .where(whereClauses.length > 1 ? and(...whereClauses) : whereClauses[0]);
+      } catch {
+        linkedMacroRows = [];
+      }
+    }
+    const filteredMacroRefs = Array.from(new Set(linkedMacroRows.map((item) => item.macroRef)));
+
+    const macroSelect = db
       .select({
         ref: fpMacros.ref,
         namespace: fpMacros.namespace,
@@ -1713,10 +2414,22 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         kind: fpMacros.kind,
         description: fpMacros.description
       })
-      .from(fpMacros)
-      .orderBy(asc(fpMacros.namespace), asc(fpMacros.name), desc(fpMacros.version));
+      .from(fpMacros);
+    const macros =
+      filterActive && filteredMacroRefs.length === 0
+        ? []
+        : await (
+            filterActive
+              ? macroSelect.where(inArray(fpMacros.ref, filteredMacroRefs))
+              : macroSelect
+          ).orderBy(asc(fpMacros.namespace), asc(fpMacros.name), desc(fpMacros.version));
 
-    await reply.renderPage('macros/list.ejs', { macros });
+    await reply.renderPage('macros/list.ejs', {
+      macros: macros.map((macro) => ({ ...macro, kind: normalizeMacroKind(macro.kind) })),
+      templateOptions,
+      selectedTemplateId,
+      selectedTemplateState
+    });
   });
 
   app.get('/macros/new', async (_request, reply) => {
@@ -1731,8 +2444,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         enabled: true,
         kind: 'json',
         params_schema_json: '',
-        definition_json: '',
-        code_text: ''
+        definition_json: ''
       }
     });
   });
@@ -1748,8 +2460,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
       kind: getFormString(form, 'kind') || 'json',
       paramsSchemaJsonText: getFormString(form, 'params_schema_json'),
-      definitionJsonText: getFormString(form, 'definition_json'),
-      codeText: getFormString(form, 'code_text')
+      definitionJsonText: getFormString(form, 'definition_json')
     });
 
     if (!parsed.success) {
@@ -1764,8 +2475,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
           kind: getFormString(form, 'kind') || 'json',
           params_schema_json: getFormString(form, 'params_schema_json'),
-          definition_json: getFormString(form, 'definition_json'),
-          code_text: getFormString(form, 'code_text')
+          definition_json: getFormString(form, 'definition_json')
         }
       });
     }
@@ -1785,8 +2495,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
             enabled: parsed.data.enabled,
             kind: parsed.data.kind,
             params_schema_json: parsed.data.paramsSchemaJsonText ?? '',
-            definition_json: parsed.data.definitionJsonText ?? '',
-            code_text: parsed.data.codeText ?? ''
+            definition_json: parsed.data.definitionJsonText ?? ''
           }
         });
       }
@@ -1801,7 +2510,6 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         isEnabled: parsed.data.enabled,
         paramsSchemaJson,
         definitionJson,
-        codeText: parsed.data.codeText?.trim() || null,
         updatedAt: new Date()
       });
     } catch (error) {
@@ -1817,8 +2525,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
           kind: getFormString(form, 'kind') || 'json',
           params_schema_json: getFormString(form, 'params_schema_json'),
-          definition_json: getFormString(form, 'definition_json'),
-          code_text: getFormString(form, 'code_text')
+          definition_json: getFormString(form, 'definition_json')
         }
       });
     }
@@ -1836,8 +2543,34 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!macro) {
       return reply.status(404).send({ message: 'Macro not found' });
     }
+    let templatesUsingMacro: Array<{
+      templateId: string;
+      templateName: string;
+      templateKey: string;
+      templateVersion: number;
+      templateState: string;
+    }> = [];
+    try {
+      templatesUsingMacro = await db
+        .select({
+          templateId: fpTemplates.id,
+          templateName: fpTemplates.name,
+          templateKey: fpTemplates.key,
+          templateVersion: fpTemplates.version,
+          templateState: fpTemplates.state
+        })
+        .from(fpTemplateMacros)
+        .innerJoin(fpTemplates, eq(fpTemplates.id, fpTemplateMacros.templateId))
+        .where(eq(fpTemplateMacros.macroRef, macro.ref))
+        .orderBy(asc(fpTemplates.name), desc(fpTemplates.version));
+    } catch {
+      templatesUsingMacro = [];
+    }
 
-    await reply.renderPage('macros/detail.ejs', { macro });
+    await reply.renderPage('macros/detail.ejs', {
+      macro: { ...macro, kind: normalizeMacroKind(macro.kind) },
+      templatesUsingMacro
+    });
   });
 
   app.get('/macros/:ref/edit', async (request, reply) => {
@@ -1860,10 +2593,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         version: String(macro.version),
         description: macro.description ?? '',
         enabled: !!macro.isEnabled,
-        kind: macro.kind ?? 'json',
+        kind: normalizeMacroKind(macro.kind),
         params_schema_json: macro.paramsSchemaJson ? JSON.stringify(macro.paramsSchemaJson, null, 2) : '',
-        definition_json: macro.definitionJson ? JSON.stringify(macro.definitionJson, null, 2) : '',
-        code_text: macro.codeText ?? ''
+        definition_json: macro.definitionJson ? JSON.stringify(macro.definitionJson, null, 2) : ''
       }
     });
   });
@@ -1888,8 +2620,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
       kind: getFormString(form, 'kind') || 'json',
       paramsSchemaJsonText: getFormString(form, 'params_schema_json'),
-      definitionJsonText: getFormString(form, 'definition_json'),
-      codeText: getFormString(form, 'code_text')
+      definitionJsonText: getFormString(form, 'definition_json')
     });
 
     if (!parsed.success) {
@@ -1905,8 +2636,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
           kind: getFormString(form, 'kind') || 'json',
           params_schema_json: getFormString(form, 'params_schema_json'),
-          definition_json: getFormString(form, 'definition_json'),
-          code_text: getFormString(form, 'code_text')
+          definition_json: getFormString(form, 'definition_json')
         }
       });
     }
@@ -1927,7 +2657,6 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           isEnabled: parsed.data.enabled,
           paramsSchemaJson,
           definitionJson,
-          codeText: parsed.data.codeText?.trim() || null,
           updatedAt: new Date()
         })
         .where(eq(fpMacros.ref, existing.ref));
@@ -1944,8 +2673,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           enabled: Object.prototype.hasOwnProperty.call(form, 'enabled'),
           kind: getFormString(form, 'kind') || 'json',
           params_schema_json: getFormString(form, 'params_schema_json'),
-          definition_json: getFormString(form, 'definition_json'),
-          code_text: getFormString(form, 'code_text')
+          definition_json: getFormString(form, 'definition_json')
         }
       });
     }
@@ -1954,40 +2682,711 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     return reply.redirect(`/macros/${encodeURIComponent(parsed.data.ref)}/edit`);
   });
 
-  app.get('/templates', async (_req, reply) => {
-    const templates = await db
+  app.get('/apis', async (request, reply) => {
+    const parsedQuery = apiListQuerySchema.safeParse(request.query);
+    const selectedState = parsedQuery.success ? parsedQuery.data.state ?? 'active' : 'active';
+    const whereState = selectedState === 'all' ? undefined : selectedState;
+    try {
+      const rows = await db
+        .select({
+          id: fpApis.id,
+          key: fpApis.key,
+          name: fpApis.name,
+          description: fpApis.description,
+          state: fpApis.state,
+          method: fpApis.method,
+          baseUrl: fpApis.baseUrl,
+          path: fpApis.path,
+          updatedAt: fpApis.updatedAt
+        })
+        .from(fpApis)
+        .where(whereState ? eq(fpApis.state, whereState) : undefined)
+        .orderBy(asc(fpApis.key));
+
+      await reply.renderPage('apis/list.ejs', {
+        apis: rows.map((row) => ({
+          ...row,
+          state: normalizeApiState(row.state),
+          method: normalizeApiMethod(row.method)
+        })),
+        filters: {
+          state: selectedState
+        }
+      });
+    } catch (error) {
+      if (isMissingRelationError(error, 'fp_apis')) {
+        request.log.error(
+          { error },
+          'DB relation fp_apis is missing. Run: cd app && npm run db:push'
+        );
+        return sendUiError(request, reply, 503, 'APIs table is missing. Run: cd app && npm run db:push');
+      }
+      throw error;
+    }
+  });
+
+  app.get('/apis/new', async (_request, reply) => {
+    await reply.renderPage('apis/new.ejs', {
+      errorMessage: '',
+      form: {
+        key: '',
+        name: '',
+        description: '',
+        state: 'active',
+        method: 'GET',
+        base_url: '',
+        path: '',
+        request_schema_json: '',
+        response_schema_json: '',
+        handler_code: ''
+      }
+    });
+  });
+
+  app.post('/apis', async (request, reply) => {
+    const form = toFormRecord(request.body);
+    const parsed = apiFormSchema.safeParse({
+      key: getFormString(form, 'key'),
+      name: getFormString(form, 'name'),
+      description: getFormString(form, 'description'),
+      state: normalizeApiState(getFormString(form, 'state')),
+      method: normalizeApiMethod(getFormString(form, 'method')),
+      baseUrl: getFormString(form, 'base_url'),
+      path: getFormString(form, 'path'),
+      requestSchemaJsonText: getFormString(form, 'request_schema_json'),
+      responseSchemaJsonText: getFormString(form, 'response_schema_json'),
+      handlerCodeText: getFormString(form, 'handler_code')
+    });
+
+    if (!parsed.success) {
+      return reply.status(400).renderPage('apis/new.ejs', {
+        errorMessage: 'Please provide key, name, state, method, base_url and path.',
+        form: {
+          key: getFormString(form, 'key'),
+          name: getFormString(form, 'name'),
+          description: getFormString(form, 'description'),
+          state: normalizeApiState(getFormString(form, 'state')),
+          method: normalizeApiMethod(getFormString(form, 'method')),
+          base_url: getFormString(form, 'base_url'),
+          path: getFormString(form, 'path'),
+          request_schema_json: getFormString(form, 'request_schema_json'),
+          response_schema_json: getFormString(form, 'response_schema_json'),
+          handler_code: getFormString(form, 'handler_code')
+        }
+      });
+    }
+
+    try {
+      const requestSchemaJson = parseOptionalJsonField(parsed.data.requestSchemaJsonText, 'request_schema_json');
+      const responseSchemaJson = parseOptionalJsonField(parsed.data.responseSchemaJsonText, 'response_schema_json');
+
+      const inserted = await db
+        .insert(fpApis)
+        .values({
+          key: parsed.data.key.trim(),
+          name: parsed.data.name.trim(),
+          description: parsed.data.description?.trim() || null,
+          state: parsed.data.state,
+          method: parsed.data.method,
+          baseUrl: parsed.data.baseUrl.trim(),
+          path: parsed.data.path,
+          requestSchemaJson,
+          responseSchemaJson,
+          handlerCode: parsed.data.handlerCodeText?.trim() || null,
+          updatedAt: new Date()
+        })
+        .returning({ id: fpApis.id });
+
+      reply.code(303);
+      return reply.redirect(`/apis/${inserted[0].id}`);
+    } catch (error) {
+      if (isMissingRelationError(error, 'fp_apis')) {
+        request.log.error(
+          { error },
+          'DB relation fp_apis is missing. Run: cd app && npm run db:push'
+        );
+        return sendUiError(request, reply, 503, 'APIs table is missing. Run: cd app && npm run db:push');
+      }
+      return reply.status(400).renderPage('apis/new.ejs', {
+        errorMessage: error instanceof Error ? error.message : 'Invalid API input',
+        form: {
+          key: getFormString(form, 'key'),
+          name: getFormString(form, 'name'),
+          description: getFormString(form, 'description'),
+          state: normalizeApiState(getFormString(form, 'state')),
+          method: normalizeApiMethod(getFormString(form, 'method')),
+          base_url: getFormString(form, 'base_url'),
+          path: getFormString(form, 'path'),
+          request_schema_json: getFormString(form, 'request_schema_json'),
+          response_schema_json: getFormString(form, 'response_schema_json'),
+          handler_code: getFormString(form, 'handler_code')
+        }
+      });
+    }
+  });
+
+  app.get('/apis/:id', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid API id' });
+    }
+    let api;
+    try {
+      api = await db.query.fpApis.findFirst({ where: eq(fpApis.id, paramsParsed.data.id) });
+    } catch (error) {
+      if (isMissingRelationError(error, 'fp_apis')) {
+        request.log.error(
+          { error },
+          'DB relation fp_apis is missing. Run: cd app && npm run db:push'
+        );
+        return sendUiError(request, reply, 503, 'APIs table is missing. Run: cd app && npm run db:push');
+      }
+      throw error;
+    }
+    if (!api) {
+      return reply.status(404).send({ message: 'API not found' });
+    }
+    const templatesUsingApi = await loadTemplatesUsingApi(db, api.key);
+    await reply.renderPage('apis/detail.ejs', {
+      api: {
+        ...api,
+        state: normalizeApiState(api.state),
+        method: normalizeApiMethod(api.method)
+      },
+      templatesUsingApi,
+      apiTest: {
+        requestJson: buildApiTestExample(api.requestSchemaJson),
+        requestUrl: '',
+        requestMethod: normalizeApiMethod(api.method),
+        requestPayload: '',
+        responseStatus: null,
+        responseBody: '',
+        errorMessage: ''
+      }
+    });
+  });
+
+  app.post('/apis/:id/test', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid API id' });
+    }
+    const api = await db.query.fpApis.findFirst({ where: eq(fpApis.id, paramsParsed.data.id) });
+    if (!api) {
+      return reply.status(404).send({ message: 'API not found' });
+    }
+    const form = toFormRecord(request.body);
+    const requestJsonText = getFormString(form, 'request_json');
+    let requestPayload: Record<string, unknown> = {};
+    try {
+      requestPayload = requestJsonText.trim().length > 0 ? (JSON.parse(requestJsonText) as Record<string, unknown>) : {};
+    } catch {
+      const templatesUsingApi = await loadTemplatesUsingApi(db, api.key);
+      return reply.status(400).renderPage('apis/detail.ejs', {
+        api: {
+          ...api,
+          state: normalizeApiState(api.state),
+          method: normalizeApiMethod(api.method)
+        },
+        templatesUsingApi,
+        apiTest: {
+          requestJson: requestJsonText,
+          requestUrl: '',
+          requestMethod: normalizeApiMethod(api.method),
+          requestPayload: requestJsonText,
+          responseStatus: null,
+          responseBody: '',
+          errorMessage: 'request_json must be valid JSON.'
+        }
+      });
+    }
+
+    const method = normalizeApiMethod(api.method);
+    const baseUrl = api.baseUrl ?? erpBaseUrl;
+    const url = new URL(api.path, baseUrl);
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    const hasBody = method !== 'GET' && method !== 'DELETE';
+    if (!hasBody) {
+      for (const [key, value] of Object.entries(requestPayload)) {
+        if (value === undefined || value === null || String(value).trim() === '') continue;
+        url.searchParams.set(key, String(value));
+      }
+    }
+    let responseStatus: number | null = null;
+    let responseBody = '';
+    let errorMessage = '';
+    const requestMethod = method;
+    const requestUrl = url.toString();
+    const requestPayloadText = hasBody ? JSON.stringify(requestPayload, null, 2) : JSON.stringify(requestPayload, null, 2);
+    try {
+      const response = await fetch(url.toString(), {
+        method,
+        headers: hasBody ? { ...headers, 'Content-Type': 'application/json' } : headers,
+        ...(hasBody ? { body: JSON.stringify(requestPayload) } : {})
+      });
+      responseStatus = response.status;
+      const raw = await response.text();
+      try {
+        responseBody = JSON.stringify(JSON.parse(raw), null, 2);
+      } catch {
+        responseBody = raw;
+      }
+      if (!response.ok) {
+        errorMessage = `API test failed with HTTP ${response.status}.`;
+      }
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'API test failed.';
+    }
+    const templatesUsingApi = await loadTemplatesUsingApi(db, api.key);
+    await reply.renderPage('apis/detail.ejs', {
+      api: {
+        ...api,
+        state: normalizeApiState(api.state),
+        method: normalizeApiMethod(api.method)
+      },
+      templatesUsingApi,
+      apiTest: {
+        requestJson: requestJsonText,
+        requestUrl,
+        requestMethod,
+        requestPayload: requestPayloadText,
+        responseStatus,
+        responseBody,
+        errorMessage
+      }
+    });
+  });
+
+  app.get('/apis/:id/edit', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid API id' });
+    }
+    let api;
+    try {
+      api = await db.query.fpApis.findFirst({ where: eq(fpApis.id, paramsParsed.data.id) });
+    } catch (error) {
+      if (isMissingRelationError(error, 'fp_apis')) {
+        request.log.error(
+          { error },
+          'DB relation fp_apis is missing. Run: cd app && npm run db:push'
+        );
+        return sendUiError(request, reply, 503, 'APIs table is missing. Run: cd app && npm run db:push');
+      }
+      throw error;
+    }
+    if (!api) {
+      return reply.status(404).send({ message: 'API not found' });
+    }
+    await reply.renderPage('apis/edit.ejs', {
+      api,
+      errorMessage: '',
+      form: {
+        key: api.key,
+        name: api.name,
+        description: api.description ?? '',
+        state: normalizeApiState(api.state),
+        method: normalizeApiMethod(api.method),
+        base_url: api.baseUrl ?? '',
+        path: api.path,
+        request_schema_json: api.requestSchemaJson ? JSON.stringify(api.requestSchemaJson, null, 2) : '',
+        response_schema_json: api.responseSchemaJson ? JSON.stringify(api.responseSchemaJson, null, 2) : '',
+        handler_code: api.handlerCode ?? ''
+      }
+    });
+  });
+
+  app.post('/apis/:id', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid API id' });
+    }
+    let existing;
+    try {
+      existing = await db.query.fpApis.findFirst({ where: eq(fpApis.id, paramsParsed.data.id) });
+    } catch (error) {
+      if (isMissingRelationError(error, 'fp_apis')) {
+        request.log.error(
+          { error },
+          'DB relation fp_apis is missing. Run: cd app && npm run db:push'
+        );
+        return sendUiError(request, reply, 503, 'APIs table is missing. Run: cd app && npm run db:push');
+      }
+      throw error;
+    }
+    if (!existing) {
+      return reply.status(404).send({ message: 'API not found' });
+    }
+
+    const form = toFormRecord(request.body);
+    const parsed = apiFormSchema.safeParse({
+      key: getFormString(form, 'key'),
+      name: getFormString(form, 'name'),
+      description: getFormString(form, 'description'),
+      state: normalizeApiState(getFormString(form, 'state')),
+      method: normalizeApiMethod(getFormString(form, 'method')),
+      baseUrl: getFormString(form, 'base_url'),
+      path: getFormString(form, 'path'),
+      requestSchemaJsonText: getFormString(form, 'request_schema_json'),
+      responseSchemaJsonText: getFormString(form, 'response_schema_json'),
+      handlerCodeText: getFormString(form, 'handler_code')
+    });
+
+    if (!parsed.success) {
+      return reply.status(400).renderPage('apis/edit.ejs', {
+        api: existing,
+        errorMessage: 'Please provide key, name, state, method, base_url and path.',
+        form: {
+          key: getFormString(form, 'key'),
+          name: getFormString(form, 'name'),
+          description: getFormString(form, 'description'),
+          state: normalizeApiState(getFormString(form, 'state')),
+          method: normalizeApiMethod(getFormString(form, 'method')),
+          base_url: getFormString(form, 'base_url'),
+          path: getFormString(form, 'path'),
+          request_schema_json: getFormString(form, 'request_schema_json'),
+          response_schema_json: getFormString(form, 'response_schema_json'),
+          handler_code: getFormString(form, 'handler_code')
+        }
+      });
+    }
+
+    try {
+      const requestSchemaJson = parseOptionalJsonField(parsed.data.requestSchemaJsonText, 'request_schema_json');
+      const responseSchemaJson = parseOptionalJsonField(parsed.data.responseSchemaJsonText, 'response_schema_json');
+      await db
+        .update(fpApis)
+        .set({
+          key: parsed.data.key.trim(),
+          name: parsed.data.name.trim(),
+          description: parsed.data.description?.trim() || null,
+          state: parsed.data.state,
+          method: parsed.data.method,
+          baseUrl: parsed.data.baseUrl.trim(),
+          path: parsed.data.path,
+          requestSchemaJson,
+          responseSchemaJson,
+          handlerCode: parsed.data.handlerCodeText?.trim() || null,
+          updatedAt: new Date()
+        })
+        .where(eq(fpApis.id, existing.id));
+    } catch (error) {
+      if (isMissingRelationError(error, 'fp_apis')) {
+        request.log.error(
+          { error },
+          'DB relation fp_apis is missing. Run: cd app && npm run db:push'
+        );
+        return sendUiError(request, reply, 503, 'APIs table is missing. Run: cd app && npm run db:push');
+      }
+      return reply.status(400).renderPage('apis/edit.ejs', {
+        api: existing,
+        errorMessage: error instanceof Error ? error.message : 'Invalid API input',
+        form: {
+          key: getFormString(form, 'key'),
+          name: getFormString(form, 'name'),
+          description: getFormString(form, 'description'),
+          state: normalizeApiState(getFormString(form, 'state')),
+          method: normalizeApiMethod(getFormString(form, 'method')),
+          base_url: getFormString(form, 'base_url'),
+          path: getFormString(form, 'path'),
+          request_schema_json: getFormString(form, 'request_schema_json'),
+          response_schema_json: getFormString(form, 'response_schema_json'),
+          handler_code: getFormString(form, 'handler_code')
+        }
+      });
+    }
+
+    reply.code(303);
+    return reply.redirect(`/apis/${existing.id}`);
+  });
+
+  app.get('/workflows', async (request, reply) => {
+    const query = toFormRecord(request.query);
+    const selectedStateRaw = normalizeOptionalFilter(getFormString(query, 'state')).toLowerCase();
+    const selectedState = selectedStateRaw === 'draft' || selectedStateRaw === 'inactive' || selectedStateRaw === 'all'
+      ? selectedStateRaw
+      : 'active';
+    const whereState = selectedState === 'all' ? undefined : selectedState;
+    const rows = await db
+      .select({
+        id: fpWorkflows.id,
+        key: fpWorkflows.key,
+        name: fpWorkflows.name,
+        state: fpWorkflows.state,
+        version: fpWorkflows.version,
+        updatedAt: fpWorkflows.updatedAt
+      })
+      .from(fpWorkflows)
+      .where(whereState ? eq(fpWorkflows.state, whereState) : undefined)
+      .orderBy(asc(fpWorkflows.key), desc(fpWorkflows.version));
+
+    await reply.renderPage('workflows/list.ejs', {
+      workflows: rows,
+      filters: { state: selectedState }
+    });
+  });
+
+  app.get('/workflows/new', async (_request, reply) => {
+    await reply.renderPage('workflows/new.ejs', {
+      errorMessage: '',
+      form: {
+        key: '',
+        name: '',
+        description: '',
+        state: 'draft',
+        workflow_json: JSON.stringify(
+          {
+            statuses: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+            initialStatus: 'created',
+            order: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+            states: {
+              created: { buttons: ['assign'] },
+              assigned: { buttons: ['submit'] },
+              submitted: { buttons: ['approve'] },
+              approved: { buttons: [] },
+              archived: { buttons: [] }
+            },
+            semantics: { submit: 'global', approval: 'individual', completionRule: 'all_required_approvers' },
+            actorModel: { editors: 'multiple', approvers: 'multiple' }
+          },
+          null,
+          2
+        )
+      }
+    });
+  });
+
+  app.post('/workflows', async (request, reply) => {
+    const form = toFormRecord(request.body);
+    const parsed = workflowFormSchema.safeParse({
+      key: getFormString(form, 'key'),
+      name: getFormString(form, 'name'),
+      description: getFormString(form, 'description'),
+      state: getFormString(form, 'state'),
+      workflow_json: getFormString(form, 'workflow_json')
+    });
+    if (!parsed.success) {
+      return reply.status(400).renderPage('workflows/new.ejs', {
+        errorMessage: 'Please provide key, name, state and workflow_json.',
+        form: {
+          key: getFormString(form, 'key'),
+          name: getFormString(form, 'name'),
+          description: getFormString(form, 'description'),
+          state: getFormString(form, 'state') || 'draft',
+          workflow_json: getFormString(form, 'workflow_json')
+        }
+      });
+    }
+    let workflowJson: Record<string, unknown>;
+    try {
+      workflowJson = JSON.parse(parsed.data.workflow_json) as Record<string, unknown>;
+      parseWorkflowJson(workflowJson);
+    } catch {
+      return reply.status(400).renderPage('workflows/new.ejs', {
+        errorMessage: 'workflow_json must be valid JSON.',
+        form: parsed.data
+      });
+    }
+    const existingByKey = await db
+      .select({ version: fpWorkflows.version })
+      .from(fpWorkflows)
+      .where(eq(fpWorkflows.key, parsed.data.key))
+      .orderBy(desc(fpWorkflows.version))
+      .limit(1);
+    const nextVersion = (existingByKey[0]?.version ?? 0) + 1;
+    const inserted = await db
+      .insert(fpWorkflows)
+      .values({
+        key: parsed.data.key,
+        name: parsed.data.name,
+        description: parsed.data.description || null,
+        state: parsed.data.state,
+        version: nextVersion,
+        workflowJson,
+        updatedAt: new Date()
+      })
+      .returning({ id: fpWorkflows.id });
+    reply.code(303);
+    return reply.redirect(`/workflows/${inserted[0].id}`);
+  });
+
+  app.get('/workflows/:id', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid workflow id' });
+    }
+    const workflow = await db.query.fpWorkflows.findFirst({ where: eq(fpWorkflows.id, paramsParsed.data.id) });
+    if (!workflow) {
+      return reply.status(404).send({ message: 'Workflow not found' });
+    }
+    const templatesUsingWorkflow = await db
+      .select({
+        id: fpTemplates.id,
+        key: fpTemplates.key,
+        name: fpTemplates.name,
+        version: fpTemplates.version,
+        state: fpTemplates.state
+      })
+      .from(fpTemplates)
+      .where(eq(fpTemplates.workflowRef, workflow.key))
+      .orderBy(asc(fpTemplates.key), desc(fpTemplates.version));
+    const query = toFormRecord(request.query);
+    const simulationStatus = normalizeDocumentStatus(
+      normalizeOptionalFilter(getFormString(query, 'status')) || 'created'
+    );
+    const simulationActor = (normalizeOptionalFilter(getFormString(query, 'actor')) || 'editor') === 'approver'
+      ? 'approver'
+      : 'editor';
+    const submittedEditors = Math.max(0, Number.parseInt(getFormString(query, 'submittedEditors') || '0', 10) || 0);
+    const assignedApprovers = Math.max(0, Number.parseInt(getFormString(query, 'assignedApprovers') || '2', 10) || 0);
+    const approvedApprovers = Math.max(0, Number.parseInt(getFormString(query, 'approvedApprovers') || '0', 10) || 0);
+    const rejectedApprovers = Math.max(0, Number.parseInt(getFormString(query, 'rejectedApprovers') || '0', 10) || 0);
+    const workflowRuntime = parseWorkflowJson(workflow.workflowJson);
+    const simulation = {
+      ...evaluateWorkflow({
+        workflow: workflowRuntime,
+        status: simulationStatus,
+        editorSubmissions: Array.from({ length: Math.max(submittedEditors, 1) }).map((_, index) => ({
+          userId: `editor-${index + 1}`,
+          status: index < submittedEditors ? 'submitted' : 'pending'
+        })),
+        approverDecisions: Array.from({ length: assignedApprovers }).map((_, index) => ({
+          userId: `approver-${index + 1}`,
+          status:
+            index < rejectedApprovers ? 'rejected' : index < approvedApprovers ? 'approved' : 'pending'
+        }))
+      }),
+      workflow: workflowRuntime,
+      status: simulationStatus,
+      actor: simulationActor,
+      submittedEditors,
+      assignedApprovers,
+      approvedApprovers,
+      rejectedApprovers
+    };
+    await reply.renderPage('workflows/detail.ejs', {
+      workflow,
+      templatesUsingWorkflow,
+      simulation
+    });
+  });
+
+  app.get('/workflows/:id/edit', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid workflow id' });
+    }
+    const workflow = await db.query.fpWorkflows.findFirst({ where: eq(fpWorkflows.id, paramsParsed.data.id) });
+    if (!workflow) {
+      return reply.status(404).send({ message: 'Workflow not found' });
+    }
+    await reply.renderPage('workflows/edit.ejs', {
+      workflow,
+      errorMessage: '',
+      form: {
+        key: workflow.key,
+        name: workflow.name,
+        description: workflow.description ?? '',
+        state: workflow.state,
+        workflow_json: JSON.stringify(workflow.workflowJson ?? {}, null, 2)
+      }
+    });
+  });
+
+  app.post('/workflows/:id', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid workflow id' });
+    }
+    const workflow = await db.query.fpWorkflows.findFirst({ where: eq(fpWorkflows.id, paramsParsed.data.id) });
+    if (!workflow) {
+      return reply.status(404).send({ message: 'Workflow not found' });
+    }
+    const form = toFormRecord(request.body);
+    const parsed = workflowFormSchema.safeParse({
+      key: getFormString(form, 'key'),
+      name: getFormString(form, 'name'),
+      description: getFormString(form, 'description'),
+      state: getFormString(form, 'state'),
+      workflow_json: getFormString(form, 'workflow_json')
+    });
+    if (!parsed.success) {
+      return reply.status(400).renderPage('workflows/edit.ejs', {
+        workflow,
+        errorMessage: 'Please provide key, name, state and workflow_json.',
+        form: {
+          key: getFormString(form, 'key'),
+          name: getFormString(form, 'name'),
+          description: getFormString(form, 'description'),
+          state: getFormString(form, 'state') || workflow.state,
+          workflow_json: getFormString(form, 'workflow_json')
+        }
+      });
+    }
+    let workflowJson: Record<string, unknown>;
+    try {
+      workflowJson = JSON.parse(parsed.data.workflow_json) as Record<string, unknown>;
+      parseWorkflowJson(workflowJson);
+    } catch {
+      return reply.status(400).renderPage('workflows/edit.ejs', {
+        workflow,
+        errorMessage: 'workflow_json must be valid JSON.',
+        form: parsed.data
+      });
+    }
+    await db
+      .update(fpWorkflows)
+      .set({
+        key: parsed.data.key,
+        name: parsed.data.name,
+        description: parsed.data.description || null,
+        state: parsed.data.state,
+        workflowJson,
+        updatedAt: new Date()
+      })
+      .where(eq(fpWorkflows.id, workflow.id));
+
+    reply.code(303);
+    return reply.redirect(`/workflows/${workflow.id}`);
+  });
+
+  app.get('/templates', async (request, reply) => {
+    const query = toFormRecord(request.query);
+    const stateFilterRawInput = normalizeOptionalFilter(getFormString(query, 'state'));
+    const stateFilterRaw = stateFilterRawInput === 'archived' ? 'inactive' : stateFilterRawInput;
+    const stateFilter: 'published' | 'draft' | 'inactive' | 'all' =
+      stateFilterRaw === 'draft' || stateFilterRaw === 'published' || stateFilterRaw === 'inactive' || stateFilterRaw === 'all'
+        ? (stateFilterRaw as 'published' | 'draft' | 'inactive' | 'all')
+        : 'published';
+
+    const whereConditions: any[] = [];
+    if (stateFilter !== 'all') {
+      if (stateFilter === 'inactive') {
+        whereConditions.push(sql`lower(${fpTemplates.state}) in ('inactive', 'archived')`);
+      } else {
+        whereConditions.push(sql`lower(${fpTemplates.state}) = ${stateFilter}`);
+      }
+    }
+
+    const templatesRaw = await db
       .select({
         id: fpTemplates.id,
         key: fpTemplates.key,
         name: fpTemplates.name,
         description: fpTemplates.description,
         state: fpTemplates.state,
-        version: fpTemplates.version
+        version: fpTemplates.version,
+        workflowRef: fpTemplates.workflowRef,
+        templateJson: fpTemplates.templateJson
       })
       .from(fpTemplates)
-      .orderBy(asc(fpTemplates.name), desc(fpTemplates.version));
-    const versionsByKey = new Map<
-      string,
-      Array<{
-        id: string;
-        key: string;
-        name: string;
-        description: string | null;
-        state: string;
-        version: number;
-      }>
-    >();
-    for (const item of templates) {
-      const next = versionsByKey.get(item.key) ?? [];
-      next.push(item);
-      versionsByKey.set(item.key, next);
-    }
-    const latestPublishedTemplates = Array.from(versionsByKey.values())
-      .map((versions) => versions.find((item) => normalizeTemplateState(item.state) === 'published'))
-      .filter((item): item is (typeof templates)[number] => !!item)
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .where(whereConditions.length > 0 ? and(...whereConditions) : undefined)
+      .orderBy(asc(fpTemplates.key), desc(fpTemplates.version), asc(fpTemplates.name));
+    const templates = pickRelevantTemplatesByKey(templatesRaw, stateFilter).sort((a, b) =>
+      a.name.localeCompare(b.name, 'en', { sensitivity: 'base' })
+    );
 
-    const templateIds = latestPublishedTemplates.map((item) => item.id);
+    const templateIds = templates.map((item) => item.id);
     const assignmentRows =
       templateIds.length === 0
         ? []
@@ -2010,30 +3409,82 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       },
       new Map<string, Array<{ name: string; key: string }>>()
     );
-    const templatesWithGroups = latestPublishedTemplates.map((tpl) => {
+    let macroRows: Array<{ templateId: string; macroRef: string }> = [];
+    if (templateIds.length > 0) {
+      try {
+        macroRows = await db
+          .select({
+            templateId: fpTemplateMacros.templateId,
+            macroRef: fpTemplateMacros.macroRef
+          })
+          .from(fpTemplateMacros)
+          .where(inArray(fpTemplateMacros.templateId, templateIds));
+      } catch {
+        macroRows = [];
+      }
+    }
+    const macroCountsByTemplateId = macroRows.reduce(
+      (acc, row) => {
+        const set = acc.get(row.templateId) ?? new Set<string>();
+        set.add(row.macroRef);
+        acc.set(row.templateId, set);
+        return acc;
+      },
+      new Map<string, Set<string>>()
+    );
+
+    const templatesWithGroups = templates.map((tpl) => {
       const assignedGroups = groupsByTemplateId.get(tpl.id) ?? [];
-      const versions = versionsByKey.get(tpl.key) ?? [];
-      const latestDraft = versions.find((item) => normalizeTemplateState(item.state) === 'draft');
+      const macroCount = macroCountsByTemplateId.get(tpl.id)?.size ?? 0;
+      const usage = extractTemplateUsage(tpl.templateJson);
+      const apiCount = usage.apiRefs.length;
+      const actionCount = usage.actions.length;
       return {
         ...tpl,
         assignedGroups,
         assignedGroupCount: assignedGroups.length,
-        versions,
-        latestDraftId: latestDraft?.id ?? null
+        macroCount,
+        apiCount,
+        actionCount,
+        workflowRef: tpl.workflowRef ?? ''
       };
     });
 
-    await reply.renderPage('templates/list.ejs', { templates: templatesWithGroups });
+    await reply.renderPage('templates/list.ejs', {
+      templates: templatesWithGroups,
+      filters: { state: stateFilter }
+    });
+  });
+
+  app.get('/templates/:id/versions', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid template id' });
+    }
+    const selected = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, paramsParsed.data.id) });
+    if (!selected) {
+      return reply.status(404).send({ message: 'Template not found' });
+    }
+
+    const versions = await loadTemplateVersionsByKey(db, selected.key);
+    await reply.renderPage('templates/versions.ejs', {
+      selected,
+      versions
+    });
   });
 
   app.get('/templates/new', async (_request, reply) => {
+    const workflows = await loadWorkflowOptions(db);
     await reply.renderPage('templates/new.ejs', {
       errorMessage: '',
+      warnings: collectTemplateWarnings(starterTemplate),
+      workflows,
       form: {
         key: '',
         name: '',
         description: '',
         state: 'draft',
+        workflow_ref: workflows[0]?.key ?? '',
         template_json: JSON.stringify(starterTemplate, null, 2)
       }
     });
@@ -2046,17 +3497,22 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       name: getFormString(form, 'name'),
       description: getFormString(form, 'description'),
       state: normalizeTemplateState(getFormString(form, 'state')),
+      workflow_ref: getFormString(form, 'workflow_ref'),
       template_json: getFormString(form, 'template_json')
     });
 
     if (!parsed.success) {
+      const workflows = await loadWorkflowOptions(db);
       return reply.status(400).renderPage('templates/new.ejs', {
         errorMessage: 'Please provide key, name, state and template_json.',
+        warnings: [],
+        workflows,
         form: {
           key: getFormString(form, 'key'),
           name: getFormString(form, 'name'),
           description: getFormString(form, 'description'),
           state: normalizeTemplateState(getFormString(form, 'state')),
+          workflow_ref: getFormString(form, 'workflow_ref'),
           template_json: getFormString(form, 'template_json')
         }
       });
@@ -2066,12 +3522,16 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     try {
       templateJson = parseTemplateEditorJson(parsed.data.template_json);
     } catch (error) {
+      const workflows = await loadWorkflowOptions(db);
       return reply.status(400).renderPage('templates/new.ejs', {
         errorMessage: error instanceof Error ? error.message : 'Invalid template_json',
+        warnings: parsed.success ? collectTemplateWarnings(JSON.parse(parsed.data.template_json)) : [],
+        workflows,
         form: parsed.data
       });
     }
 
+    const normalizedTemplateJson = normalizeTemplateJsonForV1Storage(templateJson);
     const inserted = await db
       .insert(fpTemplates)
       .values({
@@ -2079,11 +3539,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         name: parsed.data.name,
         description: parsed.data.description || null,
         state: parsed.data.state,
+        workflowRef: parsed.data.workflow_ref?.trim() || null,
         publishedAt: resolvePublishedAtForStateChange(parsed.data.state),
-        templateJson,
+        templateJson: normalizedTemplateJson,
         version: 1
       })
       .returning({ id: fpTemplates.id });
+    await syncTemplateMacroRefs(db, inserted[0].id, normalizedTemplateJson, request.log);
 
     const opsGroup = await db.query.fpGroups.findFirst({ where: eq(fpGroups.key, 'ops') });
     if (opsGroup) {
@@ -2126,10 +3588,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           description: template.description ?? null,
           state: 'draft',
           publishedAt: null,
+          workflowRef: (template as any).workflowRef ?? null,
           templateJson: template.templateJson
         })
         .returning({ id: fpTemplates.id });
       const draftId = inserted[0].id;
+      const draftTemplateJson = parseTemplateJson(template.templateJson);
+      await syncTemplateMacroRefs(db, draftId, draftTemplateJson, request.log);
 
       const sourceAssignments = await db.query.fpTemplateAssignments.findMany({
         where: eq(fpTemplateAssignments.templateId, template.id)
@@ -2146,18 +3611,30 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const assignmentView = await loadTemplateAssignmentView(db, template.id);
+    const macroUsageView = await loadTemplateMacroUsageView(db, template.id);
+    const apiUsageView = await loadTemplateApiUsageView(db, template);
+    const actionUsage = safeCollectTemplateActionUsage(template.templateJson);
+    const workflows = await loadWorkflowOptions(db);
 
     await reply.renderPage('templates/edit.ejs', {
       template,
       errorMessage: '',
+      warnings: collectTemplateWarnings(template.templateJson),
       assignedGroups: assignmentView.assignedGroups,
       assignableGroups: assignmentView.assignableGroups,
       hasGroups: assignmentView.hasGroups,
+      usedMacros: macroUsageView.usedMacros,
+      missingMacroRefs: macroUsageView.missingMacroRefs,
+      usedApis: apiUsageView.usedApis,
+      missingApiRefs: apiUsageView.missingApiRefs,
+      usedActions: actionUsage,
+      workflows,
       form: {
         key: template.key,
         name: template.name,
         description: template.description ?? '',
         state: normalizeTemplateState(template.state),
+        workflow_ref: (template as any).workflowRef ?? '',
         template_json: JSON.stringify(template.templateJson, null, 2)
       }
     });
@@ -2173,7 +3650,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!template) {
       return reply.status(404).send({ message: 'Template not found' });
     }
+    if (normalizeTemplateState(template.state) === 'inactive') {
+      return sendUiError(request, reply, 400, 'Inactive templates are read-only.');
+    }
     const assignmentView = await loadTemplateAssignmentView(db, template.id);
+    const macroUsageView = await loadTemplateMacroUsageView(db, template.id);
+    const apiUsageView = await loadTemplateApiUsageView(db, template);
+    const actionUsage = safeCollectTemplateActionUsage(template.templateJson);
 
     const form = toFormRecord(request.body);
     const parsed = templateFormSchema.safeParse({
@@ -2181,6 +3664,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       name: getFormString(form, 'name'),
       description: getFormString(form, 'description'),
       state: normalizeTemplateState(getFormString(form, 'state')),
+      workflow_ref: getFormString(form, 'workflow_ref'),
       template_json: getFormString(form, 'template_json')
     });
 
@@ -2188,14 +3672,22 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).renderPage('templates/edit.ejs', {
         template,
         errorMessage: 'Please provide key, name, state and template_json.',
+        warnings: [],
         assignedGroups: assignmentView.assignedGroups,
         assignableGroups: assignmentView.assignableGroups,
         hasGroups: assignmentView.hasGroups,
+        usedMacros: macroUsageView.usedMacros,
+        missingMacroRefs: macroUsageView.missingMacroRefs,
+        usedApis: apiUsageView.usedApis,
+        missingApiRefs: apiUsageView.missingApiRefs,
+        usedActions: actionUsage,
+        workflows: await loadWorkflowOptions(db),
         form: {
           key: getFormString(form, 'key'),
           name: getFormString(form, 'name'),
           description: getFormString(form, 'description'),
           state: normalizeTemplateState(getFormString(form, 'state')),
+          workflow_ref: getFormString(form, 'workflow_ref'),
           template_json: getFormString(form, 'template_json')
         }
       });
@@ -2208,13 +3700,21 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(400).renderPage('templates/edit.ejs', {
         template,
         errorMessage: error instanceof Error ? error.message : 'Invalid template_json',
+        warnings: parsed.success ? collectTemplateWarnings(JSON.parse(parsed.data.template_json)) : [],
         assignedGroups: assignmentView.assignedGroups,
         assignableGroups: assignmentView.assignableGroups,
         hasGroups: assignmentView.hasGroups,
+        usedMacros: macroUsageView.usedMacros,
+        missingMacroRefs: macroUsageView.missingMacroRefs,
+        usedApis: apiUsageView.usedApis,
+        missingApiRefs: apiUsageView.missingApiRefs,
+        usedActions: actionUsage,
+        workflows: await loadWorkflowOptions(db),
         form: parsed.data
       });
     }
 
+    const normalizedTemplateJson = normalizeTemplateJsonForV1Storage(templateJson);
     await db
       .update(fpTemplates)
       .set({
@@ -2222,10 +3722,25 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         name: parsed.data.name,
         description: parsed.data.description || null,
         state: parsed.data.state,
+        workflowRef: parsed.data.workflow_ref?.trim() || null,
         publishedAt: resolvePublishedAtForStateChange(parsed.data.state, (template as any).publishedAt ?? null),
-        templateJson
+        templateJson: normalizedTemplateJson
       })
       .where(eq(fpTemplates.id, template.id));
+    await syncTemplateMacroRefs(db, template.id, normalizedTemplateJson, request.log);
+    const warnings = collectTemplateWarnings(templateJson);
+    if (warnings.length > 0) {
+      request.log.warn({ templateId: template.id, warnings }, 'Template saved with legacy compatibility warnings');
+    }
+    const syncedApiRefs = collectApiRefsFromTemplateJson(normalizedTemplateJson);
+    request.log.info(
+      {
+        templateId: template.id,
+        apiRefs: syncedApiRefs,
+        count: syncedApiRefs.length
+      },
+      'Template API refs synchronized (derived from template_json)'
+    );
 
     reply.code(303);
     return reply.redirect(`/templates/${template.id}/edit`);
@@ -2247,8 +3762,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     await db
       .update(fpTemplates)
-      .set({ state: 'archived', publishedAt: null })
-      .where(and(eq(fpTemplates.key, template.key), eq(fpTemplates.state, 'published')));
+      .set({ state: 'inactive', publishedAt: null })
+      .where(and(eq(fpTemplates.key, template.key), sql`lower(${fpTemplates.state}) in ('published', 'active')`));
 
     await db
       .update(fpTemplates)
@@ -2257,6 +3772,32 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     reply.code(303);
     return reply.redirect('/templates');
+  });
+
+  app.post('/templates/:id/archive', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid template id' });
+    }
+
+    const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, paramsParsed.data.id) });
+    if (!template) {
+      return reply.status(404).send({ message: 'Template not found' });
+    }
+
+    const currentState = normalizeTemplateState(template.state);
+    if (currentState === 'inactive') {
+      reply.code(303);
+      return reply.redirect(`/templates/${template.id}/edit`);
+    }
+
+    await db
+      .update(fpTemplates)
+      .set({ state: 'inactive', publishedAt: null })
+      .where(eq(fpTemplates.id, template.id));
+
+    reply.code(303);
+    return reply.redirect(`/templates/${template.id}/edit`);
   });
 
   app.post('/templates/:id/assignments', async (request, reply) => {
@@ -2276,6 +3817,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, parsedParams.data.id) });
     if (!template) {
       return reply.status(404).send({ message: 'Template not found' });
+    }
+    if (normalizeTemplateState(template.state) === 'inactive') {
+      return sendUiError(request, reply, 400, 'Inactive templates are read-only.');
     }
     const group = await db.query.fpGroups.findFirst({ where: eq(fpGroups.id, parsedBody.data.groupId) });
     if (!group) {
@@ -2300,6 +3844,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, parsed.data.id) });
     if (!template) {
       return reply.status(404).send({ message: 'Template not found' });
+    }
+    if (normalizeTemplateState(template.state) === 'inactive') {
+      return sendUiError(request, reply, 400, 'Inactive templates are read-only.');
     }
 
     await db
@@ -2339,14 +3886,14 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       const publishedByKey = await db
         .select({ id: fpTemplates.id })
         .from(fpTemplates)
-        .where(and(eq(fpTemplates.key, templateKey), eq(fpTemplates.state, 'published')))
+        .where(and(eq(fpTemplates.key, templateKey), sql`lower(${fpTemplates.state}) in ('published', 'active')`))
         .orderBy(desc(fpTemplates.version))
         .limit(1);
       templateId = publishedByKey[0]?.id ?? '';
     }
     if (!templateId) {
       const templates = await db.query.fpTemplates.findMany({
-        where: eq(fpTemplates.state, 'published'),
+        where: sql`lower(${fpTemplates.state}) in ('published', 'active')`,
         orderBy: asc(fpTemplates.name)
       });
 
@@ -2374,7 +3921,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         ? await db
             .select({ id: fpTemplates.id })
             .from(fpTemplates)
-            .where(and(eq(fpTemplates.key, template.key), eq(fpTemplates.state, 'published')))
+            .where(and(eq(fpTemplates.key, template.key), sql`lower(${fpTemplates.state}) in ('published', 'active')`))
             .orderBy(desc(fpTemplates.version))
         : [];
     const latestPublishedId = latestPublished[0]?.id ?? template.id;
@@ -2384,10 +3931,11 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const templateJson = parseTemplateJson(template.templateJson);
+    const workflowRuntime = await loadWorkflowRuntimeForTemplate(db, template as any);
     const assignmentContext = await resolveTemplateAssignmentContext(db, template.id);
-    const initialStatus = String(templateJson.workflow.initial ?? '').trim();
-    const editableKeys = resolveEditableFieldKeys(templateJson, initialStatus);
-    const readonlyKeys = resolveReadonlyFieldKeys(templateJson, initialStatus);
+    const initialStatus = normalizeDocumentStatus(workflowRuntime.initialStatus);
+    const editableKeys = resolveEditableFieldKeys(templateJson, initialStatus, workflowRuntime);
+    const readonlyKeys = resolveReadonlyFieldKeys(templateJson, initialStatus, workflowRuntime);
     const layoutHtml = renderLayout({
       mode: 'new',
       templateJson,
@@ -2417,14 +3965,20 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
   app.get('/documents', async (request, reply) => {
     const query = toFormRecord(request.query);
-    const statusFilter = normalizeOptionalFilter(getFormString(query, 'status'));
+    const rawStatusFilter = normalizeOptionalFilter(getFormString(query, 'status')).toLowerCase();
+    const statusFilter = (DOCUMENT_STATES as readonly string[]).includes(rawStatusFilter)
+      ? (rawStatusFilter as (typeof DOCUMENT_STATES)[number])
+      : '';
     const templateIdFilterRaw = normalizeOptionalFilter(getFormString(query, 'templateId'));
     const groupIdFilterRaw = normalizeOptionalFilter(getFormString(query, 'groupId'));
+    const showArchived = ['1', 'true', 'on', 'yes'].includes(normalizeOptionalFilter(getFormString(query, 'showArchived')).toLowerCase());
+    const effectiveShowArchived = showArchived || statusFilter === 'archived';
     const templateIdFilter = z.string().uuid().safeParse(templateIdFilterRaw).success ? templateIdFilterRaw : '';
     const groupIdFilter = z.string().uuid().safeParse(groupIdFilterRaw).success ? groupIdFilterRaw : '';
 
-    const whereConditions = [];
-    if (statusFilter) whereConditions.push(eq(fpDocuments.status, statusFilter));
+    const whereConditions: any[] = [];
+    if (!effectiveShowArchived) whereConditions.push(sql`lower(${fpDocuments.status}) <> 'archived'`);
+    if (statusFilter) whereConditions.push(sql`lower(${fpDocuments.status}) = ${statusFilter}`);
     if (templateIdFilter) whereConditions.push(eq(fpDocuments.templateId, templateIdFilter));
     if (groupIdFilter) whereConditions.push(eq(fpDocuments.groupId, groupIdFilter));
 
@@ -2433,6 +3987,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         id: fpDocuments.id,
         createdAt: fpDocuments.createdAt,
         status: fpDocuments.status,
+        templateVersion: fpDocuments.templateVersion,
         groupId: fpDocuments.groupId,
         templateId: fpDocuments.templateId,
         snapshotsJson: fpDocuments.snapshotsJson,
@@ -2453,24 +4008,21 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const templates = await db
       .select({ id: fpTemplates.id, name: fpTemplates.name, key: fpTemplates.key })
       .from(fpTemplates)
-      .where(eq(fpTemplates.state, 'published'))
+      .where(sql`lower(${fpTemplates.state}) in ('published', 'active')`)
       .orderBy(asc(fpTemplates.name));
     const groups = await db
       .select({ id: fpGroups.id, name: fpGroups.name, key: fpGroups.key })
       .from(fpGroups)
       .orderBy(asc(fpGroups.name));
-    const statuses = await db
-      .select({ status: fpDocuments.status })
-      .from(fpDocuments)
-      .orderBy(asc(fpDocuments.status));
-    const statusOptions = Array.from(new Set(statuses.map((item) => item.status))).filter((item) => item.trim().length > 0);
+    const statusOptions = [...DOCUMENT_STATES];
 
     await reply.renderPage('documents/index.ejs', {
       documents,
       filters: {
         status: statusFilter,
         templateId: templateIdFilter,
-        groupId: groupIdFilter
+        groupId: groupIdFilter,
+        showArchived: effectiveShowArchived
       },
       templates,
       groups,
@@ -2507,74 +4059,182 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return;
     }
 
-    const rawTaskRows = await db
-      .select({
-        id: fpDocuments.id,
-        createdAt: fpDocuments.createdAt,
-        status: fpDocuments.status,
-        editorUserId: fpDocuments.editorUserId,
-        approverUserId: fpDocuments.approverUserId,
-        assigneeUserId: fpDocuments.assigneeUserId,
-        reviewerUserId: fpDocuments.reviewerUserId,
-        groupId: fpDocuments.groupId,
-        groupName: fpGroups.name,
-        templateKey: fpTemplates.key,
-        templateName: fpTemplates.name
-      })
-      .from(fpDocuments)
-      .innerJoin(fpTemplates, eq(fpTemplates.id, fpDocuments.templateId))
-      .leftJoin(fpGroups, eq(fpGroups.id, fpDocuments.groupId))
-      .where(
-        or(
-          eq(fpDocuments.editorUserId, currentUser.id),
-          eq(fpDocuments.approverUserId, currentUser.id),
-          eq(fpDocuments.assigneeUserId, currentUser.id),
-          eq(fpDocuments.reviewerUserId, currentUser.id)
-        )
-      )
-      .orderBy(desc(fpDocuments.createdAt));
-    const taskRows = rawTaskRows
-      .map((item) => {
-        const userGroupRights = item.groupId ? rightsByGroupId.get(item.groupId) ?? '' : '';
-        const editorUserId = item.editorUserId ?? item.assigneeUserId;
-        const approverUserId = item.approverUserId ?? item.reviewerUserId;
-        const isEditorAssigned = editorUserId === currentUser.id;
-        const isApproverAssigned = approverUserId === currentUser.id;
-        if (!isEditorAssigned && !isApproverAssigned) return null;
+    const showDone = ['1', 'true', 'on', 'yes'].includes(
+      normalizeOptionalFilter(getFormString(toFormRecord(request.query), 'showDone')).toLowerCase()
+    );
+    let taskRows: Array<{
+      id: string;
+      createdAt: Date;
+      status: string;
+      groupId: string | null;
+      groupName: string | null;
+      templateKey: string;
+      templateName: string;
+      role: 'Editor' | 'Approver';
+      taskState: 'open' | 'waiting' | 'done';
+    }> = [];
 
-        const normalizedStatus = item.status.trim().toLowerCase();
-        const role: 'Editor' | 'Approver' =
-          isEditorAssigned && isApproverAssigned
-            ? normalizedStatus === 'submitted' || normalizedStatus === 'approved'
-              ? 'Approver'
-              : 'Editor'
-            : isEditorAssigned
-              ? 'Editor'
-              : 'Approver';
-        const taskState = resolveTaskStateForUser({
-          role,
-          status: item.status,
-          rights: userGroupRights
+    if (supportsMultiAssignments) {
+      const editorTasksRaw = await db
+        .select({
+          id: fpDocuments.id,
+          createdAt: fpDocuments.createdAt,
+          status: fpDocuments.status,
+          groupId: fpDocuments.groupId,
+          groupName: fpGroups.name,
+          templateKey: fpTemplates.key,
+          templateName: fpTemplates.name,
+          submissionStatus: fpDocumentSubmissions.status
+        })
+        .from(fpDocumentSubmissions)
+        .innerJoin(fpDocuments, eq(fpDocuments.id, fpDocumentSubmissions.documentId))
+        .innerJoin(fpTemplates, eq(fpTemplates.id, fpDocuments.templateId))
+        .leftJoin(fpGroups, eq(fpGroups.id, fpDocuments.groupId))
+        .where(eq(fpDocumentSubmissions.userId, currentUser.id))
+        .orderBy(desc(fpDocuments.createdAt));
+      const approverTasksRaw = await db
+        .select({
+          id: fpDocuments.id,
+          createdAt: fpDocuments.createdAt,
+          status: fpDocuments.status,
+          groupId: fpDocuments.groupId,
+          groupName: fpGroups.name,
+          templateKey: fpTemplates.key,
+          templateName: fpTemplates.name,
+          approvalStatus: fpDocumentApprovals.status
+        })
+        .from(fpDocumentApprovals)
+        .innerJoin(fpDocuments, eq(fpDocuments.id, fpDocumentApprovals.documentId))
+        .innerJoin(fpTemplates, eq(fpTemplates.id, fpDocuments.templateId))
+        .leftJoin(fpGroups, eq(fpGroups.id, fpDocuments.groupId))
+        .where(eq(fpDocumentApprovals.userId, currentUser.id))
+        .orderBy(desc(fpDocuments.createdAt));
+
+      const rows = [
+        ...editorTasksRaw.map((item) => ({ ...item, role: 'Editor' as const, approvalStatus: 'pending' })),
+        ...approverTasksRaw.map((item) => ({ ...item, role: 'Approver' as const }))
+      ];
+      const dedupe = new Set<string>();
+      taskRows = rows
+        .map((item) => {
+          const key = `${item.id}:${item.role}`;
+          if (dedupe.has(key)) return null;
+          dedupe.add(key);
+          const userGroupRights = item.groupId ? rightsByGroupId.get(item.groupId) ?? '' : '';
+          let taskState = resolveTaskStateForUser({
+            role: item.role,
+            status: item.status,
+            rights: userGroupRights
+          });
+          if (item.role === 'Editor' && (item as any).submissionStatus === 'submitted') {
+            taskState = 'done';
+          }
+          if (item.role === 'Approver' && item.approvalStatus === 'approved') {
+            taskState = 'done';
+          }
+          return {
+            id: item.id,
+            createdAt: item.createdAt,
+            status: item.status,
+            groupId: item.groupId,
+            groupName: item.groupName,
+            templateKey: item.templateKey,
+            templateName: item.templateName,
+            role: item.role,
+            taskState
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => !!item)
+        .filter((item) => (showDone ? true : item.taskState !== 'done'))
+        .filter((item) => (showDone ? true : !isArchivedDocumentStatus(item.status)))
+        .sort((a, b) => {
+          const stateRank: Record<'open' | 'waiting' | 'done', number> = {
+            open: 0,
+            waiting: 1,
+            done: 2
+          };
+          return stateRank[a.taskState] - stateRank[b.taskState];
         });
-        return { ...item, role, taskState };
-      })
-      .filter(
-        (item): item is (typeof rawTaskRows)[number] & { role: 'Editor' | 'Approver'; taskState: 'open' | 'waiting' | 'done' } =>
-          !!item
-      )
-      .sort((a, b) => {
-        const stateRank: Record<'open' | 'waiting' | 'done', number> = {
-          open: 0,
-          waiting: 1,
-          done: 2
-        };
-        return stateRank[a.taskState] - stateRank[b.taskState];
-      });
+    } else {
+      const rawTaskRows = await db
+        .select({
+          id: fpDocuments.id,
+          createdAt: fpDocuments.createdAt,
+          status: fpDocuments.status,
+          editorUserId: fpDocuments.editorUserId,
+          approverUserId: fpDocuments.approverUserId,
+          assigneeUserId: fpDocuments.assigneeUserId,
+          reviewerUserId: fpDocuments.reviewerUserId,
+          groupId: fpDocuments.groupId,
+          groupName: fpGroups.name,
+          templateKey: fpTemplates.key,
+          templateName: fpTemplates.name
+        })
+        .from(fpDocuments)
+        .innerJoin(fpTemplates, eq(fpTemplates.id, fpDocuments.templateId))
+        .leftJoin(fpGroups, eq(fpGroups.id, fpDocuments.groupId))
+        .where(
+          or(
+            eq(fpDocuments.editorUserId, currentUser.id),
+            eq(fpDocuments.approverUserId, currentUser.id),
+            eq(fpDocuments.assigneeUserId, currentUser.id),
+            eq(fpDocuments.reviewerUserId, currentUser.id)
+          )
+        )
+        .orderBy(desc(fpDocuments.createdAt));
+
+      taskRows = rawTaskRows
+        .map((item) => {
+          const userGroupRights = item.groupId ? rightsByGroupId.get(item.groupId) ?? '' : '';
+          const editorUserId = item.editorUserId ?? item.assigneeUserId;
+          const approverUserId = item.approverUserId ?? item.reviewerUserId;
+          const isEditorAssigned = editorUserId === currentUser.id;
+          const isApproverAssigned = approverUserId === currentUser.id;
+          if (!isEditorAssigned && !isApproverAssigned) return null;
+
+          const normalizedStatus = item.status.trim().toLowerCase();
+          const role: 'Editor' | 'Approver' =
+            isEditorAssigned && isApproverAssigned
+              ? normalizedStatus === 'submitted' || normalizedStatus === 'approved'
+                ? 'Approver'
+                : 'Editor'
+              : isEditorAssigned
+                ? 'Editor'
+                : 'Approver';
+          const taskState = resolveTaskStateForUser({
+            role,
+            status: item.status,
+            rights: userGroupRights
+          });
+          return {
+            id: item.id,
+            createdAt: item.createdAt,
+            status: item.status,
+            groupId: item.groupId,
+            groupName: item.groupName,
+            templateKey: item.templateKey,
+            templateName: item.templateName,
+            role,
+            taskState
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => !!item)
+        .filter((item) => (showDone ? true : !isDoneDocumentStatus(item.status)))
+        .sort((a, b) => {
+          const stateRank: Record<'open' | 'waiting' | 'done', number> = {
+            open: 0,
+            waiting: 1,
+            done: 2
+          };
+          return stateRank[a.taskState] - stateRank[b.taskState];
+        });
+    }
 
     await reply.renderPage('workspaces/me.ejs', {
       memberships,
       tasks: taskRows,
-      tasksUnavailableMessage: ''
+      tasksUnavailableMessage: '',
+      showDone
     });
   });
 
@@ -2671,17 +4331,19 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
               name: fpTemplates.name,
               description: fpTemplates.description,
               state: fpTemplates.state,
+              workflowRef: fpTemplates.workflowRef,
               version: fpTemplates.version,
               templateJson: fpTemplates.templateJson,
               publishedAt: fpTemplates.publishedAt
             })
             .from(fpTemplates)
-            .where(and(eq(fpTemplates.key, selectedTemplate.key), eq(fpTemplates.state, 'published')))
+            .where(and(eq(fpTemplates.key, selectedTemplate.key), sql`lower(${fpTemplates.state}) in ('published', 'active')`))
             .orderBy(desc(fpTemplates.version))
         : [];
     const template = latestPublishedRows[0] ?? selectedTemplate;
 
     const templateJson = parseTemplateJson(template.templateJson);
+    const workflowRuntime = await loadWorkflowRuntimeForTemplate(db, template as any);
     const assignmentContext = await resolveTemplateAssignmentContext(db, template.id);
     const externalRefs: Record<string, string> = {};
     const snapshots: Record<string, string> = {};
@@ -2699,7 +4361,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         externalRefs[fieldKey] = selectedId;
 
         try {
-          const source = normalizeLookupSource(field);
+          const source = await resolveLookupSource(field, { db });
           const { valueField, labelField } = resolveLookupFieldNames(field);
           const options = await fetchLookupOptions(erpBaseUrl, source, externalRefs, valueField, labelField);
           const selectedOption = options.find((item) => item.value === selectedId);
@@ -2719,19 +4381,6 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       }
     }
 
-    try {
-      await ensureErpCustomerOrderReference({
-        templateJson,
-        externalRefs,
-        snapshots,
-        data,
-        erpBaseUrl
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to create ERP customer order';
-      return reply.status(502).send({ message });
-    }
-
     const baseCreateData = sanitizeStatusSourceOfTruthData(data);
     const splitCreate = hasDocumentActorColumns
       ? splitDocumentActorColumns(baseCreateData)
@@ -2742,7 +4391,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       .values({
         templateId: template.id,
         ...(hasDocumentTemplateVersion ? { templateVersion: template.version ?? 1 } : {}),
-        status: templateJson.workflow.initial,
+        status: normalizeDocumentStatus(workflowRuntime.initialStatus),
         groupId: assignmentContext.chosenGroupId,
         ...(hasDocumentActorColumns
           ? {
@@ -2779,6 +4428,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
+    const workflowRuntime = await loadWorkflowRuntimeForTemplate(db, template as any);
     const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
     const query = toFormRecord(request.query);
     const errorFromQuery = normalizeOptionalFilter(getFormString(query, 'error'));
@@ -2787,11 +4437,16 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     await renderDocumentDetailPage({
       db,
       hasDocumentActorColumns,
+      hasDocumentMultiAssignments: supportsMultiAssignments,
       reply,
       template,
       document,
       assignmentGroupId,
       groupName,
+      workflowRuntime,
+      assignmentsOpen: ['1', 'true', 'on', 'yes'].includes(
+        normalizeOptionalFilter(getFormString(query, 'assignments')).toLowerCase()
+      ),
       ...(errorFromQuery ? { errorMessage: errorFromQuery } : {}),
       ...(successFromQuery ? { successMessage: successFromQuery } : {})
     });
@@ -2806,6 +4461,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
     if (!document) {
       return reply.status(404).send({ message: 'Document not found' });
+    }
+    if (isArchivedDocumentStatus(document.status)) {
+      return sendUiError(request, reply, 400, 'Archived documents are read-only.');
     }
     const rbacGroupIdForSave = await resolveDocumentRbacGroupId(db, document);
     if (rbacGroupIdForSave) {
@@ -2834,8 +4492,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     }
 
     const templateJson = parseTemplateJson(template.templateJson);
+    const workflowRuntime = await loadWorkflowRuntimeForTemplate(db, template as any);
     const form = toFormRecord(request.body);
-    const editableKeys = resolveEditableFieldKeys(templateJson, document.status);
+    const editableKeys = resolveEditableFieldKeys(templateJson, document.status, workflowRuntime);
     const baseSaveData = sanitizeStatusSourceOfTruthData(
       applyEditableDataUpdate(templateJson, (document.dataJson ?? {}) as Record<string, unknown>, form, editableKeys)
     );
@@ -2885,6 +4544,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!document) {
       return sendUiError(request, reply, 404, 'Document not found');
     }
+    if (isArchivedDocumentStatus(document.status)) {
+      return sendUiError(request, reply, 400, 'Archived documents are read-only.');
+    }
     const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
     if (!assignmentGroupId) return sendUiError(request, reply, 400, 'No group assigned');
 
@@ -2914,13 +4576,28 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return sendUiError(request, reply, 400, 'Selected user lacks write rights for editor assignment');
     }
 
-    await db
-      .update(fpDocuments)
-      .set({ editorUserId: bodyParsed.data.userId, assigneeUserId: bodyParsed.data.userId })
-      .where(eq(fpDocuments.id, document.id));
+    if (supportsMultiAssignments) {
+      await db
+        .insert(fpDocumentEditors)
+        .values({ documentId: document.id, userId: bodyParsed.data.userId })
+        .onConflictDoNothing();
+      await db
+        .insert(fpDocumentSubmissions)
+        .values({ documentId: document.id, userId: bodyParsed.data.userId, status: 'pending' })
+        .onConflictDoNothing();
+      await db
+        .update(fpDocuments)
+        .set({ editorUserId: bodyParsed.data.userId, assigneeUserId: bodyParsed.data.userId })
+        .where(eq(fpDocuments.id, document.id));
+    } else {
+      await db
+        .update(fpDocuments)
+        .set({ editorUserId: bodyParsed.data.userId, assigneeUserId: bodyParsed.data.userId })
+        .where(eq(fpDocuments.id, document.id));
+    }
 
     reply.code(303);
-    return reply.redirect(`/documents/${document.id}`);
+    return reply.redirect(`/documents/${document.id}?assignments=1`);
   };
 
   const setDocumentApproverAssignment = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -2947,6 +4624,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
     if (!document) {
       return sendUiError(request, reply, 404, 'Document not found');
+    }
+    if (isArchivedDocumentStatus(document.status)) {
+      return sendUiError(request, reply, 400, 'Archived documents are read-only.');
     }
     const assignmentGroupId = await resolveDocumentRbacGroupId(db, document);
     if (!assignmentGroupId) return sendUiError(request, reply, 400, 'No group assigned');
@@ -2977,20 +4657,149 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return sendUiError(request, reply, 400, 'Selected user lacks execute rights for approver assignment');
     }
 
-    await db
-      .update(fpDocuments)
-      .set({ approverUserId: bodyParsed.data.userId, reviewerUserId: bodyParsed.data.userId })
-      .where(eq(fpDocuments.id, document.id));
+    if (supportsMultiAssignments) {
+      await db
+        .insert(fpDocumentApprovals)
+        .values({ documentId: document.id, userId: bodyParsed.data.userId, status: 'pending' })
+        .onConflictDoNothing();
+      await db
+        .update(fpDocuments)
+        .set({ approverUserId: bodyParsed.data.userId, reviewerUserId: bodyParsed.data.userId })
+        .where(eq(fpDocuments.id, document.id));
+    } else {
+      await db
+        .update(fpDocuments)
+        .set({ approverUserId: bodyParsed.data.userId, reviewerUserId: bodyParsed.data.userId })
+        .where(eq(fpDocuments.id, document.id));
+    }
 
     reply.code(303);
-    return reply.redirect(`/documents/${document.id}`);
+    return reply.redirect(`/documents/${document.id}?assignments=1`);
   };
 
   app.post('/documents/:id/assign/editor', setDocumentEditorAssignment);
   app.post('/documents/:id/assign/approver', setDocumentApproverAssignment);
+  app.post('/documents/:id/assign/editor/remove', async (request, reply) => {
+    const paramsParsed = documentIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid document id');
+    }
+    const form = toFormRecord(request.body);
+    const userId = getFormString(form, 'userId');
+    if (!z.string().uuid().safeParse(userId).success) {
+      return sendUiError(request, reply, 400, 'Invalid userId');
+    }
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
+    if (!document) return sendUiError(request, reply, 404, 'Document not found');
+    if (!supportsMultiAssignments) {
+      await db
+        .update(fpDocuments)
+        .set({
+          editorUserId: document.editorUserId === userId ? null : document.editorUserId,
+          assigneeUserId: document.editorUserId === userId ? null : document.editorUserId
+        })
+        .where(eq(fpDocuments.id, document.id));
+      reply.code(303);
+      return reply.redirect(`/documents/${document.id}?assignments=1`);
+    }
+    await db
+      .delete(fpDocumentEditors)
+      .where(and(eq(fpDocumentEditors.documentId, document.id), eq(fpDocumentEditors.userId, userId)));
+    await db
+      .delete(fpDocumentSubmissions)
+      .where(and(eq(fpDocumentSubmissions.documentId, document.id), eq(fpDocumentSubmissions.userId, userId)));
+    const remainingEditors = await db.query.fpDocumentEditors.findMany({
+      where: eq(fpDocumentEditors.documentId, document.id)
+    });
+    const fallbackEditor = remainingEditors[0]?.userId ?? null;
+    await db
+      .update(fpDocuments)
+      .set({ editorUserId: fallbackEditor, assigneeUserId: fallbackEditor })
+      .where(eq(fpDocuments.id, document.id));
+    reply.code(303);
+    return reply.redirect(`/documents/${document.id}?assignments=1`);
+  });
+  app.post('/documents/:id/assign/approver/remove', async (request, reply) => {
+    const paramsParsed = documentIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid document id');
+    }
+    const form = toFormRecord(request.body);
+    const userId = getFormString(form, 'userId');
+    if (!z.string().uuid().safeParse(userId).success) {
+      return sendUiError(request, reply, 400, 'Invalid userId');
+    }
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
+    if (!document) return sendUiError(request, reply, 404, 'Document not found');
+    if (!supportsMultiAssignments) {
+      await db
+        .update(fpDocuments)
+        .set({
+          approverUserId: document.approverUserId === userId ? null : document.approverUserId,
+          reviewerUserId: document.approverUserId === userId ? null : document.approverUserId
+        })
+        .where(eq(fpDocuments.id, document.id));
+      reply.code(303);
+      return reply.redirect(`/documents/${document.id}?assignments=1`);
+    }
+    await db
+      .delete(fpDocumentApprovals)
+      .where(and(eq(fpDocumentApprovals.documentId, document.id), eq(fpDocumentApprovals.userId, userId)));
+    const remainingApprovers = await db.query.fpDocumentApprovals.findMany({
+      where: eq(fpDocumentApprovals.documentId, document.id)
+    });
+    const fallbackApprover = remainingApprovers[0]?.userId ?? null;
+    await db
+      .update(fpDocuments)
+      .set({ approverUserId: fallbackApprover, reviewerUserId: fallbackApprover })
+      .where(eq(fpDocuments.id, document.id));
+    reply.code(303);
+    return reply.redirect(`/documents/${document.id}?assignments=1`);
+  });
   // Backward compatibility.
   app.post('/documents/:id/assignments/editor', setDocumentEditorAssignment);
   app.post('/documents/:id/assignments/approver', setDocumentApproverAssignment);
+
+  app.post('/documents/:id/archive', async (request, reply) => {
+    const paramsParsed = documentIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid document id');
+    }
+
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
+    if (!document) {
+      return sendUiError(request, reply, 404, 'Document not found');
+    }
+
+    if (isArchivedDocumentStatus(document.status)) {
+      reply.code(303);
+      return reply.redirect(`/documents/${document.id}`);
+    }
+
+    const rbacGroupId = await resolveDocumentRbacGroupId(db, document);
+    if (rbacGroupId) {
+      const currentUser = request.currentUser as CurrentUser | null;
+      if (!currentUser) {
+        return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+      }
+      const members = await db.query.fpGroupMembers.findMany({ where: eq(fpGroupMembers.groupId, rbacGroupId) });
+      const membership = members.find((item) => item.userId === currentUser.id);
+      const userRights = membership?.rights ?? '';
+      if (!membership || !hasRequiredRights(userRights, ['execute'])) {
+        return sendUiError(
+          request,
+          reply,
+          403,
+          `Forbidden: requires ${describeRequiredRights(['execute'])}, user has ${userRights || '-'}`
+        );
+      }
+    }
+
+    await db.update(fpDocuments).set({ status: 'archived' }).where(eq(fpDocuments.id, document.id));
+
+    reply.code(303);
+    return reply.redirect(`/documents/${document.id}`);
+  });
 
   app.get('/documents/:id/action/:controlKey', async (request, reply) => {
     const paramsParsed = documentActionParamSchema.safeParse(request.params);
@@ -3017,14 +4826,18 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!template) {
       return reply.status(404).send({ message: 'Template not found' });
     }
-
+    const normalizedDocumentStatus = normalizeDocumentStatus(document.status);
     const templateJson = parseTemplateJson(template.templateJson);
+    const workflowRuntime = await loadWorkflowRuntimeForTemplate(db, template as any);
     const redirectWithActionError = (message: string) => {
       const next = new URL(`/documents/${document.id}`, 'http://localhost');
       next.searchParams.set('error', message.slice(0, 500));
       reply.code(303);
       return reply.redirect(`${next.pathname}${next.search}`);
     };
+    if (isArchivedDocumentStatus(normalizedDocumentStatus)) {
+      return redirectWithActionError('Archived documents are read-only.');
+    }
     const redirectWithActionMessage = (message: string) => {
       const next = new URL(`/documents/${document.id}`, 'http://localhost');
       next.searchParams.set('message', message.slice(0, 500));
@@ -3035,41 +4848,61 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const groupName = await resolveGroupName(db, document.groupId ?? assignmentGroupId ?? null);
     const query = toFormRecord(request.query);
     const source = getFormString(query, 'source');
-    const isUiButtonRequest = source === 'ui';
     const layoutButtonKinds = collectLayoutButtonKinds(templateJson);
     const layoutButtonKind = layoutButtonKinds.get(paramsParsed.data.controlKey);
     const isLayoutButtonAction = !!layoutButtonKind;
-
-    if (isUiButtonRequest && !layoutButtonKind) {
-      return redirectWithActionError('UI button is not configured in layout.');
+    const invocation = resolveActionInvocation({ source, layoutButtonKind, isLayoutButtonAction });
+    if ('error' in invocation && invocation.error) {
+      return redirectWithActionError(invocation.error);
     }
-    if (isUiButtonRequest && layoutButtonKind === 'process') {
-      return redirectWithActionError('UI button cannot execute process action');
-    }
-
-    const stateDef = (templateJson.workflow as any)?.states?.[document.status];
-    const allowedButtons = Array.isArray(stateDef?.buttons) ? stateDef.buttons : [];
+    const executionSource = invocation.executionSource;
+    const isUiButtonRequest = executionSource === 'ui';
+    const currentEditorSubmissions = supportsMultiAssignments ? await loadEditorSubmissionStates(db, document.id) : [];
+    const currentApproverDecisions = supportsMultiAssignments ? await loadApproverDecisionStates(db, document.id) : [];
+    const workflowEvaluation = evaluateWorkflow({
+      workflow: workflowRuntime,
+      status: normalizedDocumentStatus,
+      editorSubmissions: currentEditorSubmissions,
+      approverDecisions: currentApproverDecisions
+    });
+    const allowedButtons = workflowEvaluation.visibleButtons;
 
     if (!isUiButtonRequest && !isLayoutButtonAction && !allowedButtons.includes(paramsParsed.data.controlKey)) {
       return redirectWithActionError('Control is not allowed in the current status.');
     }
 
-    const controls = ((templateJson as any).controls ?? {}) as Record<string, { action?: string }>;
     const actions = ((templateJson as any).actions ?? {}) as Record<string, unknown>;
+    const legacyControls = ((templateJson as any).controls ?? {}) as Record<string, { action?: string }>;
+    const controlKey = paramsParsed.data.controlKey;
     const actionKey =
-      controls[paramsParsed.data.controlKey]?.action ??
-      (isLayoutButtonAction && actions[paramsParsed.data.controlKey] ? paramsParsed.data.controlKey : undefined);
+      (actions[controlKey] ? controlKey : undefined) ??
+      legacyControls[controlKey]?.action ??
+      (isLayoutButtonAction && actions[controlKey] ? controlKey : undefined) ??
+      (isStandardProcessAction(controlKey) ? controlKey : undefined);
     if (!actionKey) {
       return redirectWithActionError('Control action is not configured.');
     }
+    const implicitProcessAction =
+      !isUiButtonRequest && !isLayoutButtonAction && isStandardProcessAction(controlKey)
+        ? ({
+            type: 'setStatus',
+            to: workflowEvaluation.nextStatusByAction[controlKey] ?? normalizedDocumentStatus
+          } as const)
+        : null;
+    const actionDef = actions[actionKey] ?? implicitProcessAction;
+    if (!actionDef) {
+      return redirectWithActionError(`Action "${actionKey}" is not defined.`);
+    }
+    const macroRefs = collectMacroRefsFromActionDefinition(actionDef);
     const currentUser = request.currentUser as CurrentUser | null;
 
     app.log.info({
       docId: document.id,
       actionKey,
-      source: isUiButtonRequest ? 'ui' : 'process',
+      source: executionSource,
       activeUser: currentUser?.username ?? null,
-      templateId: document.templateId
+      templateId: document.templateId,
+      macroRefs
     }, 'Action execution requested');
 
     const required = resolveActionPermissionRequirements(templateJson, paramsParsed.data.controlKey, actionKey);
@@ -3096,21 +4929,41 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const controlName = paramsParsed.data.controlKey.toLowerCase();
     const actionName = actionKey.toLowerCase();
     const isSubmitAction = controlName.includes('submit') || actionName.includes('submit');
+    const isRejectAction = controlName.includes('reject') || actionName.includes('reject');
     const isApproveOrRejectAction =
       controlName.includes('approve') ||
       controlName.includes('reject') ||
       actionName.includes('approve') ||
       actionName.includes('reject');
 
-    if (isSubmitAction && document.editorUserId && currentUser && currentUser.id !== document.editorUserId) {
-      return redirectWithActionError('Forbidden: submit is limited to the assigned editor.');
-    }
-    if (isApproveOrRejectAction && document.approverUserId && currentUser && currentUser.id !== document.approverUserId) {
-      return redirectWithActionError('Forbidden: approve/reject is limited to the assigned approver.');
+    if (supportsMultiAssignments && currentUser) {
+      if (isSubmitAction) {
+        const editorRows = await db.query.fpDocumentEditors.findMany({
+          where: eq(fpDocumentEditors.documentId, document.id)
+        });
+        if (editorRows.length > 0 && !editorRows.some((item) => item.userId === currentUser.id)) {
+          return redirectWithActionError('Forbidden: submit is limited to assigned editors.');
+        }
+      }
+      if (isApproveOrRejectAction) {
+        const approvalRows = await db.query.fpDocumentApprovals.findMany({
+          where: eq(fpDocumentApprovals.documentId, document.id)
+        });
+        if (approvalRows.length > 0 && !approvalRows.some((item) => item.userId === currentUser.id)) {
+          return redirectWithActionError('Forbidden: approve/reject is limited to assigned approvers.');
+        }
+      }
+    } else {
+      if (isSubmitAction && document.editorUserId && currentUser && currentUser.id !== document.editorUserId) {
+        return redirectWithActionError('Forbidden: submit is limited to the assigned editor.');
+      }
+      if (isApproveOrRejectAction && document.approverUserId && currentUser && currentUser.id !== document.approverUserId) {
+        return redirectWithActionError('Forbidden: approve/reject is limited to the assigned approver.');
+      }
     }
 
     const form = toFormRecord(request.body);
-    const editableKeys = resolveEditableFieldKeys(templateJson, document.status);
+    const editableKeys = resolveEditableFieldKeys(templateJson, normalizedDocumentStatus, workflowRuntime);
     const baseActionData = sanitizeStatusSourceOfTruthData(
       applyEditableDataUpdate(templateJson, (document.dataJson ?? {}) as Record<string, unknown>, form, editableKeys)
     );
@@ -3128,10 +4981,6 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         : {})
     };
 
-    if (isUiButtonRequest && actionKey === 'save') {
-      return redirectWithActionError('UI button cannot execute process action');
-    }
-
     if (actionKey === 'save') {
       await db
         .update(fpDocuments)
@@ -3144,11 +4993,6 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.redirect(`/documents/${document.id}`);
     }
 
-    const actionDef = actions[actionKey];
-    if (!actionDef) {
-      return redirectWithActionError(`Action "${actionKey}" is not defined.`);
-    }
-
     if (isUiButtonRequest && !isUiSafeActionDefinition(actionDef)) {
       return redirectWithActionError('UI button cannot execute process action');
     }
@@ -3159,6 +5003,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         docId: document.id,
         templateId: document.templateId,
         actionKey,
+        source: executionSource,
+        actionType: resolveActionType(actionDef),
+        macroRefs,
         runtime: {
           templateDefinitionExists: !!runtimeTemplateContext.templateDefinition,
           templateDefinitionHasFullSchema: !!runtimeTemplateContext.templateDefinition?.fullSchema,
@@ -3176,7 +5023,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       const result = await executeActionDefinition({
         actionDef: actionDef as any,
         context: {
-          doc: { id: document.id, status: document.status },
+          doc: { id: document.id, status: normalizedDocumentStatus },
           data: actionDataContext,
           external: ((document.externalRefsJson ?? {}) as Record<string, unknown>) ?? {},
           snapshot: ((document.snapshotsJson ?? {}) as Record<string, unknown>) ?? {}
@@ -3187,7 +5034,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           templateJson,
           templateDefinition: runtimeTemplateContext.templateDefinition,
           schema: runtimeTemplateContext.schema,
-          document: { id: document.id, status: document.status },
+          document: { id: document.id, status: normalizedDocumentStatus },
           form
         },
         onMacroEvent: (event) => {
@@ -3211,10 +5058,73 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         const splitActionResult = hasDocumentActorColumns
           ? splitDocumentActorColumns(baseActionResultData)
           : { dataJson: baseActionResultData, editorUserId: undefined, approverUserId: undefined };
+        let nextStatus = result.status;
+        let nextEditorSubmissions = currentEditorSubmissions.map((item) => ({ ...item }));
+        let nextApproverDecisions = currentApproverDecisions.map((item) => ({ ...item }));
+        if (supportsMultiAssignments && isSubmitAction && currentUser) {
+          await tx
+            .update(fpDocumentSubmissions)
+            .set({ status: 'submitted', submittedAt: new Date(), updatedAt: new Date() })
+            .where(and(eq(fpDocumentSubmissions.documentId, document.id), eq(fpDocumentSubmissions.userId, currentUser.id)));
+          nextEditorSubmissions = nextEditorSubmissions.map((item) =>
+            item.userId === currentUser.id ? { ...item, status: 'submitted', submittedAt: new Date() } : item
+          );
+        }
+        if (supportsMultiAssignments && isApproveOrRejectAction && currentUser) {
+          const decisionStatus = isRejectAction ? 'rejected' : 'approved';
+          const decisionAt = new Date();
+          await tx
+            .update(fpDocumentApprovals)
+            .set({
+              status: decisionStatus,
+              approvedAt: isRejectAction ? null : decisionAt,
+              decidedAt: decisionAt,
+              updatedAt: decisionAt
+            })
+            .where(and(eq(fpDocumentApprovals.documentId, document.id), eq(fpDocumentApprovals.userId, currentUser.id)));
+          nextApproverDecisions = nextApproverDecisions.map((item) =>
+            item.userId === currentUser.id ? { ...item, status: decisionStatus, decidedAt: decisionAt } : item
+          );
+        }
+        if (supportsMultiAssignments) {
+          const derivedEvaluation = evaluateWorkflow({
+            workflow: workflowRuntime,
+            status: normalizedDocumentStatus,
+            editorSubmissions: nextEditorSubmissions,
+            approverDecisions: nextApproverDecisions
+          });
+          if (isSubmitAction) {
+            nextStatus = resolveNextStatus({
+              workflow: workflowRuntime,
+              status: normalizedDocumentStatus,
+              editorSubmissions: nextEditorSubmissions,
+              approverDecisions: nextApproverDecisions
+            }).submit ?? nextStatus;
+          }
+          if (isApproveOrRejectAction) {
+            nextStatus = resolveNextStatus({
+              workflow: workflowRuntime,
+              status: normalizedDocumentStatus,
+              editorSubmissions: nextEditorSubmissions,
+              approverDecisions: nextApproverDecisions
+            }).approve ?? nextStatus;
+            if (isRejectAction) {
+              nextStatus = resolveNextStatus({
+                workflow: workflowRuntime,
+                status: normalizedDocumentStatus,
+                editorSubmissions: nextEditorSubmissions,
+                approverDecisions: nextApproverDecisions
+              }).reject ?? nextStatus;
+            }
+          }
+          if (!isSubmitAction && !isApproveOrRejectAction && derivedEvaluation.nextStatusByAction[actionKey]) {
+            nextStatus = derivedEvaluation.nextStatusByAction[actionKey];
+          }
+        }
         await tx
           .update(fpDocuments)
           .set({
-            status: result.status,
+            status: nextStatus,
             dataJson: splitActionResult.dataJson,
             ...(hasDocumentActorColumns && splitActionResult.editorUserId !== undefined
               ? { editorUserId: splitActionResult.editorUserId, assigneeUserId: splitActionResult.editorUserId }
@@ -3235,7 +5145,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     } catch (error) {
       let message = error instanceof Error ? error.message : 'Action execution failed.';
       if (error instanceof ExternalCallError && error.status === 409) {
-        message = `Action "${actionKey}" is not valid for current document status "${document.status}" (ERP transition rejected with 409).`;
+        message = `Action "${actionKey}" is not valid for current document status "${normalizedDocumentStatus}" (ERP transition rejected with 409).`;
       }
       if (message.startsWith('Macro not enabled:')) {
         app.log.warn(
@@ -3253,9 +5163,10 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         {
           docId: document.id,
           actionKey,
-          source: isUiButtonRequest ? 'ui' : 'process',
+          source: executionSource,
           activeUser: currentUser?.username ?? null,
           templateId: document.templateId,
+          macroRefs,
           error: message,
           stack: error instanceof Error ? error.stack : undefined
         },
@@ -3266,13 +5177,19 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
   });
 
   app.get('/api/lookup', async (request, reply) => {
+    const query = toFormRecord(request.query);
+    let parsedTemplateId = '';
+    let parsedFieldKey = '';
+    let resolvedSourceForLog: unknown = undefined;
+    let resolvedUrlForLog: string | undefined = undefined;
     try {
-      const query = toFormRecord(request.query);
       const parsed = lookupQuerySchema.safeParse(query);
 
       if (!parsed.success) {
         return reply.type('text/html').send('<option value="">Invalid lookup request</option>');
       }
+      parsedTemplateId = parsed.data.templateId;
+      parsedFieldKey = parsed.data.fieldKey;
 
       const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, parsed.data.templateId) });
       if (!template) {
@@ -3287,9 +5204,11 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       }
 
       const externalRefs = collectExternalRefsFromQuery(query);
-      const source = normalizeLookupSource(field);
+      const source = await resolveLookupSource(field, { db });
       const { valueField, labelField } = resolveLookupFieldNames(field);
+      resolvedSourceForLog = source;
       const lookupResult = await fetchLookupOptionsDetailed(erpBaseUrl, source, externalRefs, valueField, labelField);
+      resolvedUrlForLog = lookupResult.url;
       app.log.info(
         {
           templateId: parsed.data.templateId,
@@ -3313,7 +5232,17 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       ].join('');
 
       return reply.type('text/html').send(html);
-    } catch {
+    } catch (error) {
+      app.log.warn(
+        {
+          templateId: parsedTemplateId || undefined,
+          fieldKey: parsedFieldKey || undefined,
+          resolvedSource: resolvedSourceForLog,
+          resolvedUrl: resolvedUrlForLog,
+          error: error instanceof Error ? error.message : String(error ?? 'Lookup failed')
+        },
+        'Lookup failed'
+      );
       return reply.type('text/html').send('<option value="">Lookup unavailable</option>');
     }
   });

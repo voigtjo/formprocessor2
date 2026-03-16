@@ -1,11 +1,30 @@
 <header class="page-header">
   <h1>Edit Template</h1>
-  <p class="muted">Template ID: <code><%= template.id %></code> · Version: <code>v<%= template.version %></code> · State: <span class="badge"><%= template.state %></span></p>
+  <p class="muted">Template ID: <code><%= template.id %></code> · Version: <code>v<%= template.version %></code> · State: <span class="badge"><%= String(template.state || '').toLowerCase() === 'archived' ? 'inactive' : String(template.state || '').toLowerCase() %></span></p>
 </header>
+<%
+  const normalizedTemplateState = String(template.state || '').toLowerCase() === 'archived' ? 'inactive' : String(template.state || '').toLowerCase();
+  const isInactiveTemplate = normalizedTemplateState === 'inactive';
+%>
+<% if (isInactiveTemplate) { %>
+  <div class="card">
+    <strong>Inactive template:</strong> This version is read-only.
+  </div>
+<% } %>
 
 <% if (errorMessage) { %>
   <div class="card error-card">
     <strong>Save failed:</strong> <%= errorMessage %>
+  </div>
+<% } %>
+<% if (warnings && warnings.length > 0) { %>
+  <div class="card">
+    <strong>Compatibility warnings:</strong>
+    <ul>
+      <% warnings.forEach((warning) => { %>
+        <li><%= warning %></li>
+      <% }) %>
+    </ul>
   </div>
 <% } %>
 
@@ -13,23 +32,23 @@
   <div class="row">
     <div class="col col-6">
       <label for="key">Key</label>
-      <input id="key" name="key" type="text" value="<%= form?.key ?? '' %>" required />
+      <input id="key" name="key" type="text" value="<%= form?.key ?? '' %>" required <%= isInactiveTemplate ? 'disabled' : '' %> />
     </div>
     <div class="col col-6">
       <label for="name">Name</label>
-      <input id="name" name="name" type="text" value="<%= form?.name ?? '' %>" required />
+      <input id="name" name="name" type="text" value="<%= form?.name ?? '' %>" required <%= isInactiveTemplate ? 'disabled' : '' %> />
     </div>
   </div>
 
   <div class="row">
     <div class="col col-6">
       <label for="description">Description</label>
-      <input id="description" name="description" type="text" value="<%= form?.description ?? '' %>" />
+      <input id="description" name="description" type="text" value="<%= form?.description ?? '' %>" <%= isInactiveTemplate ? 'disabled' : '' %> />
     </div>
     <div class="col col-6">
       <label for="state">State</label>
-      <select id="state" name="state" required>
-        <% ['draft', 'published', 'archived'].forEach((stateOption) => { %>
+      <select id="state" name="state" required <%= isInactiveTemplate ? 'disabled' : '' %>>
+        <% ['draft', 'published', 'inactive'].forEach((stateOption) => { %>
           <option value="<%= stateOption %>" <%= (form?.state ?? 'draft') === stateOption ? 'selected' : '' %>><%= stateOption %></option>
         <% }) %>
       </select>
@@ -37,19 +56,164 @@
   </div>
 
   <div class="row">
+    <div class="col col-6">
+      <label for="workflow_ref">Workflow</label>
+      <select id="workflow_ref" name="workflow_ref" required <%= isInactiveTemplate ? 'disabled' : '' %>>
+        <% (workflows || []).forEach((workflow) => { %>
+          <option value="<%= workflow.key %>" <%= (form?.workflow_ref ?? '') === workflow.key ? 'selected' : '' %>><%= workflow.name %> (<%= workflow.key %> v<%= workflow.version %>)</option>
+        <% }) %>
+      </select>
+      <% if (form?.workflow_ref) { %>
+        <p class="muted">Current workflowRef: <code><%= form.workflow_ref %></code></p>
+      <% } %>
+    </div>
+  </div>
+
+  <div class="row">
     <div class="col">
       <label for="template_json">template_json</label>
-      <textarea id="template_json" name="template_json" rows="22"><%= form?.template_json ?? '' %></textarea>
+      <p class="muted">V1 template JSON contains fields, layout and fachliche Zusatzaktionen. Workflow and standard process buttons come from the referenced workflow.</p>
+      <textarea id="template_json" name="template_json" rows="22" <%= isInactiveTemplate ? 'disabled' : '' %>><%= form?.template_json ?? '' %></textarea>
     </div>
   </div>
 
   <div class="actions">
-    <button class="btn btn-primary" type="submit">Save Template</button>
-    <% if (template.state === 'draft') { %>
+    <% if (!isInactiveTemplate) { %>
+      <button class="btn btn-primary" type="submit">Save Template</button>
+    <% } %>
+    <% if (!isInactiveTemplate && normalizedTemplateState === 'draft') { %>
       <button class="btn btn-secondary" type="submit" formaction="/templates/<%= template.id %>/publish" formmethod="post">Publish</button>
+    <% } %>
+    <% if (!isInactiveTemplate && (normalizedTemplateState === 'draft' || normalizedTemplateState === 'published')) { %>
+      <button class="btn btn-danger" type="submit" formaction="/templates/<%= template.id %>/archive" formmethod="post">Deactivate template</button>
     <% } %>
   </div>
 </form>
+
+<div class="card">
+  <h3 class="card-title">Workflow</h3>
+  <p>workflowRef: <code><%= form?.workflow_ref || '—' %></code></p>
+  <% const selectedWorkflow = (workflows || []).find((w) => w.key === (form?.workflow_ref || '')); %>
+  <% if (selectedWorkflow) { %>
+    <p><a href="/workflows/<%= selectedWorkflow.id %>">Open workflow <%= selectedWorkflow.name %></a></p>
+  <% } else { %>
+    <p class="muted">Referenced workflow not found in active/draft workflow list.</p>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Verwendete Actions</h3>
+  <% if (!usedActions || usedActions.length === 0) { %>
+    <p class="muted">Keine Actions im template_json definiert.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Action Key</th>
+          <th>Type</th>
+          <th>Step Types</th>
+          <th>API Refs</th>
+          <th>Legacy Macro</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% usedActions.forEach((action) => { %>
+          <tr>
+            <td><code><%= action.actionKey %></code></td>
+            <td><%= action.actionType %></td>
+            <td><%= action.stepTypes && action.stepTypes.length > 0 ? action.stepTypes.join(', ') : '—' %></td>
+            <td><%= action.apiRefs && action.apiRefs.length > 0 ? action.apiRefs.join(', ') : '—' %></td>
+            <td><%= action.legacyMacro ? 'yes' : 'no' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Legacy Macros</h3>
+  <% if (missingMacroRefs && missingMacroRefs.length > 0) { %>
+    <div class="error-card">
+      <strong>Warning:</strong> Template refers to missing macro(s):
+      <%= missingMacroRefs.join(', ') %>
+    </div>
+  <% } %>
+  <% if (!usedMacros || usedMacros.length === 0) { %>
+    <p class="muted">Keine Legacy-Macro-Referenzen im template_json.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Ref</th>
+          <th>Name</th>
+          <th>Kind</th>
+          <th>Enabled</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% usedMacros.forEach((macro) => { %>
+          <tr>
+            <td><code><%= macro.ref %></code></td>
+            <td><%= macro.name || '—' %></td>
+            <td><%= macro.kind || '—' %></td>
+            <td><%= macro.isEnabled === null ? '—' : (macro.isEnabled ? 'yes' : 'no') %></td>
+            <td>
+              <% if (macro.exists) { %>
+                <a href="/macros/<%= encodeURIComponent(macro.ref) %>">Macro öffnen</a>
+              <% } else { %>
+                <span class="muted">missing</span>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Verwendete APIs</h3>
+  <% if (missingApiRefs && missingApiRefs.length > 0) { %>
+    <div class="error-card">
+      <strong>Warning:</strong> Template refers to missing API(s):
+      <%= missingApiRefs.join(', ') %>
+    </div>
+  <% } %>
+  <% if (!usedApis || usedApis.length === 0) { %>
+    <p class="muted">Keine APIs im template_json referenziert.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Ref</th>
+          <th>Key</th>
+          <th>Name</th>
+          <th>State</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% usedApis.forEach((api) => { %>
+          <tr>
+            <td><code><%= api.ref %></code></td>
+            <td><%= api.key || '—' %></td>
+            <td><%= api.name || '—' %></td>
+            <td><%= api.state || '—' %></td>
+            <td>
+              <% if (api.exists && api.key) { %>
+                <a href="/apis/<%= encodeURIComponent(api.key) %>">API öffnen</a>
+              <% } else { %>
+                <span class="muted">missing</span>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
 
 <div class="card">
   <h3 class="card-title">Group Assignments</h3>
@@ -61,9 +225,11 @@
       <% assignedGroups.forEach((item) => { %>
         <li>
           <strong><%= item.groupName %></strong> (<code><%= item.groupKey %></code>)
-          <form method="post" action="/templates/<%= template.id %>/assignments/<%= item.assignmentId %>/delete" class="row">
-            <button class="btn btn-danger" type="submit">Remove</button>
-          </form>
+          <% if (!isInactiveTemplate) { %>
+            <form method="post" action="/templates/<%= template.id %>/assignments/<%= item.assignmentId %>/delete" class="row">
+              <button class="btn btn-danger" type="submit">Remove</button>
+            </form>
+          <% } %>
         </li>
       <% }) %>
     </ul>
@@ -71,7 +237,7 @@
     <p class="muted">No group assignments.</p>
   <% } %>
 
-  <% if (hasGroups && assignableGroups && assignableGroups.length > 0) { %>
+  <% if (!isInactiveTemplate && hasGroups && assignableGroups && assignableGroups.length > 0) { %>
     <form method="post" action="/templates/<%= template.id %>/assignments" class="row">
       <div class="col col-6">
         <label for="groupId">Assign Group</label>
@@ -90,6 +256,10 @@
 
 <div class="actions">
   <a class="btn btn-secondary" href="/templates/<%= template.id %>/preview">Preview</a>
-  <a class="btn btn-primary" href="/documents/new?templateId=<%= template.id %>">New Document</a>
+  <% if (normalizedTemplateState === 'published') { %>
+    <a class="btn btn-primary" href="/documents/new?templateId=<%= template.id %>">New Document</a>
+  <% } else { %>
+    <span class="muted">New Document available only for published templates.</span>
+  <% } %>
   <a class="btn btn-secondary" href="/templates">Back to Templates</a>
 </div>

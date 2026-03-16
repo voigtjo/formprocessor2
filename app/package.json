@@ -10,6 +10,7 @@
     "test": "vitest run",
     "seed": "tsx src/db/seed.ts",
     "seed:rbac": "tsx src/db/seed.ts",
+    "db:reset:content": "tsx src/db/reset-content.ts",
     "db:generate": "DOTENV_CONFIG_PATH=../.env drizzle-kit generate",
     "db:push": "DOTENV_CONFIG_PATH=../.env drizzle-kit push"
   },

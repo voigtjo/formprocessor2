@@ -116,7 +116,7 @@ describe('documents create route', () => {
     expect(insertValuesSpy).toHaveBeenCalledOnce();
     expect(insertValuesSpy.mock.calls[0]?.[0]).toMatchObject({
       templateId,
-      status: 'received',
+      status: 'created',
       groupId: assignedGroupId
     });
 
@@ -154,7 +154,7 @@ describe('documents create route', () => {
     expect(insertValuesSpy).toHaveBeenCalledOnce();
     expect(insertValuesSpy.mock.calls[0]?.[0]).toMatchObject({
       templateId,
-      status: 'received',
+      status: 'created',
       groupId: null
     });
 
@@ -344,6 +344,93 @@ describe('documents create route', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('created -> assigned -> submitted -> approved');
     expect(res.body).toContain('current=submitted');
+
+    await app.close();
+  });
+
+  it('uses workflowRef as the primary source for process buttons when template_json has no workflow block', async () => {
+    const templateId = '00000000-0000-0000-0000-0000000000f4';
+    const documentId = '00000000-0000-0000-0000-0000000000f5';
+    const template = {
+      id: templateId,
+      key: 'customer-order-test',
+      name: 'Customer Order Test',
+      state: 'published',
+      workflowRef: 'production.standard.v1',
+      templateJson: {
+        fields: {},
+        layout: [],
+        actions: {
+          create_customer_order: { type: 'composite', steps: [] }
+        }
+      }
+    };
+
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: vi.fn(async () => ({
+            id: documentId,
+            templateId,
+            status: 'assigned',
+            groupId: null,
+            dataJson: {},
+            externalRefsJson: {},
+            snapshotsJson: {}
+          }))
+        },
+        fpTemplates: {
+          findFirst: vi.fn(async () => template)
+        }
+      },
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: async () => [{
+                id: 'wf-1',
+                key: 'production.standard.v1',
+                name: 'Production Standard',
+                state: 'active',
+                version: 1,
+                workflowJson: {
+                  order: ['created', 'assigned', 'submitted', 'approved'],
+                  initialStatus: 'created',
+                  states: {
+                    created: { buttons: ['assign'] },
+                    assigned: { buttons: ['submit', 'approve'] },
+                    submitted: { buttons: ['approve'] },
+                    approved: { buttons: [] }
+                  },
+                  semantics: { submit: 'global', approval: 'individual' },
+                  actorModel: { editors: 'multiple', approvers: 'multiple' }
+                }
+              }]
+            })
+          })
+        })
+      }))
+    };
+
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+      const processButtons = Array.isArray(data.processButtons)
+        ? (data.processButtons as Array<{ label: string }>).map((item) => item.label).join(', ')
+        : '';
+      this.type('text/plain').send(`buttons=${processButtons}`);
+    });
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/documents/${documentId}`
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('buttons=Submit, Approve');
 
     await app.close();
   });
@@ -573,6 +660,100 @@ describe('documents create route', () => {
     expect(saveRes.statusCode).toBe(303);
     expect(storedDoc.dataJson).toMatchObject({ due_date: '2026-03-13', urgent: false });
 
+    await app.close();
+  });
+
+  it('blocks save for archived documents', async () => {
+    const templateId = '00000000-0000-0000-0000-000000000bb1';
+    const documentId = '00000000-0000-0000-0000-000000000bb2';
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: vi.fn(async () => ({
+            id: documentId,
+            templateId,
+            status: 'archived',
+            groupId: null,
+            dataJson: {},
+            externalRefsJson: {},
+            snapshotsJson: {}
+          }))
+        },
+        fpTemplates: {
+          findFirst: vi.fn(async () => ({
+            id: templateId,
+            key: 'archived-doc-template',
+            name: 'Archived Template',
+            templateJson: {
+              fields: { title: { kind: 'editable', label: 'Title' } },
+              layout: [{ type: 'field', key: 'title' }],
+              workflow: { initial: 'created', states: { created: { editable: ['title'], readonly: [], buttons: [] } } },
+              controls: {},
+              actions: {}
+            }
+          }))
+        }
+      }
+    };
+
+    const app = Fastify();
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/save`,
+      payload: { 'data:title': 'Should fail' }
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ message: 'Archived documents are read-only.' });
+    await app.close();
+  });
+
+  it('archives document via POST /documents/:id/archive', async () => {
+    const templateId = '00000000-0000-0000-0000-000000000cc1';
+    const documentId = '00000000-0000-0000-0000-000000000cc2';
+    let storedStatus = 'created';
+
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: vi.fn(async () => ({
+            id: documentId,
+            templateId,
+            status: storedStatus,
+            groupId: null,
+            dataJson: {},
+            externalRefsJson: {},
+            snapshotsJson: {}
+          }))
+        }
+      },
+      update: vi.fn(() => ({
+        set: vi.fn((values: any) => ({
+          where: vi.fn(async () => {
+            storedStatus = values.status ?? storedStatus;
+          })
+        }))
+      }))
+    };
+
+    const app = Fastify();
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001'
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/archive`
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(storedStatus).toBe('archived');
     await app.close();
   });
 });

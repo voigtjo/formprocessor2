@@ -1,0 +1,48 @@
+<header class="page-header">
+  <h1>Workflows</h1>
+</header>
+<div class="actions">
+  <a class="btn btn-primary" href="/workflows/new">New Workflow</a>
+</div>
+
+<form method="get" action="/workflows" class="row">
+  <div class="col col-6">
+    <label for="workflow-state-filter">State</label>
+    <select id="workflow-state-filter" name="state" onchange="this.form.submit()">
+      <% ['active', 'draft', 'inactive', 'all'].forEach((stateOption) => { %>
+        <option value="<%= stateOption %>" <%= (filters?.state || 'active') === stateOption ? 'selected' : '' %>><%= stateOption %></option>
+      <% }) %>
+    </select>
+  </div>
+  <div class="col">
+    <a class="btn btn-secondary" href="/workflows">Reset</a>
+  </div>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Key</th>
+      <th>Name</th>
+      <th>Version</th>
+      <th>State</th>
+      <th>Updated</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!workflows || workflows.length === 0) { %>
+      <tr><td colspan="6" class="muted">No workflows found.</td></tr>
+    <% } %>
+    <% (workflows || []).forEach((wf) => { %>
+      <tr>
+        <td><code><%= wf.key %></code></td>
+        <td><%= wf.name %></td>
+        <td><code>v<%= wf.version %></code></td>
+        <td><span class="badge"><%= wf.state %></span></td>
+        <td><%= wf.updatedAt ? new Date(wf.updatedAt).toLocaleString() : '—' %></td>
+        <td><a href="/workflows/<%= wf.id %>">Open</a> · <a href="/workflows/<%= wf.id %>/edit">Edit</a></td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>

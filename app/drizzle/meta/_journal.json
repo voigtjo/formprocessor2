@@ -50,6 +50,55 @@
       "when": 1773070000000,
       "tag": "0006_macro_definition_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1773200000000,
+      "tag": "0007_template_macro_links",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1773600000000,
+      "tag": "0008_api_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1773610000000,
+      "tag": "0009_api_catalog_consistency",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1773620000000,
+      "tag": "0010_document_multi_assignments",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1773630000000,
+      "tag": "0011_workflows",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1773640000000,
+      "tag": "0012_document_approval_decision",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1773650000000,
+      "tag": "0013_document_submission_tracking",
+      "breakpoints": true
     }
   ]
 }
