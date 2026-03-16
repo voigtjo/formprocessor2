@@ -4,6 +4,10 @@ import { resolve } from 'node:path';
 import { makeDb } from './index.js';
 import {
   fpApis,
+  fpDocumentApprovals,
+  fpDocumentEditors,
+  fpDocuments,
+  fpDocumentSubmissions,
   fpGroupMembers,
   fpGroups,
   fpTemplateAssignments,
@@ -59,6 +63,7 @@ async function upsertTemplateVersion(
     name: string;
     description: string;
     state: 'draft' | 'published' | 'inactive';
+    workflowRef: string;
     templateJson: Record<string, unknown>;
   }
 ) {
@@ -71,6 +76,7 @@ async function upsertTemplateVersion(
       description: values.description,
       state: values.state,
       publishedAt: values.state === 'published' ? new Date() : null,
+      workflowRef: values.workflowRef,
       templateJson: values.templateJson
     })
     .onConflictDoUpdate({
@@ -80,6 +86,7 @@ async function upsertTemplateVersion(
         description: values.description,
         state: values.state,
         publishedAt: values.state === 'published' ? new Date() : null,
+        workflowRef: values.workflowRef,
         templateJson: values.templateJson
       }
     })
@@ -93,6 +100,115 @@ async function upsertTemplateAssignment(db: Db, templateId: string, groupId: str
 
 async function clearTemplateMacroLinks(db: Db, templateId: string) {
   await db.delete(fpTemplateMacros).where(eq(fpTemplateMacros.templateId, templateId));
+}
+
+async function upsertDocument(
+  db: Db,
+  values: {
+    id: string;
+    templateId: string;
+    templateVersion: number;
+    status: string;
+    groupId: string | null;
+    editorUserId?: string | null;
+    approverUserId?: string | null;
+    dataJson?: Record<string, unknown>;
+    externalRefsJson?: Record<string, unknown>;
+    snapshotsJson?: Record<string, unknown>;
+  }
+) {
+  await db
+    .insert(fpDocuments)
+    .values({
+      id: values.id,
+      templateId: values.templateId,
+      templateVersion: values.templateVersion,
+      status: values.status,
+      groupId: values.groupId,
+      editorUserId: values.editorUserId ?? null,
+      approverUserId: values.approverUserId ?? null,
+      assigneeUserId: values.editorUserId ?? null,
+      reviewerUserId: values.approverUserId ?? null,
+      dataJson: values.dataJson ?? {},
+      externalRefsJson: values.externalRefsJson ?? {},
+      snapshotsJson: values.snapshotsJson ?? {},
+      updatedAt: new Date()
+    })
+    .onConflictDoUpdate({
+      target: fpDocuments.id,
+      set: {
+        templateId: values.templateId,
+        templateVersion: values.templateVersion,
+        status: values.status,
+        groupId: values.groupId,
+        editorUserId: values.editorUserId ?? null,
+        approverUserId: values.approverUserId ?? null,
+        assigneeUserId: values.editorUserId ?? null,
+        reviewerUserId: values.approverUserId ?? null,
+        dataJson: values.dataJson ?? {},
+        externalRefsJson: values.externalRefsJson ?? {},
+        snapshotsJson: values.snapshotsJson ?? {},
+        updatedAt: new Date()
+      }
+    });
+}
+
+async function upsertDocumentEditor(db: Db, documentId: string, userId: string) {
+  await db.insert(fpDocumentEditors).values({ documentId, userId }).onConflictDoNothing();
+}
+
+async function upsertDocumentSubmission(
+  db: Db,
+  values: { documentId: string; userId: string; status: 'pending' | 'submitted'; submittedAt?: Date | null }
+) {
+  await db
+    .insert(fpDocumentSubmissions)
+    .values({
+      documentId: values.documentId,
+      userId: values.userId,
+      status: values.status,
+      submittedAt: values.submittedAt ?? null,
+      updatedAt: new Date()
+    })
+    .onConflictDoUpdate({
+      target: [fpDocumentSubmissions.documentId, fpDocumentSubmissions.userId],
+      set: {
+        status: values.status,
+        submittedAt: values.submittedAt ?? null,
+        updatedAt: new Date()
+      }
+    });
+}
+
+async function upsertDocumentApproval(
+  db: Db,
+  values: {
+    documentId: string;
+    userId: string;
+    status: 'pending' | 'approved' | 'rejected';
+    approvedAt?: Date | null;
+    decidedAt?: Date | null;
+  }
+) {
+  await db
+    .insert(fpDocumentApprovals)
+    .values({
+      documentId: values.documentId,
+      userId: values.userId,
+      status: values.status,
+      approvedAt: values.approvedAt ?? null,
+      decidedAt: values.decidedAt ?? null,
+      updatedAt: new Date()
+    })
+    .onConflictDoUpdate({
+      target: [fpDocumentApprovals.documentId, fpDocumentApprovals.userId],
+      set: {
+        status: values.status,
+        approvedAt: values.approvedAt ?? null,
+        decidedAt: values.decidedAt ?? null,
+        updatedAt: new Date()
+      }
+    });
 }
 
 async function upsertApi(
@@ -139,7 +255,7 @@ async function upsertApi(
 }
 
 async function upsertWorkflow(
-  db: FpDb,
+  db: Db,
   values: {
     key: string;
     version: number;
@@ -265,6 +381,54 @@ function buildProductionBatchTemplateJson() {
   } satisfies Record<string, unknown>;
 }
 
+function buildEvidenceBasicTemplateJson() {
+  return {
+    fields: {
+      evidence_title: {
+        kind: 'editable',
+        label: 'Evidence Title'
+      },
+      evidence_note: {
+        kind: 'editable',
+        label: 'Evidence Note',
+        multiline: true
+      }
+    },
+    layout: [
+      { type: 'h1', text: 'Evidence Basic' },
+      { type: 'field', key: 'evidence_title' },
+      { type: 'field', key: 'evidence_note' }
+    ],
+    actions: {}
+  } satisfies Record<string, unknown>;
+}
+
+function buildEvidenceProductCheckTemplateJson() {
+  return {
+    fields: {
+      product_id: {
+        kind: 'lookup',
+        label: 'Product',
+        apiRef: 'products.listValid',
+        valueKey: 'id',
+        labelKey: 'name',
+        required: true
+      },
+      inspection_note: {
+        kind: 'editable',
+        label: 'Inspection Note',
+        multiline: true
+      }
+    },
+    layout: [
+      { type: 'h1', text: 'Evidence Product Check' },
+      { type: 'field', key: 'product_id' },
+      { type: 'field', key: 'inspection_note' }
+    ],
+    actions: {}
+  } satisfies Record<string, unknown>;
+}
+
 function buildCustomerOrderTemplateJson() {
   return {
     fields: {
@@ -344,14 +508,35 @@ async function run() {
       name: 'Production Batch',
       description: 'Reference template for production batch workflow',
       state: 'published',
+      workflowRef: productionWorkflow.key,
       templateJson: buildProductionBatchTemplateJson()
     });
-    await db
-      .update(fpTemplates)
-      .set({ workflowRef: productionWorkflow.key })
-      .where(eq(fpTemplates.id, productionTemplateId));
     await clearTemplateMacroLinks(db, productionTemplateId);
     await upsertTemplateAssignment(db, productionTemplateId, opsId);
+
+    const evidenceBasicTemplateId = await upsertTemplateVersion(db, {
+      key: 'evidence-basic',
+      version: 1,
+      name: 'Evidence Basic',
+      description: 'Minimal reference template for evidence capture',
+      state: 'published',
+      workflowRef: evidenceWorkflow.key,
+      templateJson: buildEvidenceBasicTemplateJson()
+    });
+    await clearTemplateMacroLinks(db, evidenceBasicTemplateId);
+    await upsertTemplateAssignment(db, evidenceBasicTemplateId, opsId);
+
+    const evidenceProductCheckTemplateId = await upsertTemplateVersion(db, {
+      key: 'evidence-product-check',
+      version: 1,
+      name: 'Evidence Product Check',
+      description: 'Reference evidence template with product lookup via apiRef',
+      state: 'published',
+      workflowRef: evidenceWorkflow.key,
+      templateJson: buildEvidenceProductCheckTemplateJson()
+    });
+    await clearTemplateMacroLinks(db, evidenceProductCheckTemplateId);
+    await upsertTemplateAssignment(db, evidenceProductCheckTemplateId, opsId);
 
     const customerOrderTemplateId = await upsertTemplateVersion(db, {
       key: 'customer-order-test',
@@ -359,12 +544,9 @@ async function run() {
       name: 'Customer Order Test',
       description: 'Reference template for evidence/customer-order workflow',
       state: 'published',
+      workflowRef: evidenceWorkflow.key,
       templateJson: buildCustomerOrderTemplateJson()
     });
-    await db
-      .update(fpTemplates)
-      .set({ workflowRef: evidenceWorkflow.key })
-      .where(eq(fpTemplates.id, customerOrderTemplateId));
     await clearTemplateMacroLinks(db, customerOrderTemplateId);
     await upsertTemplateAssignment(db, customerOrderTemplateId, opsId);
 
@@ -407,8 +589,51 @@ async function run() {
       responseSchemaJson: { id: 'uuid', batch_number: 'string', status: 'string' }
     });
 
+    // Two small reference documents make the seeded V1 flows immediately visible
+    // in the browser without reintroducing a demo zoo.
+    await upsertDocument(db, {
+      id: '10000000-0000-0000-0000-000000000001',
+      templateId: evidenceBasicTemplateId,
+      templateVersion: 1,
+      status: 'assigned',
+      groupId: opsId,
+      editorUserId: aliceId,
+      approverUserId: bobId,
+      dataJson: {
+        evidence_title: 'Incoming delivery evidence',
+        evidence_note: 'Initial evidence note captured for review.'
+      }
+    });
+    await upsertDocumentEditor(db, '10000000-0000-0000-0000-000000000001', aliceId);
+    await upsertDocumentEditor(db, '10000000-0000-0000-0000-000000000001', bobId);
+    await upsertDocumentSubmission(db, {
+      documentId: '10000000-0000-0000-0000-000000000001',
+      userId: aliceId,
+      status: 'submitted',
+      submittedAt: new Date('2026-03-16T09:00:00Z')
+    });
+    await upsertDocumentSubmission(db, {
+      documentId: '10000000-0000-0000-0000-000000000001',
+      userId: bobId,
+      status: 'pending'
+    });
+    await upsertDocumentApproval(db, {
+      documentId: '10000000-0000-0000-0000-000000000001',
+      userId: bobId,
+      status: 'pending'
+    });
+
+    await upsertDocument(db, {
+      id: '10000000-0000-0000-0000-000000000002',
+      templateId: productionTemplateId,
+      templateVersion: 1,
+      status: 'created',
+      groupId: opsId,
+      dataJson: {}
+    });
+
     console.log(
-      'Seed complete: users(alice,bob), group(ops), 2 workflows, 2 published templates, 4 APIs.'
+      'Seed complete: users(alice,bob), group(ops), 2 workflows, 4 APIs, 4 published templates, 2 reference documents.'
     );
   } finally {
     await pool.end();

@@ -40,8 +40,8 @@ function createMockDb(rightsForAlice = 'rwx', rightsForBob = 'r') {
       fpTemplates: {
         findFirst: async () => ({
           id: '00000000-0000-0000-0000-0000000000t1',
-          key: 'customer-order',
-          name: 'Customer Order',
+          key: 'legacy-rbac-approval',
+          name: 'Legacy RBAC Approval',
           templateJson: {
             fields: {},
             layout: [],

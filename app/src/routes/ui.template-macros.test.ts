@@ -67,8 +67,6 @@ describe('template macro sync', () => {
         template_json: JSON.stringify({
           fields: {},
           layout: [],
-          workflow: { initial: 'created', states: { created: { editable: [], readonly: [], buttons: [] } } },
-          controls: {},
           actions: {
             create_batch: { type: 'macro', ref: 'macro:erp/createBatch@1' },
             composite_action: {

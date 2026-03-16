@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
+import { buildV1LookupTemplateJson } from './test-template-fixtures.js';
 import { uiRoutes } from './ui.js';
 
 describe('lookup api', () => {
@@ -45,21 +46,7 @@ describe('lookup api', () => {
             id: '00000000-0000-0000-0000-0000000000a1',
             key: 'product-lookup',
             name: 'Product Lookup',
-            templateJson: {
-              fields: {
-                item_ref: {
-                  kind: 'lookup',
-                  label: 'Item',
-                  apiRef: 'products.listValid',
-                  valueKey: 'id',
-                  labelKey: 'name'
-                }
-              },
-              layout: [{ type: 'field', key: 'item_ref' }],
-              workflow: { initial: 'created', states: { created: { editable: ['item_ref'], readonly: [], buttons: [] } } },
-              controls: {},
-              actions: {}
-            }
+            templateJson: buildV1LookupTemplateJson('item_ref', 'products.listValid', 'Item')
           })
         }
       }
@@ -122,26 +109,7 @@ describe('lookup api', () => {
             id: '00000000-0000-0000-0000-0000000000c1',
             key: 'customer-order-test',
             name: 'Customer Order Test',
-            templateJson: {
-              fields: {
-                buyer_customer_ref: {
-                  kind: 'lookup',
-                  label: 'Customer',
-                  apiRef: 'customers.listValid',
-                  valueKey: 'id',
-                  labelKey: 'name'
-                }
-              },
-              layout: [{ type: 'field', key: 'buyer_customer_ref' }],
-              workflow: {
-                initial: 'created',
-                states: {
-                  created: { editable: ['buyer_customer_ref'], readonly: [], buttons: [] }
-                }
-              },
-              controls: {},
-              actions: {}
-            }
+            templateJson: buildV1LookupTemplateJson('buyer_customer_ref', 'customers.listValid', 'Customer')
           })
         }
       }

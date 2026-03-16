@@ -60,8 +60,8 @@ function createMockDb(
       fpTemplates: {
         findFirst: async () => ({
           id: templateId,
-          key: 'rbac-test-v2',
-          name: 'RBAC Test v2',
+          key: 'legacy-assignments-rbac',
+          name: 'Legacy Assignments RBAC',
           templateJson: {
             fields: {
               title: { kind: 'editable', label: 'Title' }

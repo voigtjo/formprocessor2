@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
 import { fpDocuments, fpTemplateAssignments, fpTemplates } from '../db/schema.js';
+import { buildV1MinimalEvidenceTemplateJson } from './test-template-fixtures.js';
 import { uiRoutes } from './ui.js';
 
 type TemplateRecord = {
@@ -129,13 +130,13 @@ describe('template versioning + publish flow', () => {
     const db = createMockDb([
       {
         id: '00000000-0000-0000-0000-0000000000a1',
-        key: 'change-request',
-        name: 'Change Request',
+        key: 'v1-template-versioning',
+        name: 'V1 Template Versioning',
         description: null,
         state: 'published',
         version: 1,
         publishedAt: new Date(),
-        templateJson: { fields: {}, layout: [], workflow: { initial: 'created' } }
+        templateJson: buildV1MinimalEvidenceTemplateJson()
       }
     ]);
     const app = await createApp(db);
@@ -157,23 +158,23 @@ describe('template versioning + publish flow', () => {
     const db = createMockDb([
       {
         id: '00000000-0000-0000-0000-0000000000a1',
-        key: 'change-request',
-        name: 'Change Request',
+        key: 'v1-template-versioning',
+        name: 'V1 Template Versioning',
         description: null,
         state: 'published',
         version: 1,
         publishedAt: new Date(),
-        templateJson: { fields: {}, layout: [], workflow: { initial: 'created' } }
+        templateJson: buildV1MinimalEvidenceTemplateJson()
       },
       {
         id: '00000000-0000-0000-0000-0000000000d2',
-        key: 'change-request',
-        name: 'Change Request',
+        key: 'v1-template-versioning',
+        name: 'V1 Template Versioning',
         description: null,
         state: 'draft',
         version: 2,
         publishedAt: null,
-        templateJson: { fields: {}, layout: [], workflow: { initial: 'assigned' } }
+        templateJson: buildV1MinimalEvidenceTemplateJson()
       }
     ]);
     const app = await createApp(db);
@@ -199,17 +200,13 @@ describe('template versioning + publish flow', () => {
     const db = createMockDb([
       {
         id: '00000000-0000-0000-0000-0000000000d2',
-        key: 'change-request',
-        name: 'Change Request',
+        key: 'v1-template-versioning',
+        name: 'V1 Template Versioning',
         description: null,
         state: 'published',
         version: 2,
         publishedAt: new Date(),
-        templateJson: {
-          fields: {},
-          layout: [],
-          workflow: { initial: 'submitted' }
-        }
+        templateJson: buildV1MinimalEvidenceTemplateJson()
       }
     ]);
     db.__setContext('00000000-0000-0000-0000-0000000000d2');

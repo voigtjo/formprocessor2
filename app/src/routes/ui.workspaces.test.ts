@@ -30,8 +30,8 @@ function createWorkflowMockDb() {
 
   const template = {
     id: '00000000-0000-0000-0000-0000000000t1',
-    key: 'rbac-test-v2',
-    name: 'RBAC Test v2',
+    key: 'legacy-workspace-rbac',
+    name: 'Legacy Workspace RBAC',
     templateJson: {
       fields: {
         assignee_user_id: { kind: 'workflow', label: 'Assignee' },

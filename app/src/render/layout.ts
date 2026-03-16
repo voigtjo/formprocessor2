@@ -253,6 +253,8 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
 }
 
 function resolveControlKeyFromAction(templateJson: any, action: string) {
+  // V1 primary model: layout buttons reference action keys directly.
+  // Legacy bridge: older templates may still map button keys through controls[action].
   const controls = (templateJson?.controls ?? {}) as Record<string, { action?: string }>;
   if (controls[action]) return action;
 
@@ -269,10 +271,12 @@ function resolveActionDefinitionFromNode(templateJson: any, nodeAction: string) 
   const actions = (templateJson?.actions ?? {}) as Record<string, unknown>;
   const controls = (templateJson?.controls ?? {}) as Record<string, { action?: string }>;
 
+  // V1 primary model: use actions[nodeAction] directly.
   if (actions[nodeAction]) {
     return actions[nodeAction];
   }
 
+  // Legacy bridge: resolve via controls only when direct action lookup is absent.
   const directControl = controls[nodeAction];
   if (directControl?.action && actions[directControl.action]) {
     return actions[directControl.action];

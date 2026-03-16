@@ -8,8 +8,7 @@ describe('document save data merge', () => {
         comment: { kind: 'editable' },
         quantity: { kind: 'editable' },
         locked_note: { kind: 'editable' }
-      },
-      workflow: { initial: 'created', states: { created: { editable: ['comment'] } } }
+      }
     } as any;
     const currentData = {
       comment: 'old',
@@ -35,8 +34,7 @@ describe('document save data merge', () => {
     const templateJson = {
       fields: {
         urgent: { kind: 'editable', control: 'checkbox' }
-      },
-      workflow: { initial: 'created', states: { created: { editable: ['urgent'] } } }
+      }
     } as any;
     const next = applyEditableDataUpdate(templateJson, {}, { 'data:urgent': '1' }, ['urgent']);
     expect(next.urgent).toBe(true);
@@ -46,8 +44,7 @@ describe('document save data merge', () => {
     const templateJson = {
       fields: {
         urgent: { kind: 'editable', control: 'checkbox' }
-      },
-      workflow: { initial: 'created', states: { created: { editable: ['urgent'] } } }
+      }
     } as any;
     const next = applyEditableDataUpdate(templateJson, { urgent: true }, {}, ['urgent']);
     expect(next.urgent).toBe(false);
@@ -57,8 +54,7 @@ describe('document save data merge', () => {
     const templateJson = {
       fields: {
         urgent: { kind: 'checkbox' }
-      },
-      workflow: { initial: 'created', states: { created: { editable: ['urgent'] } } }
+      }
     } as any;
     const next = applyEditableDataUpdate(templateJson, { urgent: true }, {}, ['urgent']);
     expect(next.urgent).toBe(false);
@@ -68,8 +64,7 @@ describe('document save data merge', () => {
     const templateJson = {
       fields: {
         due_date: { kind: 'editable', control: 'date' }
-      },
-      workflow: { initial: 'created', states: { created: { editable: ['due_date'] } } }
+      }
     } as any;
     const next = applyEditableDataUpdate(templateJson, {}, { 'data:due_date': '2026-03-09' }, ['due_date']);
     expect(next.due_date).toBe('2026-03-09');

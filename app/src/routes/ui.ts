@@ -70,7 +70,13 @@ const layoutSectionsSchema = z.object({
 
 const layoutNodesSchema = z.array(z.object({ type: z.string() }).passthrough());
 
-const templateJsonSchema = z.object({
+const templateCoreJsonSchema = z.object({
+  fields: z.record(z.any()),
+  layout: z.union([layoutSectionsSchema, layoutNodesSchema]).default({}),
+  actions: z.record(z.any()).optional()
+});
+
+const templateJsonSchema = templateCoreJsonSchema.extend({
   fields: z.record(z.any()),
   layout: z.union([layoutSectionsSchema, layoutNodesSchema]).default({}),
   fieldAccess: z.record(z.any()).optional(),
@@ -97,26 +103,8 @@ const templateJsonSchema = z.object({
 const templateEditorJsonSchema = z.object({
   fields: z.record(z.any()),
   layout: z.array(z.any()),
-  fieldAccess: z.record(z.any()).optional(),
-  workflow: z.object({
-    initial: z.string().optional(),
-    order: z.array(z.string()).optional(),
-    states: z.record(z.any()).optional()
-  }).optional(),
-  controls: z.record(z.any()).optional(),
-  actions: z.record(z.any()).optional(),
-  permissions: z
-    .object({
-      actions: z
-        .record(
-          z.object({
-            requires: permissionRequiresSchema.optional()
-          })
-        )
-        .optional()
-    })
-    .optional()
-});
+  actions: z.record(z.any()).optional()
+}).strict();
 
 const templateFormSchema = z.object({
   key: z.string().min(1),
@@ -323,7 +311,7 @@ function resolveProcessButtonLabel(controlKey: string, templateJson?: TemplateJs
   return controlKey;
 }
 
-function normalizeTemplateJsonForV1Storage(templateJson: TemplateJson) {
+export function normalizeTemplateJsonForV1Storage(templateJson: TemplateJson) {
   const next = { ...templateJson } as Record<string, unknown>;
   delete next.workflow;
   delete next.controls;
@@ -483,6 +471,7 @@ function parseTemplateJson(raw: unknown): TemplateJson {
   const parsed = templateJsonSchema.parse(raw) as any;
   return {
     ...parsed,
+    // Legacy bridge only: controls/workflow/fieldAccess may still exist in older templates.
     controls: parsed.controls ?? {},
     actions: parsed.actions ?? {}
   };
@@ -506,7 +495,7 @@ function buildActionRuntimeTemplateContext(templateJson: TemplateJson) {
   };
 }
 
-function parseTemplateEditorJson(raw: string) {
+export function parseTemplateEditorJson(raw: string) {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -514,15 +503,23 @@ function parseTemplateEditorJson(raw: string) {
     throw new Error('template_json must be valid JSON');
   }
 
-  const validated = templateEditorJsonSchema.safeParse(parsed);
-  if (!validated.success) {
-    throw new Error('template_json must contain at least fields and layout');
+  const validatedCore = templateEditorJsonSchema.safeParse(parsed);
+  if (validatedCore.success) {
+    return {
+      ...validatedCore.data,
+      actions: validatedCore.data.actions ?? {}
+    };
+  }
+
+  const validatedCompat = templateJsonSchema.safeParse(parsed);
+  if (!validatedCompat.success) {
+    throw new Error('template_json must contain the V1 core fields, layout and optional actions');
   }
 
   return {
-    ...validated.data,
-    controls: validated.data.controls ?? {},
-    actions: validated.data.actions ?? {}
+    ...validatedCompat.data,
+    controls: validatedCompat.data.controls ?? {},
+    actions: validatedCompat.data.actions ?? {}
   };
 }
 
@@ -536,7 +533,7 @@ function parseOptionalJsonField(raw: string | undefined, fieldName: string) {
   }
 }
 
-function collectTemplateWarnings(templateJson: unknown) {
+export function collectTemplateWarnings(templateJson: unknown) {
   const warnings: string[] = [];
   const root = templateJson && typeof templateJson === 'object' && !Array.isArray(templateJson)
     ? (templateJson as Record<string, unknown>)
@@ -549,6 +546,13 @@ function collectTemplateWarnings(templateJson: unknown) {
   }
   if (root.controls && typeof root.controls === 'object') {
     warnings.push('template_json.controls is legacy. Standard process buttons come from the workflow.');
+  }
+  const actions = root.actions && typeof root.actions === 'object' && !Array.isArray(root.actions)
+    ? (root.actions as Record<string, unknown>)
+    : {};
+  const legacyProcessActions = Object.keys(actions).filter((actionKey) => isStandardProcessAction(actionKey));
+  if (legacyProcessActions.length > 0) {
+    warnings.push(`template_json.actions contains legacy standard process actions: ${legacyProcessActions.join(', ')}`);
   }
   const fields = root.fields && typeof root.fields === 'object' ? (root.fields as Record<string, unknown>) : {};
   for (const [fieldKey, fieldValue] of Object.entries(fields)) {
@@ -691,8 +695,9 @@ function resolveActionPermissionRequirements(templateJson: TemplateJson, control
   const sources = [
     byActionMap[controlKey]?.requires,
     byActionMap[actionKey]?.requires,
-    controls[controlKey]?.requires,
-    actions[actionKey]?.requires
+    actions[actionKey]?.requires,
+    // Legacy bridge only: historical templates stored permission hints on controls.
+    controls[controlKey]?.requires
   ];
   for (const source of sources) {
     const normalized = normalizeRequiresValue(source);
@@ -1492,6 +1497,18 @@ async function renderDocumentDetailPage(params: {
     if (params.document.editorUserId) assignmentEditorName = params.document.editorUserId;
     if (params.document.approverUserId) assignmentApproverName = params.document.approverUserId;
   }
+  const workflowEvaluation = evaluateWorkflow({
+    workflow: params.workflowRuntime,
+    status: normalizedDocumentStatus,
+    editorSubmissions: useMultiAssignments ? await loadEditorSubmissionStates(params.db, params.document.id) : [],
+    approverDecisions: useMultiAssignments ? await loadApproverDecisionStates(params.db, params.document.id) : []
+  });
+  const hasAnyAssignments = useMultiAssignments
+    ? assignedEditors.length > 0 || assignedApprovers.length > 0
+    : Boolean(params.document.editorUserId || params.document.approverUserId);
+  const submittedEditorCount = assignedEditorsDetailed.filter((item) => item.submissionStatus === 'submitted').length;
+  const approvedApproverCount = assignedApprovers.filter((item) => item.approvalStatus === 'approved').length;
+  const rejectedApproverCount = assignedApprovers.filter((item) => item.approvalStatus === 'rejected').length;
 
   await params.reply.renderPage('documents/detail.ejs', {
     template: params.template,
@@ -1514,15 +1531,14 @@ async function renderDocumentDetailPage(params: {
     assignmentApproverName,
     assignmentEditorHint,
     assignmentApproverHint,
+    hasAnyAssignments,
     assignmentsOpen: params.assignmentsOpen ?? false,
     errorMessage: params.errorMessage,
     successMessage: params.successMessage,
-    workflowEvaluation: evaluateWorkflow({
-      workflow: params.workflowRuntime,
-      status: normalizedDocumentStatus,
-      editorSubmissions: useMultiAssignments ? await loadEditorSubmissionStates(params.db, params.document.id) : [],
-      approverDecisions: useMultiAssignments ? await loadApproverDecisionStates(params.db, params.document.id) : []
-    }),
+    workflowEvaluation,
+    submittedEditorCount,
+    approvedApproverCount,
+    rejectedApproverCount,
     document: { ...params.document, status: normalizedDocumentStatus },
     dataJson: dataJsonForRender,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,

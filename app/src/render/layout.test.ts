@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { buildV1CustomerOrderTemplateJson } from '../routes/test-template-fixtures.js';
 import { renderLayout } from './layout.js';
 
 describe('layout renderer v2', () => {
@@ -41,8 +42,8 @@ describe('layout renderer v2', () => {
       documentId: 'doc-1',
       templateJson: {
         fields: {},
-        controls: {
-          submit: { action: 'submit_case' }
+        actions: {
+          submit: { type: 'composite', steps: [] }
         },
         layout: [{ type: 'button', key: 'submit', label: 'Submit', action: 'submit' }]
       }
@@ -61,8 +62,8 @@ describe('layout renderer v2', () => {
       documentId: 'doc-1',
       templateJson: {
         fields: {},
-        controls: {
-          create_batch: { action: 'create_batch' }
+        actions: {
+          create_batch: { type: 'composite', steps: [] }
         },
         layout: [{ type: 'button', key: 'create_batch', label: 'Create Batch', action: 'create_batch', kind: 'process' }]
       }
@@ -103,18 +104,7 @@ describe('layout renderer v2', () => {
   });
 
   it('renders document action button as disabled with hint in new mode and active in detail mode', () => {
-    const templateJson = {
-      fields: {},
-      controls: {
-        create_customer_order: { label: 'Create Customer Order', action: 'create_customer_order' }
-      },
-      actions: {
-        create_customer_order: {
-          steps: [{ type: 'macro', ref: 'macro:erp/ensureErpCustomerOrder@1' }]
-        }
-      },
-      layout: [{ type: 'button', key: 'create_customer_order', label: 'Create Customer Order', action: 'create_customer_order' }]
-    };
+    const templateJson = buildV1CustomerOrderTemplateJson();
 
     const newHtml = renderLayout({
       mode: 'new',

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { buildV1MinimalEvidenceTemplateJson } from './test-template-fixtures.js';
 import { ensureErpCustomerOrderReference } from './ui.js';
 
 describe('document creation ERP enrichment', () => {
@@ -16,11 +17,10 @@ describe('document creation ERP enrichment', () => {
 
     await ensureErpCustomerOrderReference({
       templateJson: {
+        ...buildV1MinimalEvidenceTemplateJson(),
         fields: {
           erp_customer_order_id: { kind: 'system', label: 'ERP Order' }
-        },
-        layout: [],
-        workflow: { initial: 'received' }
+        }
       },
       externalRefs,
       snapshots,
@@ -57,9 +57,7 @@ describe('document creation ERP enrichment', () => {
 
     await ensureErpCustomerOrderReference({
       templateJson: {
-        fields: {},
-        layout: [],
-        workflow: { initial: 'received' },
+        ...buildV1MinimalEvidenceTemplateJson(),
         actions: {
           complete: {
             type: 'composite',

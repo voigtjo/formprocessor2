@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
+import { buildLegacyBridgeTemplateJson, buildV1CustomerOrderTemplateJson } from './test-template-fixtures.js';
 import { uiRoutes } from './ui.js';
 import { macroRegistryByRef } from '../actions/macros/index.js';
 
@@ -50,30 +51,9 @@ function createMockDb() {
 
   const template = {
     id: '00000000-0000-0000-0000-0000000000t1',
-    key: 'customer-order',
-    name: 'Customer Order',
-    templateJson: {
-      fields: {},
-      layout: [],
-      workflow: {
-        initial: 'Assigned',
-        states: {
-          Assigned: { editable: [], readonly: [], buttons: ['start'] },
-          Started: { editable: [], readonly: [], buttons: ['submit'] },
-          Submitted: { editable: [], readonly: [], buttons: ['approve'] }
-        }
-      },
-      controls: {
-        start: { label: 'Start', action: 'startAction' },
-        submit: { label: 'Submit', action: 'submitAction' },
-        approve: { label: 'Approve', action: 'approveAction' }
-      },
-      actions: {
-        startAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Started' }] },
-        submitAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Submitted' }] },
-        approveAction: { type: 'composite', steps: [{ type: 'setStatus', to: 'Approved' }] }
-      }
-    }
+    key: 'legacy-bridge-process',
+    name: 'Legacy Bridge Process',
+    templateJson: buildLegacyBridgeTemplateJson()
   };
 
   const db = {
@@ -206,19 +186,9 @@ function createCustomerOrderLayoutButtonDb() {
     key: 'customer-order-layout-ui',
     name: 'Customer Order Layout UI',
     templateJson: {
-      fields: {},
-      layout: [{ type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui' }],
-      workflow: {
-        initial: 'Created',
-        states: {
-          Created: { editable: [], readonly: [], buttons: [] }
-        }
-      },
-      controls: {
-        create_customer_order: { label: 'Create Customer Order', action: 'createCustomerOrderAction' }
-      },
+      ...buildV1CustomerOrderTemplateJson(),
       actions: {
-        createCustomerOrderAction: { type: 'macro', ref: 'macro:erp/ensureErpCustomerOrder@1' }
+        create_customer_order: { type: 'macro', ref: 'macro:erp/ensureErpCustomerOrder@1' }
       }
     }
   };
@@ -326,37 +296,7 @@ function createCustomerOrderApiActionLayoutButtonDb() {
     id: '00000000-0000-0000-0000-0000000000t6',
     key: 'customer-order-api-ui',
     name: 'Customer Order API UI',
-    templateJson: {
-      fields: {},
-      layout: [{ type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui' }],
-      workflow: {
-        initial: 'Created',
-        states: {
-          Created: { editable: [], readonly: [], buttons: [] }
-        }
-      },
-      controls: {
-        create_customer_order: { label: 'Create Customer Order', action: 'createCustomerOrderAction' }
-      },
-      actions: {
-        createCustomerOrderAction: {
-          type: 'composite',
-          steps: [
-            { type: 'require', from: 'external.customer_id', message: 'Select a customer first.' },
-            {
-              type: 'callApi',
-              apiRef: 'customerOrders.create',
-              request: { customer_id: '{{external.customer_id}}' },
-              to: 'vars.customerOrderResponse'
-            },
-            { type: 'write', to: 'data.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
-            { type: 'write', to: 'external.customer_order_id', value: '{{vars.customerOrderResponse.id}}' },
-            { type: 'write', to: 'snapshot.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' },
-            { type: 'message', value: 'Customer order created: {{vars.customerOrderResponse.order_number}}' }
-          ]
-        }
-      }
-    }
+    templateJson: buildV1CustomerOrderTemplateJson()
   };
 
   const db = {

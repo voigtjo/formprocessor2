@@ -24,12 +24,13 @@ const TARGET_TABLES = [
 async function run() {
   const { db, pool } = makeDb();
   try {
+    const targetTableSql = sql.join(TARGET_TABLES.map((tableName) => sql`${tableName}`), sql`, `);
     const existingRows = await db.execute(sql<{ table_name: string }>`
       select table_name
       from information_schema.tables
       where table_schema = 'public'
         and table_type = 'BASE TABLE'
-        and table_name = any(${TARGET_TABLES}::text[])
+        and table_name in (${targetTableSql})
       order by table_name
     `);
 

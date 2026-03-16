@@ -160,7 +160,9 @@ export function resolveNextStatus(input: WorkflowEvaluationInput) {
   const nextStatusByAction: Record<string, DocumentStatus> = {
     assign: 'assigned',
     archive: 'archived',
-    reject: normalizedStatus === 'approved' ? 'approved' : 'submitted'
+    // V1 keeps rejected documents in the review stage. There is no separate
+    // "returned" status in the fixed system model.
+    reject: 'submitted'
   };
 
   if (normalizedStatus === 'created' || normalizedStatus === 'assigned') {

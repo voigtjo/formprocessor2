@@ -23,7 +23,16 @@
   <h3 class="card-title">Assignments</h3>
   <p class="muted">Editors: <strong><%= assignmentEditorName || '—' %></strong> · Approvers: <strong><%= assignmentApproverName || '—' %></strong></p>
   <% if (workflowEvaluation) { %>
-    <p class="muted">Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span> · Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span></p>
+    <p class="muted">
+      Submit mode: <span class="badge"><%= workflowEvaluation.submitMode %></span>
+      · Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span>
+      <% if (useMultiAssignments) { %> · <span><%= submittedEditorCount || 0 %>/<%= (assignedEditorsDetailed || []).length %> submitted</span><% } %>
+    </p>
+    <p class="muted">
+      Approval mode: <span class="badge"><%= workflowEvaluation.approvalMode %></span>
+      · Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span>
+      <% if (useMultiAssignments) { %> · <span><%= approvedApproverCount || 0 %>/<%= (assignedApprovers || []).length %> approved<% if ((rejectedApproverCount || 0) > 0) { %>, <%= rejectedApproverCount %> rejected<% } %></span><% } %>
+    </p>
   <% } %>
   <% if (useMultiAssignments) { %>
     <div class="row">
@@ -63,13 +72,13 @@
     <p class="muted">No group assigned</p>
   <% } else { %>
     <details <%= assignmentsOpen ? 'open' : '' %>>
-      <summary class="btn btn-secondary"><%= (document.editorUserId || document.approverUserId || (assignedEditors || []).length || (assignedApprovers || []).length) ? 'Change assignments' : 'Edit assignments' %></summary>
+      <summary class="btn btn-secondary"><%= hasAnyAssignments ? 'Change assignments' : 'Edit assignments' %></summary>
       <form method="post" action="/documents/<%= document.id %>/assign/editor" class="row">
         <div class="col col-6">
           <label for="editor-user-id">Editor</label>
           <select id="editor-user-id" name="userId">
             <% (assignmentEditorCandidates || []).forEach((member) => { %>
-              <option value="<%= member.id %>" <%= document.editorUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
+              <option value="<%= member.id %>" <%= !useMultiAssignments && document.editorUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
             <% }) %>
           </select>
           <% if (assignmentEditorHint) { %>
@@ -77,7 +86,7 @@
           <% } %>
         </div>
         <div class="col">
-          <button class="btn btn-secondary" type="submit">Set Editor</button>
+          <button class="btn btn-secondary" type="submit"><%= useMultiAssignments ? 'Add Editor' : 'Set Editor' %></button>
         </div>
       </form>
       <form method="post" action="/documents/<%= document.id %>/assign/approver" class="row">
@@ -85,7 +94,7 @@
           <label for="approver-user-id">Approver</label>
           <select id="approver-user-id" name="userId">
             <% (assignmentApproverCandidates || []).forEach((member) => { %>
-              <option value="<%= member.id %>" <%= document.approverUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
+              <option value="<%= member.id %>" <%= !useMultiAssignments && document.approverUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
             <% }) %>
           </select>
           <% if (assignmentApproverHint) { %>
@@ -93,7 +102,7 @@
           <% } %>
         </div>
         <div class="col">
-          <button class="btn btn-secondary" type="submit">Set Approver</button>
+          <button class="btn btn-secondary" type="submit"><%= useMultiAssignments ? 'Add Approver' : 'Set Approver' %></button>
         </div>
       </form>
     </details>

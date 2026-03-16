@@ -1,5 +1,10 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
+import {
+  buildV1CustomerOrderTemplateJson,
+  buildV1EvidenceProductCheckTemplateJson,
+  buildV1MinimalEvidenceTemplateJson
+} from './test-template-fixtures.js';
 import { uiRoutes } from './ui.js';
 
 function createMockDb() {
@@ -92,11 +97,7 @@ describe('documents create route', () => {
     templateFindSpy.mockResolvedValue({
       id: templateId,
       state: 'published',
-      templateJson: {
-        fields: {},
-        layout: [],
-        workflow: { initial: 'received' }
-      }
+      templateJson: buildV1EvidenceProductCheckTemplateJson()
     });
     assignmentFindManySpy.mockResolvedValue([{ groupId: assignedGroupId }]);
 
@@ -130,11 +131,7 @@ describe('documents create route', () => {
     templateFindSpy.mockResolvedValue({
       id: templateId,
       state: 'published',
-      templateJson: {
-        fields: {},
-        layout: [],
-        workflow: { initial: 'received' }
-      }
+      templateJson: buildV1EvidenceProductCheckTemplateJson()
     });
     assignmentFindManySpy.mockResolvedValue([]);
 
@@ -169,21 +166,10 @@ describe('documents create route', () => {
 
     const template = {
       id: templateId,
-      key: 'change-request',
-      name: 'Change Request',
+      key: 'evidence-note-v1',
+      name: 'Evidence Note V1',
       state: 'published',
-      templateJson: {
-        fields: {},
-        layout: [],
-        workflow: {
-          initial: 'created',
-          states: {
-            created: { editable: [], readonly: [], buttons: [] }
-          }
-        },
-        controls: {},
-        actions: {}
-      }
+      templateJson: buildV1MinimalEvidenceTemplateJson()
     };
 
     const db = {
@@ -256,8 +242,7 @@ describe('documents create route', () => {
       state: 'draft',
       templateJson: {
         fields: {},
-        layout: [],
-        workflow: { initial: 'received' }
+        layout: []
       }
     });
 
@@ -279,7 +264,7 @@ describe('documents create route', () => {
     await app.close();
   });
 
-  it('passes workflow timeline in configured workflow.order and highlights current status context', async () => {
+  it('uses legacy template_json.workflow order as a fallback timeline when no workflowRef runtime exists', async () => {
     const templateId = '00000000-0000-0000-0000-0000000000f2';
     const documentId = '00000000-0000-0000-0000-0000000000f3';
     const template = {
@@ -357,13 +342,7 @@ describe('documents create route', () => {
       name: 'Customer Order Test',
       state: 'published',
       workflowRef: 'production.standard.v1',
-      templateJson: {
-        fields: {},
-        layout: [],
-        actions: {
-          create_customer_order: { type: 'composite', steps: [] }
-        }
-      }
+      templateJson: buildV1CustomerOrderTemplateJson()
     };
 
     const db = {
@@ -435,7 +414,160 @@ describe('documents create route', () => {
     await app.close();
   });
 
-  it('creates document with product lookup and renders product snapshot label in detail', async () => {
+  it('renders document detail from workflow state plus multi-assignment submission and approval tracking', async () => {
+    const templateId = '00000000-0000-0000-0000-0000000000f6';
+    const documentId = '00000000-0000-0000-0000-0000000000f7';
+    const groupId = '00000000-0000-0000-0000-0000000000f8';
+    const template = {
+      id: templateId,
+      key: 'customer-order-test',
+      name: 'Customer Order Test',
+      state: 'published',
+      workflowRef: 'evidence.group-submit.v1',
+      templateJson: buildV1CustomerOrderTemplateJson()
+    };
+
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: vi.fn(async () => ({
+            id: documentId,
+            templateId,
+            status: 'submitted',
+            groupId,
+            dataJson: {},
+            externalRefsJson: {},
+            snapshotsJson: {}
+          }))
+        },
+        fpTemplates: {
+          findFirst: vi.fn(async () => template)
+        },
+        fpGroups: {
+          findFirst: vi.fn(async () => ({ id: groupId, key: 'ops', name: 'Operations' }))
+        },
+        fpDocumentEditors: {
+          findMany: vi.fn(async () => [{ userId: 'u1' }, { userId: 'u2' }])
+        },
+        fpDocumentSubmissions: {
+          findMany: vi.fn(async () => [
+            { userId: 'u1', status: 'submitted', submittedAt: new Date('2026-03-16T10:00:00Z') },
+            { userId: 'u2', status: 'pending', submittedAt: null }
+          ])
+        },
+        fpDocumentApprovals: {
+          findMany: vi.fn(async () => [
+            { userId: 'a1', status: 'approved', decidedAt: new Date('2026-03-16T11:00:00Z') },
+            { userId: 'a2', status: 'pending', decidedAt: null }
+          ])
+        }
+      },
+      select: vi.fn((selection?: Record<string, unknown>) => {
+        if (selection && 'id' in selection && 'key' in selection && 'workflowJson' in selection) {
+          return {
+            from: () => ({
+              where: () => ({
+                orderBy: () => ({
+                  limit: async () => [{
+                    id: 'wf-1',
+                    key: 'evidence.group-submit.v1',
+                    name: 'Evidence Group Submit',
+                    state: 'active',
+                    version: 1,
+                    workflowJson: {
+                      order: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+                      initialStatus: 'created',
+                      states: {
+                        created: { buttons: ['assign'] },
+                        assigned: { buttons: ['submit'] },
+                        submitted: { buttons: ['approve'] },
+                        approved: { buttons: ['archive'] },
+                        archived: { buttons: [] }
+                      },
+                      semantics: { submit: 'individual', approval: 'individual' },
+                      actorModel: { editors: 'multiple', approvers: 'multiple' }
+                    }
+                  }]
+                })
+              })
+            })
+          };
+        }
+
+        return {
+          from: () => ({
+            innerJoin: () => ({
+              where: () => ({
+                orderBy: async () => [
+                  { userId: 'u1', rights: 'rw', username: 'alice', displayName: 'Alice' },
+                  { userId: 'u2', rights: 'rw', username: 'bob', displayName: 'Bob' },
+                  { userId: 'a1', rights: 'rwx', username: 'charly', displayName: 'Charly' },
+                  { userId: 'a2', rights: 'rwx', username: 'dora', displayName: 'Dora' }
+                ]
+              })
+            })
+          })
+        };
+      })
+    };
+
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+      const assignedEditorsDetailed = Array.isArray(data.assignedEditorsDetailed)
+        ? (data.assignedEditorsDetailed as Array<Record<string, unknown>>)
+        : [];
+      const assignedApprovers = Array.isArray(data.assignedApprovers)
+        ? (data.assignedApprovers as Array<Record<string, unknown>>)
+        : [];
+      const workflowEvaluation = (data.workflowEvaluation ?? {}) as Record<string, unknown>;
+      const processButtons = Array.isArray(data.processButtons)
+        ? (data.processButtons as Array<{ label: string }>).map((item) => item.label).join(', ')
+        : '';
+      this.type('text/plain').send([
+        `editors=${String(data.assignmentEditorName ?? '')}`,
+        `approvers=${String(data.assignmentApproverName ?? '')}`,
+        `submissionState=${String(workflowEvaluation.submissionState ?? '')}`,
+        `approvalState=${String(workflowEvaluation.approvalState ?? '')}`,
+        `submitMode=${String(workflowEvaluation.submitMode ?? '')}`,
+        `approvalMode=${String(workflowEvaluation.approvalMode ?? '')}`,
+        `submittedEditors=${String(data.submittedEditorCount ?? '')}`,
+        `approvedApprovers=${String(data.approvedApproverCount ?? '')}`,
+        `rejectedApprovers=${String(data.rejectedApproverCount ?? '')}`,
+        `editorRows=${assignedEditorsDetailed.length}`,
+        `approverRows=${assignedApprovers.length}`,
+        `buttons=${processButtons}`
+      ].join('\n'));
+    });
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001',
+      hasDocumentActorColumns: true,
+      hasDocumentMultiAssignments: true
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/documents/${documentId}`
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('editors=Alice, Bob');
+    expect(res.body).toContain('approvers=Charly, Dora');
+    expect(res.body).toContain('submissionState=partial');
+    expect(res.body).toContain('approvalState=partial');
+    expect(res.body).toContain('submitMode=individual');
+    expect(res.body).toContain('approvalMode=individual');
+    expect(res.body).toContain('submittedEditors=1');
+    expect(res.body).toContain('approvedApprovers=1');
+    expect(res.body).toContain('rejectedApprovers=0');
+    expect(res.body).toContain('editorRows=2');
+    expect(res.body).toContain('approverRows=2');
+    expect(res.body).toContain('buttons=Approve');
+
+    await app.close();
+  });
+
+  it('creates document with legacy source-based product lookup and renders product snapshot label in detail', async () => {
     const templateId = '00000000-0000-0000-0000-0000000000f1';
     const documentId = '00000000-0000-0000-0000-0000000000d9';
     let storedDoc: any = null;

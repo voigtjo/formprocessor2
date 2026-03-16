@@ -1,6 +1,12 @@
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
 import { fpTemplateAssignments, fpTemplateMacros, fpTemplates } from '../db/schema.js';
+import {
+  buildV1CustomerOrderTemplateJson,
+  buildV1EvidenceProductCheckTemplateJson,
+  buildV1MinimalEvidenceTemplateJson,
+  buildV1ProductionBatchTemplateJson
+} from './test-template-fixtures.js';
 import { uiRoutes } from './ui.js';
 
 type TemplateRow = {
@@ -72,13 +78,24 @@ describe('templates list', () => {
   it('shows one row per key and defaults to published', async () => {
     const db = createMockDb([
       {
+        id: '00000000-0000-0000-0000-0000000000a0',
+        key: 'evidence-basic',
+        name: 'Evidence Basic',
+        description: null,
+        state: 'published',
+        version: 1,
+        templateJson: buildV1MinimalEvidenceTemplateJson(),
+        publishedAt: new Date(),
+        createdAt: new Date()
+      },
+      {
         id: '00000000-0000-0000-0000-0000000000a1',
         key: 'customer-order-test',
         name: 'Customer Order Test',
         description: null,
         state: 'published',
         version: 1,
-        templateJson: {},
+        templateJson: buildV1CustomerOrderTemplateJson(),
         publishedAt: new Date(),
         createdAt: new Date()
       },
@@ -89,7 +106,7 @@ describe('templates list', () => {
         description: null,
         state: 'draft',
         version: 2,
-        templateJson: {},
+        templateJson: buildV1CustomerOrderTemplateJson(),
         publishedAt: null,
         createdAt: new Date()
       },
@@ -100,7 +117,18 @@ describe('templates list', () => {
         description: null,
         state: 'published',
         version: 3,
-        templateJson: {},
+        templateJson: buildV1ProductionBatchTemplateJson(),
+        publishedAt: new Date(),
+        createdAt: new Date()
+      },
+      {
+        id: '00000000-0000-0000-0000-0000000000c1',
+        key: 'evidence-product-check',
+        name: 'Evidence Product Check',
+        description: null,
+        state: 'published',
+        version: 1,
+        templateJson: buildV1EvidenceProductCheckTemplateJson(),
         publishedAt: new Date(),
         createdAt: new Date()
       }
@@ -119,8 +147,13 @@ describe('templates list', () => {
     const res = await app.inject({ method: 'GET', url: '/templates' });
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { templates: Array<{ key: string; state: string }> };
-    expect(payload.templates).toHaveLength(2);
-    expect(payload.templates.map((item) => item.key).sort()).toEqual(['customer-order-test', 'production-batch']);
+    expect(payload.templates).toHaveLength(4);
+    expect(payload.templates.map((item) => item.key).sort()).toEqual([
+      'customer-order-test',
+      'evidence-basic',
+      'evidence-product-check',
+      'production-batch'
+    ]);
     expect(payload.templates.every((item) => item.state === 'published')).toBe(true);
 
     await app.close();
@@ -135,7 +168,7 @@ describe('templates list', () => {
         description: null,
         state: 'published',
         version: 1,
-        templateJson: {},
+        templateJson: buildV1CustomerOrderTemplateJson(),
         publishedAt: new Date(),
         createdAt: new Date()
       },
@@ -146,7 +179,7 @@ describe('templates list', () => {
         description: null,
         state: 'draft',
         version: 2,
-        templateJson: {},
+        templateJson: buildV1CustomerOrderTemplateJson(),
         publishedAt: null,
         createdAt: new Date()
       }
