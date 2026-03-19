@@ -32,6 +32,7 @@ function createMockDb(rightsForAlice = 'rwx', rightsForBob = 'r') {
           templateId: '00000000-0000-0000-0000-0000000000t1',
           groupId: opsGroupId,
           status: 'Started',
+          approverUserId: alice.id,
           dataJson: {},
           externalRefsJson: {},
           snapshotsJson: {}

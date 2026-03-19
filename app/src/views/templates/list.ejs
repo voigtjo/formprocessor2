@@ -58,7 +58,8 @@
         <td><%= tpl.apiCount || 0 %></td>
         <td><%= tpl.macroCount || 0 %></td>
         <td>
-          <a href="/templates/<%= tpl.id %>/preview">Preview</a>
+          <a href="/templates/<%= tpl.id %>">Open</a>
+          · <a href="/templates/<%= tpl.id %>/preview">Preview</a>
           · <a href="/templates/<%= tpl.id %>/edit">Edit JSON</a>
           · <a href="/templates/<%= tpl.id %>/versions">Versions</a>
           <% if (normalizedTemplateState === 'published') { %>

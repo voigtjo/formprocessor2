@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildV1CustomerOrderTemplateJson } from '../routes/test-template-fixtures.js';
+import {
+  buildV1CustomerOrderTemplateJson,
+  buildV1EvidenceProductCheckTemplateJson,
+  buildV1MinimalEvidenceTemplateJson,
+  buildV1ProductionBatchTemplateJson
+} from '../routes/test-template-fixtures.js';
 import { renderLayout } from './layout.js';
 
 describe('layout renderer v2', () => {
@@ -239,6 +244,106 @@ describe('layout renderer v2', () => {
     expect(html).toContain('checked');
   });
 
+  it('renders row and column alignment with width styles', () => {
+    const html = renderLayout({
+      mode: 'new',
+      templateId: 'tpl-1',
+      templateJson: {
+        fields: {
+          left_note: { kind: 'editable', label: 'Left Note' },
+          right_note: { kind: 'editable', label: 'Right Note' }
+        },
+        layout: [
+          {
+            type: 'row',
+            align: 'right',
+            children: [
+              { type: 'col', width: 4, children: [{ type: 'field', key: 'left_note' }] },
+              { type: 'col', width: '1/3', align: 'center', children: [{ type: 'field', key: 'right_note' }] }
+            ]
+          }
+        ]
+      }
+    });
+
+    expect(html).toContain('row-align-right');
+    expect(html).toContain('--col-basis:33.3333%');
+    expect(html).toContain('col-align-center');
+  });
+
+  it('renders radio and checkbox groups with help text', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      templateId: 'tpl-1',
+      documentId: 'doc-1',
+      editableKeys: ['result', 'flags'],
+      readonlyKeys: [],
+      dataJson: { result: 'hold', flags: ['signed', 'exception'] },
+      templateJson: {
+        fields: {
+          result: {
+            kind: 'editable',
+            label: 'Result',
+            control: 'radioGroup',
+            helpText: 'Select the overall outcome.',
+            options: [
+              { value: 'pass', label: 'Pass' },
+              { value: 'hold', label: 'Hold' },
+              { value: 'fail', label: 'Fail' }
+            ]
+          },
+          flags: {
+            kind: 'editable',
+            label: 'Flags',
+            control: 'checkboxGroup',
+            options: [
+              { value: 'signed', label: 'Signed' },
+              { value: 'exception', label: 'Exception' }
+            ]
+          }
+        },
+        layout: [{ type: 'field', key: 'result' }, { type: 'field', key: 'flags' }]
+      }
+    });
+
+    expect(html).toContain('type="radio"');
+    expect(html).toContain('name="data:result"');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('name="data:flags"');
+    expect(html).toContain('choice-group');
+    expect(html).toContain('Select the overall outcome.');
+    expect(html).toContain('checked');
+  });
+
+  it('renders readonly checkbox groups as disabled selections', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      templateId: 'tpl-1',
+      documentId: 'doc-1',
+      editableKeys: [],
+      readonlyKeys: ['flags'],
+      dataJson: { flags: ['signed', 'exception'] },
+      templateJson: {
+        fields: {
+          flags: {
+            kind: 'editable',
+            label: 'Flags',
+            control: 'checkboxGroup',
+            options: [
+              { value: 'signed', label: 'Signed' },
+              { value: 'exception', label: 'Exception' }
+            ]
+          }
+        },
+        layout: [{ type: 'field', key: 'flags' }]
+      }
+    });
+
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('value="signed" checked disabled');
+    expect(html).toContain('value="exception" checked disabled');
+  });
+
   it('renders kind=date and kind=checkbox as typed inputs', () => {
     const html = renderLayout({
       mode: 'detail',
@@ -261,5 +366,58 @@ describe('layout renderer v2', () => {
     expect(html).toContain('name="data:urgent"');
     expect(html).toContain('type="checkbox"');
     expect(html).toContain('checked');
+  });
+
+  it('renders richer V1 reference template structures', () => {
+    const html = renderLayout({
+      mode: 'new',
+      templateId: 'tpl-1',
+      templateJson: buildV1EvidenceProductCheckTemplateJson()
+    });
+
+    expect(html).toContain('Evidence Product Check');
+    expect(html).toContain('type="radio"');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('placeholder="Capture the observed condition, deviations, or follow-up."');
+    expect(html).toContain('--col-basis:41.66666666666667%');
+  });
+
+  it('renders journal control with add-row ui and hidden json field', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      templateId: 'tpl-1',
+      documentId: 'doc-1',
+      editableKeys: ['findings'],
+      readonlyKeys: [],
+      dataJson: {
+        findings: [{ finding: 'Seal damaged', action: 'Replace', severity: 'high', closed: false }]
+      },
+      templateJson: buildV1MinimalEvidenceTemplateJson()
+    });
+
+    expect(html).toContain('journal-control');
+    expect(html).toContain('data:findings');
+    expect(html).toContain('Add row');
+    expect(html).toContain('Severity');
+    expect(html).toContain('journal-table');
+  });
+
+  it('renders readonly journal summary table', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      templateId: 'tpl-1',
+      documentId: 'doc-1',
+      editableKeys: [],
+      readonlyKeys: ['inspection_steps'],
+      dataJson: {
+        inspection_steps: [{ step: 'Visual check', measured_value: 3, result: 'ok', confirmed: true }]
+      },
+      templateJson: buildV1ProductionBatchTemplateJson()
+    });
+
+    expect(html).toContain('Inspection Steps');
+    expect(html).toContain('Visual check');
+    expect(html).toContain('Yes');
+    expect(html).not.toContain('Add row');
   });
 });

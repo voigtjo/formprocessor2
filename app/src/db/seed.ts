@@ -1,10 +1,13 @@
 import dotenv from 'dotenv';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
+import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { makeDb } from './index.js';
 import {
   fpApis,
   fpDocumentApprovals,
+  fpDocumentAttachments,
+  fpDocumentAuditEvents,
   fpDocumentEditors,
   fpDocuments,
   fpDocumentSubmissions,
@@ -16,18 +19,43 @@ import {
   fpUsers,
   fpWorkflows
 } from './schema.js';
+import { createLocalAttachmentStorage } from '../core/attachments.js';
 
 dotenv.config({ path: resolve(process.cwd(), '../.env') });
 
 type Db = ReturnType<typeof makeDb>['db'];
 
-async function upsertUser(db: Db, username: string, displayName: string) {
+const REFERENCE_WORKFLOW_KEYS = ['production.standard.v1', 'evidence.group-submit.v1'] as const;
+const REFERENCE_TEMPLATE_KEYS = ['evidence-basic', 'evidence-product-check', 'production-batch', 'customer-order-test'] as const;
+const REFERENCE_DOCUMENT_IDS = [
+  '10000000-0000-0000-0000-000000000001',
+  '10000000-0000-0000-0000-000000000002',
+  '10000000-0000-0000-0000-000000000003',
+  '10000000-0000-0000-0000-000000000004'
+] as const;
+const REFERENCE_ATTACHMENT_IDS = {
+  evidenceImage: '20000000-0000-0000-0000-000000000001',
+  batchReport: '20000000-0000-0000-0000-000000000002'
+} as const;
+const REFERENCE_AUDIT_IDS = {
+  evidenceCreated: '30000000-0000-0000-0000-000000000001',
+  evidenceSubmitted: '30000000-0000-0000-0000-000000000002',
+  evidenceAttachmentUploaded: '30000000-0000-0000-0000-000000000003',
+  batchCreated: '30000000-0000-0000-0000-000000000004',
+  batchActionExecuted: '30000000-0000-0000-0000-000000000005',
+  batchApproved: '30000000-0000-0000-0000-000000000006',
+  productCheckAssigned: '30000000-0000-0000-0000-000000000007',
+  customerOrderActionExecuted: '30000000-0000-0000-0000-000000000008'
+} as const;
+const DEFAULT_TENANT_KEY = 'default';
+
+async function upsertUser(db: Db, username: string, displayName: string, email: string) {
   const rows = await db
     .insert(fpUsers)
-    .values({ username, displayName })
+    .values({ username, displayName, email })
     .onConflictDoUpdate({
       target: fpUsers.username,
-      set: { displayName }
+      set: { displayName, email }
     })
     .returning({ id: fpUsers.id });
   return rows[0].id;
@@ -211,6 +239,87 @@ async function upsertDocumentApproval(
     });
 }
 
+async function upsertDocumentAttachment(
+  db: Db,
+  values: {
+    id: string;
+    documentId: string;
+    kind: 'image' | 'file';
+    filename: string;
+    mimeType: string;
+    size: number;
+    storageKey: string;
+    uploadedBy: string | null;
+    createdAt?: Date;
+  }
+) {
+  await db
+    .insert(fpDocumentAttachments)
+    .values({
+      id: values.id,
+      documentId: values.documentId,
+      kind: values.kind,
+      filename: values.filename,
+      mimeType: values.mimeType,
+      size: values.size,
+      storageKey: values.storageKey,
+      uploadedBy: values.uploadedBy,
+      createdAt: values.createdAt ?? new Date()
+    })
+    .onConflictDoUpdate({
+      target: fpDocumentAttachments.id,
+      set: {
+        documentId: values.documentId,
+        kind: values.kind,
+        filename: values.filename,
+        mimeType: values.mimeType,
+        size: values.size,
+        storageKey: values.storageKey,
+        uploadedBy: values.uploadedBy,
+        createdAt: values.createdAt ?? new Date()
+      }
+    });
+}
+
+async function upsertDocumentAuditEvent(
+  db: Db,
+  values: {
+    id: string;
+    documentId: string;
+    eventType: string;
+    actorUserId?: string | null;
+    actorDisplay?: string | null;
+    summary: string;
+    detailJson?: Record<string, unknown> | null;
+    createdAt?: Date;
+  }
+) {
+  await db
+    .insert(fpDocumentAuditEvents)
+    .values({
+      id: values.id,
+      documentId: values.documentId,
+      eventType: values.eventType,
+      actorUserId: values.actorUserId ?? null,
+      actorDisplay: values.actorDisplay ?? null,
+      summary: values.summary,
+      detailJson: values.detailJson ?? null,
+      createdAt: values.createdAt ?? new Date()
+    })
+    .onConflictDoUpdate({
+      target: fpDocumentAuditEvents.id,
+      set: {
+        documentId: values.documentId,
+        eventType: values.eventType,
+        actorUserId: values.actorUserId ?? null,
+        actorDisplay: values.actorDisplay ?? null,
+        summary: values.summary,
+        detailJson: values.detailJson ?? null,
+        createdAt: values.createdAt ?? new Date()
+      }
+    });
+}
+
 async function upsertApi(
   db: Db,
   values: {
@@ -352,14 +461,59 @@ function buildProductionBatchTemplateJson() {
       batch_number: {
         kind: 'editable',
         label: 'Batch Number'
+      },
+      batch_priority: {
+        kind: 'editable',
+        label: 'Priority',
+        control: 'radioGroup',
+        options: [
+          { value: 'normal', label: 'Normal' },
+          { value: 'rush', label: 'Rush' }
+        ],
+        helpText: 'Use rush only when the batch must bypass the normal queue.'
+      },
+      inspection_steps: {
+        kind: 'journal',
+        label: 'Inspection Steps',
+        helpText: 'Capture measured checkpoints or confirmations row by row.',
+        columns: [
+          { key: 'step', label: 'Step', type: 'text', placeholder: 'Inspection step' },
+          { key: 'measured_value', label: 'Measured Value', type: 'number', placeholder: '0' },
+          {
+            key: 'result',
+            label: 'Result',
+            type: 'select',
+            options: [
+              { value: 'ok', label: 'OK' },
+              { value: 'hold', label: 'Hold' },
+              { value: 'fail', label: 'Fail' }
+            ]
+          },
+          { key: 'confirmed', label: 'Confirmed', type: 'checkbox' }
+        ]
       }
     },
     layout: [
       { type: 'h1', text: 'Production Batch' },
-      { type: 'field', key: 'product_id' },
+      {
+        type: 'row',
+        children: [
+          { type: 'col', width: 7, children: [{ type: 'field', key: 'product_id' }] },
+          { type: 'col', width: 5, align: 'right', children: [{ type: 'field', key: 'batch_priority' }] }
+        ]
+      },
       { type: 'button', key: 'create_batch', action: 'create_batch', kind: 'ui', label: 'Create Batch' },
-      { type: 'field', key: 'batch_number' }
+      { type: 'field', key: 'batch_number' },
+      { type: 'field', key: 'inspection_steps' }
     ],
+    documentTable: {
+      columns: [
+        { key: 'product_id', label: 'Product' },
+        { key: 'batch_priority', label: 'Priority' },
+        { key: 'batch_number', label: 'Batch Number' },
+        { key: 'inspection_steps', label: 'Inspection Steps' }
+      ]
+    },
     actions: {
       create_batch: {
         type: 'composite',
@@ -386,19 +540,79 @@ function buildEvidenceBasicTemplateJson() {
     fields: {
       evidence_title: {
         kind: 'editable',
-        label: 'Evidence Title'
+        label: 'Evidence Title',
+        placeholder: 'Short working title for the evidence set'
+      },
+      evidence_type: {
+        kind: 'editable',
+        label: 'Evidence Type',
+        control: 'radioGroup',
+        options: [
+          { value: 'photo', label: 'Photo evidence' },
+          { value: 'checklist', label: 'Checklist proof' },
+          { value: 'note', label: 'Written note' }
+        ]
+      },
+      evidence_flags: {
+        kind: 'editable',
+        label: 'Evidence Flags',
+        control: 'checkboxGroup',
+        options: [
+          { value: 'complete', label: 'Complete' },
+          { value: 'signed', label: 'Signed off' },
+          { value: 'exception', label: 'Has exception' }
+        ]
       },
       evidence_note: {
         kind: 'editable',
         label: 'Evidence Note',
-        multiline: true
+        multiline: true,
+        rows: 5,
+        placeholder: 'Describe what was checked, captured, or confirmed.'
+      },
+      findings: {
+        kind: 'journal',
+        label: 'Findings',
+        helpText: 'Add concrete findings or actions as separate rows.',
+        columns: [
+          { key: 'finding', label: 'Finding', type: 'text', placeholder: 'Describe the finding' },
+          { key: 'action', label: 'Action', type: 'text', placeholder: 'Next step or owner' },
+          {
+            key: 'severity',
+            label: 'Severity',
+            type: 'select',
+            options: [
+              { value: 'low', label: 'Low' },
+              { value: 'medium', label: 'Medium' },
+              { value: 'high', label: 'High' }
+            ]
+          },
+          { key: 'closed', label: 'Closed', type: 'checkbox' }
+        ]
       }
     },
     layout: [
       { type: 'h1', text: 'Evidence Basic' },
-      { type: 'field', key: 'evidence_title' },
-      { type: 'field', key: 'evidence_note' }
+      {
+        type: 'row',
+        children: [
+          { type: 'col', width: 6, children: [{ type: 'field', key: 'evidence_title' }] },
+          { type: 'col', width: 6, align: 'center', children: [{ type: 'field', key: 'evidence_type' }] }
+        ]
+      },
+      { type: 'field', key: 'evidence_flags' },
+      { type: 'field', key: 'evidence_note' },
+      { type: 'field', key: 'findings' }
     ],
+    documentTable: {
+      columns: [
+        { key: 'evidence_title', label: 'Title' },
+        { key: 'evidence_type', label: 'Type' },
+        { key: 'evidence_flags', label: 'Flags' },
+        { key: 'evidence_note', label: 'Note' },
+        { key: 'findings', label: 'Findings' }
+      ]
+    },
     actions: {}
   } satisfies Record<string, unknown>;
 }
@@ -417,14 +631,51 @@ function buildEvidenceProductCheckTemplateJson() {
       inspection_note: {
         kind: 'editable',
         label: 'Inspection Note',
-        multiline: true
+        multiline: true,
+        rows: 5,
+        placeholder: 'Record the observed condition, deviations, and follow-up.'
+      },
+      check_result: {
+        kind: 'editable',
+        label: 'Check Result',
+        control: 'radioGroup',
+        options: [
+          { value: 'pass', label: 'Pass' },
+          { value: 'hold', label: 'Hold' },
+          { value: 'fail', label: 'Fail' }
+        ]
+      },
+      issue_tags: {
+        kind: 'editable',
+        label: 'Issue Tags',
+        control: 'checkboxGroup',
+        options: [
+          { value: 'labeling', label: 'Labeling' },
+          { value: 'packaging', label: 'Packaging' },
+          { value: 'quality', label: 'Quality' }
+        ]
       }
     },
     layout: [
       { type: 'h1', text: 'Evidence Product Check' },
-      { type: 'field', key: 'product_id' },
+      {
+        type: 'row',
+        children: [
+          { type: 'col', width: 5, children: [{ type: 'field', key: 'product_id' }] },
+          { type: 'col', width: 4, children: [{ type: 'field', key: 'check_result' }] },
+          { type: 'col', width: 3, align: 'right', children: [{ type: 'field', key: 'issue_tags' }] }
+        ]
+      },
       { type: 'field', key: 'inspection_note' }
     ],
+    documentTable: {
+      columns: [
+        { key: 'product_id', label: 'Product' },
+        { key: 'check_result', label: 'Result' },
+        { key: 'issue_tags', label: 'Issue Tags' },
+        { key: 'inspection_note', label: 'Inspection Note' }
+      ]
+    },
     actions: {}
   } satisfies Record<string, unknown>;
 }
@@ -443,14 +694,37 @@ function buildCustomerOrderTemplateJson() {
       customer_order_number: {
         kind: 'editable',
         label: 'Customer Order Number'
+      },
+      fulfillment_flags: {
+        kind: 'editable',
+        label: 'Fulfillment Flags',
+        control: 'checkboxGroup',
+        options: [
+          { value: 'expedite', label: 'Expedite' },
+          { value: 'gift', label: 'Gift wrap' },
+          { value: 'quality_hold', label: 'Quality hold' }
+        ]
       }
     },
     layout: [
       { type: 'h1', text: 'Customer Order Test' },
-      { type: 'field', key: 'customer_id' },
+      {
+        type: 'row',
+        children: [
+          { type: 'col', width: 7, children: [{ type: 'field', key: 'customer_id' }] },
+          { type: 'col', width: 5, align: 'center', children: [{ type: 'field', key: 'fulfillment_flags' }] }
+        ]
+      },
       { type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui', label: 'Create Customer Order' },
       { type: 'field', key: 'customer_order_number' }
     ],
+    documentTable: {
+      columns: [
+        { key: 'customer_id', label: 'Customer' },
+        { key: 'fulfillment_flags', label: 'Flags' },
+        { key: 'customer_order_number', label: 'Customer Order Number' }
+      ]
+    },
     actions: {
       create_customer_order: {
         type: 'composite',
@@ -472,14 +746,48 @@ function buildCustomerOrderTemplateJson() {
   } satisfies Record<string, unknown>;
 }
 
+async function deleteReferenceContent(db: Db) {
+  await db.delete(fpDocuments).where(inArray(fpDocuments.id, [...REFERENCE_DOCUMENT_IDS]));
+
+  const existingTemplateRows = await db
+    .select({ id: fpTemplates.id })
+    .from(fpTemplates)
+    .where(inArray(fpTemplates.key, [...REFERENCE_TEMPLATE_KEYS]));
+  const existingTemplateIds = existingTemplateRows.map((row) => row.id);
+
+  if (existingTemplateIds.length > 0) {
+    await db.delete(fpDocuments).where(inArray(fpDocuments.templateId, existingTemplateIds));
+  }
+
+  await db.delete(fpTemplates).where(inArray(fpTemplates.key, [...REFERENCE_TEMPLATE_KEYS]));
+  await db.delete(fpWorkflows).where(inArray(fpWorkflows.key, [...REFERENCE_WORKFLOW_KEYS]));
+}
+
+async function clearReferenceArtifacts(rootDir: string) {
+  const attachmentRoot = resolve(rootDir, 'var', 'attachments', DEFAULT_TENANT_KEY);
+  for (const documentId of REFERENCE_DOCUMENT_IDS) {
+    await rm(resolve(attachmentRoot, documentId), { recursive: true, force: true });
+  }
+
+  const notificationRoot = resolve(rootDir, 'var', 'notifications');
+  await rm(notificationRoot, { recursive: true, force: true });
+  await mkdir(notificationRoot, { recursive: true });
+}
+
 async function run() {
   const { db, pool } = makeDb();
 
   try {
-    const erpBaseUrl = process.env.ERP_SIM_BASE_URL ?? 'http://localhost:3001';
+    await deleteReferenceContent(db);
+    await clearReferenceArtifacts(process.cwd());
 
-    const aliceId = await upsertUser(db, 'alice', 'Alice');
-    const bobId = await upsertUser(db, 'bob', 'Bob');
+    const erpBaseUrl = process.env.ERP_SIM_BASE_URL ?? 'http://localhost:3001';
+    const attachmentStorage = createLocalAttachmentStorage({
+      rootDir: resolve(process.cwd(), 'var', 'attachments')
+    });
+
+    const aliceId = await upsertUser(db, 'alice', 'Alice', 'alice@example.local');
+    const bobId = await upsertUser(db, 'bob', 'Bob', 'bob@example.local');
     const opsId = await upsertGroup(db, 'ops', 'Operations');
 
     await upsertMembership(db, opsId, aliceId, 'rwx');
@@ -589,19 +897,28 @@ async function run() {
       responseSchemaJson: { id: 'uuid', batch_number: 'string', status: 'string' }
     });
 
-    // Two small reference documents make the seeded V1 flows immediately visible
-    // in the browser without reintroducing a demo zoo.
+    // A few stable reference documents make the recent V1 capabilities visible:
+    // richer controls, journal, attachments, audit, approval flow and document tables.
     await upsertDocument(db, {
       id: '10000000-0000-0000-0000-000000000001',
       templateId: evidenceBasicTemplateId,
       templateVersion: 1,
-      status: 'assigned',
+      status: 'submitted',
       groupId: opsId,
       editorUserId: aliceId,
       approverUserId: bobId,
       dataJson: {
+        evidence_type: 'photo',
+        evidence_flags: ['complete', 'exception'],
         evidence_title: 'Incoming delivery evidence',
-        evidence_note: 'Initial evidence note captured for review.'
+        evidence_note: 'Initial evidence note captured for review.',
+        findings: [
+          { finding: 'Seal damaged on pallet 4', action: 'Request replacement', severity: 'high', closed: false },
+          { finding: 'Label partially unreadable', action: 'Reprint label', severity: 'medium', closed: true }
+        ]
+      },
+      snapshotsJson: {
+        evidence_title: 'Incoming delivery evidence'
       }
     });
     await upsertDocumentEditor(db, '10000000-0000-0000-0000-000000000001', aliceId);
@@ -627,13 +944,210 @@ async function run() {
       id: '10000000-0000-0000-0000-000000000002',
       templateId: productionTemplateId,
       templateVersion: 1,
-      status: 'created',
+      status: 'approved',
       groupId: opsId,
-      dataJson: {}
+      editorUserId: aliceId,
+      approverUserId: bobId,
+      dataJson: {
+        batch_priority: 'rush',
+        batch_number: 'B-2026-0042',
+        inspection_steps: [
+          { step: 'Temperature', measured_value: 18.4, result: 'ok', confirmed: true },
+          { step: 'Viscosity', measured_value: 42, result: 'ok', confirmed: true }
+        ]
+      },
+      externalRefsJson: {
+        product_id: 'prod-1'
+      },
+      snapshotsJson: {
+        product_id: 'Starter Culture A',
+        batch_number: 'B-2026-0042'
+      }
+    });
+    await upsertDocumentApproval(db, {
+      documentId: '10000000-0000-0000-0000-000000000002',
+      userId: bobId,
+      status: 'approved',
+      approvedAt: new Date('2026-03-17T14:00:00Z'),
+      decidedAt: new Date('2026-03-17T14:00:00Z')
+    });
+
+    await upsertDocument(db, {
+      id: '10000000-0000-0000-0000-000000000003',
+      templateId: evidenceProductCheckTemplateId,
+      templateVersion: 1,
+      status: 'assigned',
+      groupId: opsId,
+      editorUserId: aliceId,
+      approverUserId: bobId,
+      dataJson: {
+        check_result: 'hold',
+        issue_tags: ['quality', 'packaging'],
+        inspection_note: 'Packaging seam split on two units. Waiting for attachment evidence.'
+      },
+      externalRefsJson: {
+        product_id: 'prod-2'
+      },
+      snapshotsJson: {
+        product_id: 'Packaging Film B'
+      }
+    });
+    await upsertDocumentEditor(db, '10000000-0000-0000-0000-000000000003', aliceId);
+    await upsertDocumentApproval(db, {
+      documentId: '10000000-0000-0000-0000-000000000003',
+      userId: bobId,
+      status: 'pending'
+    });
+
+    await upsertDocument(db, {
+      id: '10000000-0000-0000-0000-000000000004',
+      templateId: customerOrderTemplateId,
+      templateVersion: 1,
+      status: 'assigned',
+      groupId: opsId,
+      editorUserId: aliceId,
+      approverUserId: bobId,
+      dataJson: {
+        fulfillment_flags: ['expedite'],
+        customer_order_number: 'CO-2026-0901'
+      },
+      externalRefsJson: {
+        customer_id: 'cust-1',
+        customer_order_id: 'order-1'
+      },
+      snapshotsJson: {
+        customer_id: 'Northwind Trading',
+        customer_order_number: 'CO-2026-0901'
+      }
+    });
+    await upsertDocumentEditor(db, '10000000-0000-0000-0000-000000000004', aliceId);
+    await upsertDocumentApproval(db, {
+      documentId: '10000000-0000-0000-0000-000000000004',
+      userId: bobId,
+      status: 'pending'
+    });
+
+    const imageBytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0ioAAAAASUVORK5CYII=',
+      'base64'
+    );
+    const pdfBytes = Buffer.from('%PDF-1.4\n% reference proof\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n', 'utf8');
+
+    const evidenceAttachment = await attachmentStorage.save({
+      tenantKey: DEFAULT_TENANT_KEY,
+      documentId: '10000000-0000-0000-0000-000000000001',
+      attachmentId: REFERENCE_ATTACHMENT_IDS.evidenceImage,
+      filename: 'incoming-delivery-photo.png',
+      contentType: 'image/png',
+      bytes: imageBytes
+    });
+    await upsertDocumentAttachment(db, {
+      id: REFERENCE_ATTACHMENT_IDS.evidenceImage,
+      documentId: '10000000-0000-0000-0000-000000000001',
+      kind: 'image',
+      filename: 'incoming-delivery-photo.png',
+      mimeType: 'image/png',
+      size: imageBytes.length,
+      storageKey: evidenceAttachment.attachmentKey,
+      uploadedBy: aliceId,
+      createdAt: new Date('2026-03-16T09:05:00Z')
+    });
+
+    const batchAttachment = await attachmentStorage.save({
+      tenantKey: DEFAULT_TENANT_KEY,
+      documentId: '10000000-0000-0000-0000-000000000002',
+      attachmentId: REFERENCE_ATTACHMENT_IDS.batchReport,
+      filename: 'batch-release-note.pdf',
+      contentType: 'application/pdf',
+      bytes: pdfBytes
+    });
+    await upsertDocumentAttachment(db, {
+      id: REFERENCE_ATTACHMENT_IDS.batchReport,
+      documentId: '10000000-0000-0000-0000-000000000002',
+      kind: 'file',
+      filename: 'batch-release-note.pdf',
+      mimeType: 'application/pdf',
+      size: pdfBytes.length,
+      storageKey: batchAttachment.attachmentKey,
+      uploadedBy: bobId,
+      createdAt: new Date('2026-03-17T14:05:00Z')
+    });
+
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.evidenceCreated,
+      documentId: '10000000-0000-0000-0000-000000000001',
+      eventType: 'created',
+      actorUserId: aliceId,
+      actorDisplay: 'Alice',
+      summary: 'Document created from template Evidence Basic.',
+      createdAt: new Date('2026-03-16T08:30:00Z')
+    });
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.evidenceSubmitted,
+      documentId: '10000000-0000-0000-0000-000000000001',
+      eventType: 'submitted',
+      actorUserId: aliceId,
+      actorDisplay: 'Alice',
+      summary: 'Alice submitted her evidence contribution.',
+      createdAt: new Date('2026-03-16T09:00:00Z')
+    });
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.evidenceAttachmentUploaded,
+      documentId: '10000000-0000-0000-0000-000000000001',
+      eventType: 'attachment_uploaded',
+      actorUserId: aliceId,
+      actorDisplay: 'Alice',
+      summary: 'Uploaded attachment incoming-delivery-photo.png.',
+      createdAt: new Date('2026-03-16T09:05:00Z')
+    });
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.batchCreated,
+      documentId: '10000000-0000-0000-0000-000000000002',
+      eventType: 'created',
+      actorUserId: aliceId,
+      actorDisplay: 'Alice',
+      summary: 'Production batch document created.',
+      createdAt: new Date('2026-03-17T13:00:00Z')
+    });
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.batchActionExecuted,
+      documentId: '10000000-0000-0000-0000-000000000002',
+      eventType: 'action_executed',
+      actorUserId: aliceId,
+      actorDisplay: 'Alice',
+      summary: 'Executed Create Batch to generate batch number B-2026-0042.',
+      createdAt: new Date('2026-03-17T13:15:00Z')
+    });
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.batchApproved,
+      documentId: '10000000-0000-0000-0000-000000000002',
+      eventType: 'approved',
+      actorUserId: bobId,
+      actorDisplay: 'Bob',
+      summary: 'Document approved for release.',
+      createdAt: new Date('2026-03-17T14:00:00Z')
+    });
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.productCheckAssigned,
+      documentId: '10000000-0000-0000-0000-000000000003',
+      eventType: 'assigned_editor',
+      actorUserId: bobId,
+      actorDisplay: 'Bob',
+      summary: 'Assigned Alice as editor for product check.',
+      createdAt: new Date('2026-03-18T08:00:00Z')
+    });
+    await upsertDocumentAuditEvent(db, {
+      id: REFERENCE_AUDIT_IDS.customerOrderActionExecuted,
+      documentId: '10000000-0000-0000-0000-000000000004',
+      eventType: 'action_executed',
+      actorUserId: aliceId,
+      actorDisplay: 'Alice',
+      summary: 'Executed Create Customer Order and stored order number CO-2026-0901.',
+      createdAt: new Date('2026-03-18T10:00:00Z')
     });
 
     console.log(
-      'Seed complete: users(alice,bob), group(ops), 2 workflows, 4 APIs, 4 published templates, 2 reference documents.'
+      'Reference rebuild complete: users/groups preserved, 2 workflows, 4 APIs, 4 published templates, 4 reference documents, attachments, audit trail and cleared notification outbox.'
     );
   } finally {
     await pool.end();

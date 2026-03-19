@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { resolveApiCatalogEntry } from './actions/api-catalog.js';
 import { resolveServiceBaseUrl } from './services/service-registry.js';
+import { executeIntegrationRequest } from './core/integration-client.js';
 
 const templateTokenRegex = /\{\{external\.([a-zA-Z0-9_]+)\}\}/g;
 const templateTokenDetectRegex = /\{\{external\.[a-zA-Z0-9_]+\}\}/;
@@ -189,18 +190,18 @@ export async function fetchLookupOptionsDetailed(
     throw new Error(`Unsupported lookup method: ${source.method}`);
   }
   const url = buildLookupUrl(serviceBaseUrl, source, externalRefs);
-  const response = await fetch(url, {
+  const response = await executeIntegrationRequest({
+    baseUrl: serviceBaseUrl,
+    path: source.path,
     method: 'GET',
-    headers: {
-      Accept: 'application/json'
-    }
+    query: Object.fromEntries(new URL(url).searchParams.entries())
   });
 
   if (!response.ok) {
     throw new Error(`Lookup request failed (status ${response.status})`);
   }
 
-  const data = (await response.json()) as unknown;
+  const data = response.bodyJson as unknown;
   const items = Array.isArray(data)
     ? (data as Record<string, unknown>[])
     : Array.isArray((data as { items?: unknown[] })?.items)

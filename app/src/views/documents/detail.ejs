@@ -20,6 +20,87 @@
   </div>
 <% } %>
 <section class="card">
+  <h3 class="card-title">Work Summary</h3>
+  <div class="summary-grid">
+    <article class="summary-card">
+      <div class="summary-label">Current status</div>
+      <div class="summary-value"><span class="badge badge-status"><%= document.status %></span></div>
+      <% if (workflowHint) { %><div class="muted"><%= workflowHint %></div><% } %>
+    </article>
+    <article class="summary-card">
+      <div class="summary-label">People</div>
+      <div class="summary-value"><%= assignmentEditorName || '—' %></div>
+      <div class="muted">Editors</div>
+      <div class="summary-value" style="margin-top:0.4rem;"><%= assignmentApproverName || '—' %></div>
+      <div class="muted">Approvers</div>
+    </article>
+    <article class="summary-card">
+      <div class="summary-label">Evidence</div>
+      <div class="summary-value"><%= attachmentCount || 0 %></div>
+      <div class="muted">Attachments</div>
+      <% if ((journalSummaries || []).length > 0) { %>
+        <div class="muted" style="margin-top:0.4rem;">
+          <% (journalSummaries || []).forEach((item, index) => { %>
+            <% if (index > 0) { %> · <% } %><%= item.label %>: <%= item.rowCount %>
+          <% }) %>
+        </div>
+      <% } %>
+    </article>
+    <article class="summary-card">
+      <div class="summary-label">Progress</div>
+      <% if (workflowEvaluation) { %>
+        <div class="muted">Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span></div>
+        <div class="muted">Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span></div>
+      <% } %>
+      <% if ((openWorkItems || []).length > 0) { %>
+        <div class="summary-value" style="margin-top:0.4rem;"><%= openWorkItems.length %></div>
+        <div class="muted">Open work items</div>
+      <% } %>
+    </article>
+  </div>
+  <% if ((openWorkItems || []).length > 0) { %>
+    <div class="card muted-card">
+      <strong>Open work</strong>
+      <ul class="plain-list">
+        <% (openWorkItems || []).forEach((item) => { %>
+          <li><%= item %></li>
+        <% }) %>
+      </ul>
+    </div>
+  <% } %>
+</section>
+<section class="card">
+  <h3 class="card-title">Actions</h3>
+  <div class="action-section">
+    <div>
+      <div class="summary-label">Workflow actions</div>
+      <div class="actions">
+      <% if (!isArchived) { %>
+      <% (processButtons || []).forEach((button) => { %>
+        <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= button.key %>" formmethod="post"><%= button.label %></button>
+      <% }) %>
+      <% } %>
+      <% if (isArchived || !(processButtons || []).length) { %>
+        <span class="muted">No workflow action available right now.</span>
+      <% } %>
+      </div>
+    </div>
+    <div>
+      <div class="summary-label">Form actions</div>
+      <% if ((templateActionButtons || []).length > 0) { %>
+        <div class="muted">
+          <% (templateActionButtons || []).forEach((button, index) => { %>
+            <% if (index > 0) { %> · <% } %><%= button.label %>
+          <% }) %>
+        </div>
+        <p class="muted">Form actions are available inside the form where their field context is visible.</p>
+      <% } else { %>
+        <span class="muted">No additional form actions configured for this template.</span>
+      <% } %>
+    </div>
+  </div>
+</section>
+<section class="card">
   <h3 class="card-title">Assignments</h3>
   <p class="muted">Editors: <strong><%= assignmentEditorName || '—' %></strong> · Approvers: <strong><%= assignmentApproverName || '—' %></strong></p>
   <% if (workflowEvaluation) { %>
@@ -33,6 +114,9 @@
       · Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span>
       <% if (useMultiAssignments) { %> · <span><%= approvedApproverCount || 0 %>/<%= (assignedApprovers || []).length %> approved<% if ((rejectedApproverCount || 0) > 0) { %>, <%= rejectedApproverCount %> rejected<% } %></span><% } %>
     </p>
+    <% if (workflowHint) { %>
+      <p><strong>Next step:</strong> <%= workflowHint %></p>
+    <% } %>
   <% } %>
   <% if (useMultiAssignments) { %>
     <div class="row">
@@ -108,6 +192,80 @@
     </details>
   <% } %>
 </section>
+<section class="card">
+  <h3 class="card-title">Form</h3>
+  <p class="muted">Use the form below to capture the core document data, journal rows and any template-specific actions.</p>
+  <form id="document-form" method="post" action="/documents/<%= document.id %>/save" class="document-form-shell">
+    <%- layoutHtml %>
+  </form>
+</section>
+<section class="card">
+  <h3 class="card-title">Attachments</h3>
+  <% if (!hasDocumentAttachments) { %>
+    <p class="muted">Attachments are unavailable until the DB migration is applied.</p>
+  <% } else { %>
+    <% if (!isArchived) { %>
+      <div class="row">
+        <div class="col">
+          <label for="attachment-upload-input">Add file or image</label>
+          <input id="attachment-upload-input" type="file" />
+          <p class="muted">Images are shown inline. Other files stay downloadable. V1 limit: 10 MB per file.</p>
+        </div>
+        <div class="col">
+          <button class="btn btn-secondary" type="button" id="attachment-upload-button">Upload attachment</button>
+          <div id="attachment-upload-status" class="muted"></div>
+        </div>
+      </div>
+    <% } %>
+    <% if ((attachments || []).length === 0) { %>
+      <p class="muted">No attachments yet.</p>
+    <% } %>
+    <div class="attachment-list">
+      <% (attachments || []).forEach((attachment) => { %>
+        <article class="attachment-card">
+          <div class="attachment-meta">
+            <strong><%= attachment.filename %></strong>
+            <div class="muted"><span class="badge"><%= attachment.kind %></span> · <%= attachment.sizeLabel %> · uploaded by <%= attachment.uploadedByName %><% if (attachment.createdAt) { %> · <%= new Date(attachment.createdAt).toLocaleString() %><% } %></div>
+          </div>
+          <% if (attachment.isImage) { %>
+            <a href="<%= attachment.contentUrl %>" target="_blank" rel="noopener noreferrer" class="attachment-preview-link">
+              <img class="attachment-preview-image" src="<%= attachment.contentUrl %>" alt="<%= attachment.filename %>" loading="lazy" />
+            </a>
+          <% } else { %>
+            <p class="muted">File preview not shown for <code><%= attachment.mimeType %></code>.</p>
+          <% } %>
+          <div class="actions">
+            <a class="btn btn-secondary" href="<%= attachment.contentUrl %>" target="_blank" rel="noopener noreferrer">Open</a>
+            <a class="btn btn-secondary" href="<%= attachment.downloadUrl %>">Download</a>
+          </div>
+        </article>
+      <% }) %>
+    </div>
+  <% } %>
+</section>
+<section class="card">
+  <h3 class="card-title">History</h3>
+  <% if (!hasDocumentAuditTrail) { %>
+    <p class="muted">Audit trail is unavailable until the DB migration is applied.</p>
+  <% } else if ((auditEvents || []).length === 0) { %>
+    <p class="muted">No history entries yet.</p>
+  <% } else { %>
+    <div class="activity-list">
+      <% (auditEvents || []).forEach((event) => { %>
+        <article class="activity-item">
+          <div class="activity-item-header">
+            <strong><%= event.summary %></strong>
+            <span class="badge"><%= event.eventType %></span>
+          </div>
+          <div class="muted">
+            <%= event.actorDisplay || 'System' %>
+            <% if (event.createdAt) { %> · <%= new Date(event.createdAt).toLocaleString() %><% } %>
+          </div>
+        </article>
+      <% }) %>
+    </div>
+  <% } %>
+</section>
 <% if (errorMessage) { %>
   <div class="card error-card">
     <strong>Action failed:</strong> <%= errorMessage %>
@@ -118,19 +276,6 @@
     <strong>Success:</strong> <%= successMessage %>
   </div>
 <% } %>
-
-<div class="actions">
-<% if (!isArchived) { %>
-<% (processButtons || []).forEach((button) => {
-%>
-  <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= button.key %>" formmethod="post"><%= button.label %></button>
-<% }) %>
-<% } %>
-</div>
-
-<form id="document-form" method="post" action="/documents/<%= document.id %>/save" class="card">
-  <%- layoutHtml %>
-</form>
 <div class="actions">
   <a class="btn btn-secondary" href="/documents">Back to Documents</a>
   <a class="btn btn-secondary" href="/templates">Templates</a>
@@ -147,4 +292,53 @@
     var url = submitter.getAttribute('formaction') || form.getAttribute('action') || '';
     console.log('[fp] submit action ' + actionKey + ' kind=' + kind + ' url=' + url);
   });
+
+  (function () {
+    var input = document.getElementById('attachment-upload-input');
+    var button = document.getElementById('attachment-upload-button');
+    var status = document.getElementById('attachment-upload-status');
+    if (!(input instanceof HTMLInputElement) || !(button instanceof HTMLButtonElement) || !(status instanceof HTMLElement)) return;
+
+    button.addEventListener('click', async function () {
+      var file = input.files && input.files[0];
+      if (!file) {
+        status.textContent = 'Choose a file first.';
+        return;
+      }
+
+      status.textContent = 'Uploading…';
+      button.disabled = true;
+
+      try {
+        var base64Data = await new Promise(function (resolve, reject) {
+          var reader = new FileReader();
+          reader.onload = function () { resolve(String(reader.result || '')); };
+          reader.onerror = function () { reject(new Error('Failed to read the selected file.')); };
+          reader.readAsDataURL(file);
+        });
+
+        var response = await fetch('/documents/<%= document.id %>/attachments', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            contentType: file.type || 'application/octet-stream',
+            base64Data: base64Data,
+            kind: (file.type || '').indexOf('image/') === 0 ? 'image' : 'file'
+          })
+        });
+
+        if (!response.ok) {
+          var errorBody = await response.text();
+          throw new Error(errorBody || 'Upload failed.');
+        }
+
+        window.location.reload();
+      } catch (error) {
+        status.textContent = error instanceof Error ? error.message : 'Upload failed.';
+      } finally {
+        button.disabled = false;
+      }
+    });
+  })();
 </script>

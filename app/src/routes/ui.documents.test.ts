@@ -519,6 +519,13 @@ describe('documents create route', () => {
       const assignedApprovers = Array.isArray(data.assignedApprovers)
         ? (data.assignedApprovers as Array<Record<string, unknown>>)
         : [];
+      const templateActionButtons = Array.isArray(data.templateActionButtons)
+        ? (data.templateActionButtons as Array<{ label: string }>).map((item) => item.label).join(', ')
+        : '';
+      const journalSummaries = Array.isArray(data.journalSummaries)
+        ? (data.journalSummaries as Array<Record<string, unknown>>).map((item) => `${String(item.label)}:${String(item.rowCount)}`).join(', ')
+        : '';
+      const openWorkItems = Array.isArray(data.openWorkItems) ? (data.openWorkItems as string[]).join(' | ') : '';
       const workflowEvaluation = (data.workflowEvaluation ?? {}) as Record<string, unknown>;
       const processButtons = Array.isArray(data.processButtons)
         ? (data.processButtons as Array<{ label: string }>).map((item) => item.label).join(', ')
@@ -530,12 +537,17 @@ describe('documents create route', () => {
         `approvalState=${String(workflowEvaluation.approvalState ?? '')}`,
         `submitMode=${String(workflowEvaluation.submitMode ?? '')}`,
         `approvalMode=${String(workflowEvaluation.approvalMode ?? '')}`,
+        `workflowHint=${String(data.workflowHint ?? '')}`,
         `submittedEditors=${String(data.submittedEditorCount ?? '')}`,
         `approvedApprovers=${String(data.approvedApproverCount ?? '')}`,
         `rejectedApprovers=${String(data.rejectedApproverCount ?? '')}`,
         `editorRows=${assignedEditorsDetailed.length}`,
         `approverRows=${assignedApprovers.length}`,
-        `buttons=${processButtons}`
+        `buttons=${processButtons}`,
+        `templateButtons=${templateActionButtons}`,
+        `attachmentCount=${String(data.attachmentCount ?? '')}`,
+        `journalSummaries=${journalSummaries}`,
+        `openWorkItems=${openWorkItems}`
       ].join('\n'));
     });
     await app.register(uiRoutes, {
@@ -557,12 +569,119 @@ describe('documents create route', () => {
     expect(res.body).toContain('approvalState=partial');
     expect(res.body).toContain('submitMode=individual');
     expect(res.body).toContain('approvalMode=individual');
+    expect(res.body).toContain('workflowHint=Waiting for 1 approver decision before the document can become approved.');
     expect(res.body).toContain('submittedEditors=1');
     expect(res.body).toContain('approvedApprovers=1');
     expect(res.body).toContain('rejectedApprovers=0');
     expect(res.body).toContain('editorRows=2');
     expect(res.body).toContain('approverRows=2');
     expect(res.body).toContain('buttons=Approve');
+    expect(res.body).toContain('templateButtons=Create Customer Order');
+    expect(res.body).toContain('attachmentCount=0');
+    expect(res.body).toContain('openWorkItems=Waiting for 1 approver decision(s). | No attachments uploaded yet.');
+
+    await app.close();
+  });
+
+  it('blocks submit when no editor is assigned in the multi-assignment V1 flow', async () => {
+    const templateId = '00000000-0000-0000-0000-0000000001f6';
+    const documentId = '00000000-0000-0000-0000-0000000001f7';
+    const template = {
+      id: templateId,
+      key: 'evidence-basic',
+      name: 'Evidence Basic',
+      state: 'published',
+      workflowRef: 'evidence.group-submit.v1',
+      templateJson: buildV1MinimalEvidenceTemplateJson()
+    };
+
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: vi.fn(async () => ({
+            id: documentId,
+            templateId,
+            status: 'assigned',
+            groupId: null,
+            dataJson: {},
+            externalRefsJson: {},
+            snapshotsJson: {}
+          }))
+        },
+        fpTemplates: {
+          findFirst: vi.fn(async () => template)
+        },
+        fpDocumentEditors: {
+          findMany: vi.fn(async () => [])
+        },
+        fpDocumentSubmissions: {
+          findMany: vi.fn(async () => [])
+        },
+        fpDocumentApprovals: {
+          findMany: vi.fn(async () => [])
+        }
+      },
+      select: vi.fn((selection?: Record<string, unknown>) => {
+        if (selection && 'id' in selection && 'key' in selection && 'workflowJson' in selection) {
+          return {
+            from: () => ({
+              where: () => ({
+                orderBy: () => ({
+                  limit: async () => [{
+                    id: 'wf-1',
+                    key: 'evidence.group-submit.v1',
+                    name: 'Evidence Group Submit',
+                    state: 'active',
+                    version: 1,
+                    workflowJson: {
+                      order: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+                      initialStatus: 'created',
+                      states: {
+                        created: { buttons: ['assign'] },
+                        assigned: { buttons: ['submit'] },
+                        submitted: { buttons: ['approve'] },
+                        approved: { buttons: ['archive'] },
+                        archived: { buttons: [] }
+                      },
+                      semantics: { submit: 'individual', approval: 'individual' },
+                      actorModel: { editors: 'multiple', approvers: 'multiple' }
+                    }
+                  }]
+                })
+              })
+            })
+          };
+        }
+        return {
+          from: () => ({
+            innerJoin: () => ({
+              where: () => ({
+                orderBy: async () => []
+              })
+            })
+          })
+        };
+      })
+    };
+
+    const app = Fastify();
+    app.addHook('preHandler', async (request) => {
+      request.currentUser = { id: 'u1', username: 'alice', displayName: 'Alice' };
+    });
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001',
+      hasDocumentActorColumns: true,
+      hasDocumentMultiAssignments: true
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/documents/${documentId}/action/submit`
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(res.headers.location).toContain('error=No+assigned+editors.');
 
     await app.close();
   });

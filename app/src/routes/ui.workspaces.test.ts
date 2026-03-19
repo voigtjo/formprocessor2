@@ -24,6 +24,8 @@ function parseCookie(cookieHeader: string | undefined) {
 
 function createWorkflowMockDb() {
   let currentStatus = 'Created';
+  let editorUserId: string | null = null;
+  let approverUserId: string | null = null;
   let assigneeUserId: string | null = null;
   let reviewerUserId: string | null = null;
   let currentDataJson: Record<string, unknown> = {};
@@ -34,8 +36,8 @@ function createWorkflowMockDb() {
     name: 'Legacy Workspace RBAC',
     templateJson: {
       fields: {
-        assignee_user_id: { kind: 'workflow', label: 'Assignee' },
-        reviewer_user_id: { kind: 'workflow', label: 'Reviewer' }
+        editor_user_id: { kind: 'workflow', label: 'Editor' },
+        approver_user_id: { kind: 'workflow', label: 'Approver' }
       },
       layout: [],
       workflow: {
@@ -56,25 +58,25 @@ function createWorkflowMockDb() {
         assignEditorAction: {
           type: 'composite',
           steps: [
-            { type: 'setField', key: 'assignee_user_id', value: alice.id },
+            { type: 'setField', key: 'editor_user_id', value: alice.id },
             { type: 'setStatus', to: 'Assigned' }
           ]
         },
         assignApproverAction: {
           type: 'composite',
-          steps: [{ type: 'setField', key: 'reviewer_user_id', value: bob.id }]
+          steps: [{ type: 'setField', key: 'approver_user_id', value: bob.id }]
         },
         submitAction: {
           type: 'composite',
           steps: [
-            { type: 'requireField', key: 'assignee_user_id', message: 'Submit requires editor assignment first.' },
+            { type: 'requireField', key: 'editor_user_id', message: 'Submit requires editor assignment first.' },
             { type: 'setStatus', to: 'Submitted' }
           ]
         },
         approveAction: {
           type: 'composite',
           steps: [
-            { type: 'requireField', key: 'reviewer_user_id', message: 'Approve requires approver assignment first.' },
+            { type: 'requireField', key: 'approver_user_id', message: 'Approve requires approver assignment first.' },
             { type: 'setStatus', to: 'Approved' }
           ]
         }
@@ -95,6 +97,8 @@ function createWorkflowMockDb() {
           templateId: template.id,
           groupId: opsGroupId,
           status: currentStatus,
+          editorUserId,
+          approverUserId,
           assigneeUserId,
           reviewerUserId,
           dataJson: currentDataJson,
@@ -128,12 +132,46 @@ function createWorkflowMockDb() {
         })
       })
     }),
+    update: () => ({
+      set: (values: any) => ({
+        where: async () => {
+          if (typeof values.status === 'string') currentStatus = values.status;
+          if (Object.prototype.hasOwnProperty.call(values, 'editorUserId')) {
+            editorUserId = values.editorUserId ?? null;
+          }
+          if (Object.prototype.hasOwnProperty.call(values, 'approverUserId')) {
+            approverUserId = values.approverUserId ?? null;
+          }
+          if (Object.prototype.hasOwnProperty.call(values, 'assigneeUserId')) {
+            assigneeUserId = values.assigneeUserId ?? null;
+          }
+          if (Object.prototype.hasOwnProperty.call(values, 'reviewerUserId')) {
+            reviewerUserId = values.reviewerUserId ?? null;
+          }
+          if (values.dataJson && typeof values.dataJson === 'object') {
+            currentDataJson = values.dataJson;
+            if (typeof values.dataJson.editor_user_id === 'string') {
+              editorUserId = values.dataJson.editor_user_id;
+            }
+            if (typeof values.dataJson.approver_user_id === 'string') {
+              approverUserId = values.dataJson.approver_user_id;
+            }
+          }
+        }
+      })
+    }),
     transaction: async (cb: (tx: any) => Promise<void>) => {
       const tx = {
         update: () => ({
           set: (values: any) => ({
             where: async () => {
               if (typeof values.status === 'string') currentStatus = values.status;
+              if (Object.prototype.hasOwnProperty.call(values, 'editorUserId')) {
+                editorUserId = values.editorUserId ?? null;
+              }
+              if (Object.prototype.hasOwnProperty.call(values, 'approverUserId')) {
+                approverUserId = values.approverUserId ?? null;
+              }
               if (Object.prototype.hasOwnProperty.call(values, 'assigneeUserId')) {
                 assigneeUserId = values.assigneeUserId ?? null;
               }
@@ -142,6 +180,12 @@ function createWorkflowMockDb() {
               }
               if (values.dataJson && typeof values.dataJson === 'object') {
                 currentDataJson = values.dataJson;
+                if (typeof values.dataJson.editor_user_id === 'string') {
+                  editorUserId = values.dataJson.editor_user_id;
+                }
+                if (typeof values.dataJson.approver_user_id === 'string') {
+                  approverUserId = values.dataJson.approver_user_id;
+                }
               }
             }
           })
@@ -153,7 +197,7 @@ function createWorkflowMockDb() {
 
   return {
     db,
-    state: () => ({ currentStatus, assigneeUserId, reviewerUserId, currentDataJson })
+    state: () => ({ currentStatus, editorUserId, approverUserId, assigneeUserId, reviewerUserId, currentDataJson })
   };
 }
 
@@ -182,24 +226,22 @@ describe('workplaces / assignment flow', () => {
 
     const assignRes = await app.inject({
       method: 'POST',
-      url: '/documents/00000000-0000-0000-0000-0000000000d1/action/assign_editor',
+      url: '/documents/00000000-0000-0000-0000-0000000000d1/assign/editor',
       headers: { cookie: `fp_user=${encodeURIComponent(alice.id)}` },
-      payload: {}
+      payload: { userId: alice.id }
     });
     expect(assignRes.statusCode).toBe(303);
-    expect(mock.state().currentStatus).toBe('assigned');
-    expect(mock.state().assigneeUserId).toBe(alice.id);
+    expect(mock.state().currentStatus).toBe('Created');
+    expect(mock.state().editorUserId ?? mock.state().assigneeUserId).toBe(alice.id);
 
     const assignApproverRes = await app.inject({
       method: 'POST',
-      url: '/documents/00000000-0000-0000-0000-0000000000d1/action/assign_approver',
+      url: '/documents/00000000-0000-0000-0000-0000000000d1/assign/approver',
       headers: { cookie: `fp_user=${encodeURIComponent(alice.id)}` },
-      payload: {}
+      payload: { userId: bob.id }
     });
     expect(assignApproverRes.statusCode).toBe(303);
-    expect(mock.state().reviewerUserId).toBe(bob.id);
-    expect((mock.state().currentDataJson as any).assignee_user_id).toBeUndefined();
-    expect((mock.state().currentDataJson as any).reviewer_user_id).toBeUndefined();
+    expect(mock.state().approverUserId ?? mock.state().reviewerUserId).toBe(bob.id);
 
     const submitRes = await app.inject({
       method: 'POST',
@@ -250,7 +292,7 @@ describe('workplaces / assignment flow', () => {
 
     expect(res.statusCode).toBe(303);
     expect(res.headers.location).toContain('/documents/00000000-0000-0000-0000-0000000000d1?error=');
-    expect(String(res.headers.location)).toContain('Submit+requires+editor+assignment+first.');
+    expect(String(res.headers.location)).toContain('No+assigned+editor.+Set+an+editor+before+submitting.');
     await app.close();
   });
 
@@ -282,7 +324,7 @@ describe('workplaces / assignment flow', () => {
     });
     expect(approveRes.statusCode).toBe(303);
     expect(approveRes.headers.location).toContain('/documents/00000000-0000-0000-0000-0000000000d1?error=');
-    expect(String(approveRes.headers.location)).toContain('Approve+requires+approver+assignment+first.');
+    expect(String(approveRes.headers.location)).toContain('No+assigned+approver.+Set+an+approver+before+approval.');
 
     await app.close();
   });

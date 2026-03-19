@@ -41,6 +41,7 @@ export const fpUsers = pgTable(
     id: uuid('id').defaultRandom().primaryKey(),
     username: text('username').notNull(),
     displayName: text('display_name').notNull(),
+    email: text('email'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [uniqueIndex('ux_fp_users_username').on(table.username)]
@@ -181,6 +182,50 @@ export const fpDocumentApprovals = pgTable(
     index('idx_fp_document_approvals_document').on(table.documentId),
     index('idx_fp_document_approvals_user').on(table.userId),
     index('idx_fp_document_approvals_status').on(table.status)
+  ]
+);
+
+export const fpDocumentAttachments = pgTable(
+  'fp_document_attachments',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => fpDocuments.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull().default('file'),
+    filename: text('filename').notNull(),
+    mimeType: text('mime_type').notNull(),
+    size: integer('size').notNull().default(0),
+    storageKey: text('storage_key').notNull(),
+    uploadedBy: uuid('uploaded_by').references(() => fpUsers.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    index('idx_fp_document_attachments_document').on(table.documentId),
+    index('idx_fp_document_attachments_uploaded_by').on(table.uploadedBy),
+    index('idx_fp_document_attachments_kind').on(table.kind)
+  ]
+);
+
+export const fpDocumentAuditEvents = pgTable(
+  'fp_document_audit_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => fpDocuments.id, { onDelete: 'cascade' }),
+    eventType: text('event_type').notNull(),
+    actorUserId: uuid('actor_user_id').references(() => fpUsers.id, { onDelete: 'set null' }),
+    actorDisplay: text('actor_display'),
+    summary: text('summary').notNull(),
+    detailJson: jsonb('detail_json'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    index('idx_fp_document_audit_events_document').on(table.documentId),
+    index('idx_fp_document_audit_events_event_type').on(table.eventType),
+    index('idx_fp_document_audit_events_actor').on(table.actorUserId),
+    index('idx_fp_document_audit_events_created_at').on(table.createdAt)
   ]
 );
 

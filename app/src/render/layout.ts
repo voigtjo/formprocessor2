@@ -24,10 +24,26 @@ type LayoutNode = {
   variant?: string;
   kind?: string;
   width?: string | number;
+  align?: string;
   targets?: string[];
   params?: Record<string, unknown>;
   confirm?: string;
   children?: LayoutNode[];
+};
+
+type ResolvedFieldOption = {
+  value: string;
+  label: string;
+  hint: string;
+};
+
+type JournalColumn = {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'select' | 'checkbox';
+  placeholder?: string;
+  width?: string | number;
+  options?: ResolvedFieldOption[];
 };
 
 function escapeHtml(value: unknown) {
@@ -51,8 +67,426 @@ function isCheckedValue(value: unknown) {
   return normalized === 'true' || normalized === 'yes' || normalized === '1';
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? '').trim()).filter((item) => item.length > 0);
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => String(item ?? '').trim()).filter((item) => item.length > 0);
+        }
+      } catch {
+        // Fall back to comma-separated parsing below.
+      }
+    }
+    return trimmed
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+
+  return [];
+}
+
 function isEditableFieldKind(kind: string) {
-  return kind === 'editable' || kind === 'date' || kind === 'checkbox';
+  return kind === 'editable' || kind === 'date' || kind === 'checkbox' || kind === 'journal';
+}
+
+function resolveUiInput(field: any) {
+  const input = field?.inputType ?? field?.control ?? field?.ui?.input ?? field?.kind;
+  if (field?.multiline === true || input === 'textarea') return 'textarea';
+  if (input === 'date' || input === 'checkbox' || input === 'radioGroup' || input === 'checkboxGroup' || input === 'journal') {
+    return input;
+  }
+  return 'text';
+}
+
+function resolveJournalColumns(field: any): JournalColumn[] {
+  const rawColumns = Array.isArray(field?.columns) ? field.columns : Array.isArray(field?.journal?.columns) ? field.journal.columns : [];
+  return rawColumns
+    .map((column: any) => {
+      if (!column || typeof column !== 'object') return null;
+      const key = typeof column.key === 'string' ? column.key.trim() : '';
+      if (!key) return null;
+      const typeRaw = typeof column.type === 'string' ? column.type.trim().toLowerCase() : 'text';
+      const type: JournalColumn['type'] =
+        typeRaw === 'number' || typeRaw === 'select' || typeRaw === 'checkbox' ? (typeRaw as JournalColumn['type']) : 'text';
+      return {
+        key,
+        label: typeof column.label === 'string' && column.label.trim().length > 0 ? column.label : key,
+        type,
+        placeholder: typeof column.placeholder === 'string' ? column.placeholder : undefined,
+        width: column.width,
+        options: type === 'select' ? resolveFieldOptions(column) : undefined
+      };
+    })
+    .filter((column): column is JournalColumn => !!column);
+}
+
+function normalizeJournalRows(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) {
+    return value.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row));
+  }
+  if (typeof value === 'string' && value.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row));
+      }
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function resolveFieldRows(field: any) {
+  const raw = Number(field?.rows ?? field?.ui?.rows ?? (field?.multiline ? 4 : 3));
+  if (!Number.isFinite(raw)) return field?.multiline ? 4 : 3;
+  return Math.max(2, Math.min(12, Math.round(raw)));
+}
+
+function resolveFieldOptions(field: any) {
+  const options = Array.isArray(field?.options) ? field.options : [];
+  return options
+    .map((option: any) => {
+      if (!option || typeof option !== 'object') return null;
+      const value = typeof option.value === 'string' ? option.value : String(option.value ?? '');
+      const label = typeof option.label === 'string' ? option.label : value;
+      const hint = typeof option.hint === 'string' ? option.hint : '';
+      return { value, label, hint };
+    })
+    .filter((option): option is ResolvedFieldOption => !!option && option.value.length > 0);
+}
+
+function resolveFieldHelpText(field: any) {
+  if (typeof field?.helpText === 'string' && field.helpText.trim().length > 0) return field.helpText.trim();
+  if (typeof field?.hint === 'string' && field.hint.trim().length > 0) return field.hint.trim();
+  if (typeof field?.description === 'string' && field.description.trim().length > 0) return field.description.trim();
+  return '';
+}
+
+function resolveFieldPlaceholder(field: any) {
+  if (typeof field?.placeholder === 'string') return field.placeholder;
+  if (typeof field?.ui?.placeholder === 'string') return field.ui.placeholder;
+  return '';
+}
+
+function resolveFieldDisplayValue(field: any, rawValue: unknown) {
+  const uiInput = resolveUiInput(field);
+  const options = resolveFieldOptions(field);
+  const byValue = new Map(options.map((option) => [option.value, option.label]));
+
+  if (uiInput === 'checkbox') {
+    return isCheckedValue(rawValue) ? 'Yes' : 'No';
+  }
+
+  if (uiInput === 'radioGroup') {
+    const normalized = String(rawValue ?? '').trim();
+    return byValue.get(normalized) ?? normalized;
+  }
+
+  if (uiInput === 'checkboxGroup') {
+    const selectedValues = normalizeStringArray(rawValue);
+    const labels = selectedValues
+      .map((value) => byValue.get(value) ?? value)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    return labels.length > 0 ? labels.join(', ') : '';
+  }
+
+  if (uiInput === 'journal') {
+    const rows = normalizeJournalRows(rawValue);
+    return rows.length > 0 ? `${rows.length} rows` : '';
+  }
+
+  return rawValue;
+}
+
+function resolveAlignClass(align: unknown, scope: 'row' | 'col' | 'field') {
+  const normalized = typeof align === 'string' ? align.trim().toLowerCase() : '';
+  if (normalized === 'left' || normalized === 'center' || normalized === 'right') {
+    return `${scope}-align-${normalized}`;
+  }
+  return '';
+}
+
+function resolveColumnWidthStyle(width: unknown) {
+  if (typeof width === 'number' && Number.isFinite(width)) {
+    const clamped = Math.max(1, Math.min(12, Math.round(width)));
+    const percentage = (clamped / 12) * 100;
+    return `--col-basis:${percentage}%;`;
+  }
+
+  if (typeof width !== 'string') return '';
+  const normalized = width.trim().toLowerCase();
+  if (!normalized) return '';
+
+  const ratioMap: Record<string, number> = {
+    full: 100,
+    half: 50,
+    '1/2': 50,
+    third: 33.3333,
+    '1/3': 33.3333,
+    '2/3': 66.6667,
+    quarter: 25,
+    '1/4': 25,
+    '3/4': 75
+  };
+
+  if (ratioMap[normalized]) {
+    return `--col-basis:${ratioMap[normalized]}%;`;
+  }
+
+  const asNumber = Number(normalized);
+  if (Number.isFinite(asNumber) && normalized !== '') {
+    const clamped = Math.max(1, Math.min(12, Math.round(asNumber)));
+    const percentage = (clamped / 12) * 100;
+    return `--col-basis:${percentage}%;`;
+  }
+
+  if (normalized.endsWith('%')) {
+    return `--col-basis:${escapeAttr(normalized)};`;
+  }
+
+  return '';
+}
+
+function renderFieldHelp(field: any) {
+  const helpText = resolveFieldHelpText(field);
+  return helpText ? `<div class="field-help muted">${escapeHtml(helpText)}</div>` : '';
+}
+
+function wrapFieldContent(fieldKey: string, label: string, innerHtml: string, field: any, node: LayoutNode) {
+  const alignClass = resolveAlignClass(node.align ?? field?.align ?? field?.ui?.align, 'field');
+  const classes = ['row', 'form-field'];
+  if (alignClass) classes.push(alignClass);
+  const uiInput = resolveUiInput(field);
+  const isChoiceGroup = uiInput === 'radioGroup' || uiInput === 'checkboxGroup';
+  const labelAttr = isChoiceGroup ? '' : ` for="field-${escapeAttr(fieldKey)}"`;
+  return `<div class="${classes.join(' ')}"><label${labelAttr}>${label}</label>${innerHtml}${renderFieldHelp(field)}</div>`;
+}
+
+function renderOptionHint(hint: string) {
+  return hint ? `<span class="choice-hint muted">${escapeHtml(hint)}</span>` : '';
+}
+
+function renderRadioGroup(fieldKey: string, field: any, value: unknown, isEditable: boolean) {
+  const options = resolveFieldOptions(field);
+  const selected = String(value ?? '').trim();
+  const disabledAttr = isEditable ? '' : ' disabled';
+  return `<div class="choice-group" role="radiogroup">${options
+    .map((option: ResolvedFieldOption, index: number) => {
+      const checked = option.value === selected ? ' checked' : '';
+      const id = `field-${escapeAttr(fieldKey)}-${index}`;
+      return `<label class="choice-option" for="${id}"><input id="${id}" type="radio" name="data:${escapeAttr(fieldKey)}" value="${escapeAttr(option.value)}"${checked}${disabledAttr} /><span class="choice-label">${escapeHtml(option.label)}</span>${renderOptionHint(option.hint)}</label>`;
+    })
+    .join('')}</div>`;
+}
+
+function renderCheckboxGroup(fieldKey: string, field: any, value: unknown, isEditable: boolean) {
+  const options = resolveFieldOptions(field);
+  const selected = new Set(normalizeStringArray(value));
+  const disabledAttr = isEditable ? '' : ' disabled';
+  return `<div class="choice-group" role="group">${options
+    .map((option: ResolvedFieldOption, index: number) => {
+      const checked = selected.has(option.value) ? ' checked' : '';
+      const id = `field-${escapeAttr(fieldKey)}-${index}`;
+      return `<label class="choice-option" for="${id}"><input id="${id}" type="checkbox" name="data:${escapeAttr(fieldKey)}" value="${escapeAttr(option.value)}"${checked}${disabledAttr} /><span class="choice-label">${escapeHtml(option.label)}</span>${renderOptionHint(option.hint)}</label>`;
+    })
+    .join('')}</div>`;
+}
+
+function renderJournalReadonly(fieldKey: string, field: any, value: unknown) {
+  const columns = resolveJournalColumns(field);
+  const rows = normalizeJournalRows(value);
+  if (columns.length === 0) {
+    return `<div class="muted">No journal columns configured.</div>`;
+  }
+  if (rows.length === 0) {
+    return `<div class="muted">No rows recorded.</div>`;
+  }
+
+  const tableHead = columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join('');
+  const tableRows = rows
+    .map((row) => {
+      const cells = columns
+        .map((column) => {
+          const cellValue = row[column.key];
+          if (column.type === 'checkbox') {
+            return `<td>${escapeHtml(isCheckedValue(cellValue) ? 'Yes' : 'No')}</td>`;
+          }
+          if (column.type === 'select' && Array.isArray(column.options)) {
+            const option = column.options.find((item) => item.value === String(cellValue ?? ''));
+            return `<td>${escapeHtml(option?.label ?? cellValue ?? '—')}</td>`;
+          }
+          return `<td>${escapeHtml(cellValue ?? '—')}</td>`;
+        })
+        .join('');
+      return `<tr>${cells}</tr>`;
+    })
+    .join('');
+  return `<div class="journal-wrapper"><table class="journal-table"><thead><tr>${tableHead}</tr></thead><tbody>${tableRows}</tbody></table></div>`;
+}
+
+function renderJournalEditable(fieldKey: string, field: any, value: unknown, mode: RenderMode) {
+  const columns = resolveJournalColumns(field);
+  const rows = normalizeJournalRows(value);
+  const inputValue = escapeAttr(JSON.stringify(rows));
+  const config = escapeAttr(JSON.stringify({ columns, fieldKey, mode }));
+  const emptyMessage = escapeHtml(typeof field?.emptyText === 'string' ? field.emptyText : 'No rows yet.');
+  return `<div class="journal-control" id="journal-${escapeAttr(fieldKey)}" data-journal-config="${config}" data-journal-empty="${emptyMessage}">
+    <input id="field-${escapeAttr(fieldKey)}" type="hidden" name="data:${escapeAttr(fieldKey)}" value="${inputValue}" />
+    <div class="journal-wrapper">
+      <table class="journal-table">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="actions journal-actions">
+      <button type="button" class="btn btn-secondary" data-journal-add>Add row</button>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var root = document.getElementById('journal-${escapeAttr(fieldKey)}');
+      if (!root || root.dataset.bound === '1') return;
+      root.dataset.bound = '1';
+      var config = JSON.parse(root.getAttribute('data-journal-config') || '{}');
+      var hidden = root.querySelector('input[type="hidden"]');
+      var table = root.querySelector('table');
+      var thead = table && table.querySelector('thead');
+      var tbody = table && table.querySelector('tbody');
+      var addButton = root.querySelector('[data-journal-add]');
+      if (!hidden || !table || !thead || !tbody || !addButton) return;
+
+      function safeRows() {
+        try {
+          var parsed = JSON.parse(hidden.value || '[]');
+          return Array.isArray(parsed) ? parsed.filter(function (row) { return row && typeof row === 'object' && !Array.isArray(row); }) : [];
+        } catch (_error) {
+          return [];
+        }
+      }
+
+      function writeRows(rows) {
+        hidden.value = JSON.stringify(rows);
+      }
+
+      function defaultValueFor(column) {
+        return column.type === 'checkbox' ? false : '';
+      }
+
+      function render() {
+        var columns = Array.isArray(config.columns) ? config.columns : [];
+        var rows = safeRows();
+        thead.innerHTML = '';
+        tbody.innerHTML = '';
+
+        var headRow = document.createElement('tr');
+        columns.forEach(function (column) {
+          var th = document.createElement('th');
+          th.textContent = column.label || column.key;
+          headRow.appendChild(th);
+        });
+        var actionHead = document.createElement('th');
+        actionHead.textContent = 'Actions';
+        headRow.appendChild(actionHead);
+        thead.appendChild(headRow);
+
+        if (rows.length === 0) {
+          var emptyRow = document.createElement('tr');
+          var emptyCell = document.createElement('td');
+          emptyCell.colSpan = columns.length + 1;
+          emptyCell.className = 'muted';
+          emptyCell.textContent = root.getAttribute('data-journal-empty') || 'No rows yet.';
+          emptyRow.appendChild(emptyCell);
+          tbody.appendChild(emptyRow);
+          return;
+        }
+
+        rows.forEach(function (row, rowIndex) {
+          var tr = document.createElement('tr');
+          columns.forEach(function (column) {
+            var td = document.createElement('td');
+            var currentValue = row[column.key];
+            var input;
+            if (column.type === 'checkbox') {
+              input = document.createElement('input');
+              input.type = 'checkbox';
+              input.checked = currentValue === true || String(currentValue || '').toLowerCase() === 'true' || String(currentValue || '') === '1';
+              input.addEventListener('change', function () {
+                var nextRows = safeRows();
+                nextRows[rowIndex][column.key] = input.checked;
+                writeRows(nextRows);
+              });
+            } else if (column.type === 'select') {
+              input = document.createElement('select');
+              var options = Array.isArray(column.options) ? column.options : [];
+              options.forEach(function (option) {
+                var optionNode = document.createElement('option');
+                optionNode.value = option.value;
+                optionNode.textContent = option.label;
+                if (String(currentValue || '') === option.value) optionNode.selected = true;
+                input.appendChild(optionNode);
+              });
+              input.addEventListener('change', function () {
+                var nextRows = safeRows();
+                nextRows[rowIndex][column.key] = input.value;
+                writeRows(nextRows);
+              });
+            } else {
+              input = document.createElement('input');
+              input.type = column.type === 'number' ? 'number' : 'text';
+              input.value = currentValue == null ? '' : String(currentValue);
+              if (column.placeholder) input.placeholder = column.placeholder;
+              input.addEventListener('input', function () {
+                var nextRows = safeRows();
+                nextRows[rowIndex][column.key] = input.value;
+                writeRows(nextRows);
+              });
+            }
+            td.appendChild(input);
+            tr.appendChild(td);
+          });
+
+          var actionTd = document.createElement('td');
+          var removeButton = document.createElement('button');
+          removeButton.type = 'button';
+          removeButton.className = 'btn btn-secondary';
+          removeButton.textContent = 'Remove';
+          removeButton.addEventListener('click', function () {
+            var nextRows = safeRows();
+            nextRows.splice(rowIndex, 1);
+            writeRows(nextRows);
+            render();
+          });
+          actionTd.appendChild(removeButton);
+          tr.appendChild(actionTd);
+          tbody.appendChild(tr);
+        });
+      }
+
+      addButton.addEventListener('click', function () {
+        var columns = Array.isArray(config.columns) ? config.columns : [];
+        var nextRows = safeRows();
+        var nextRow = {};
+        columns.forEach(function (column) {
+          nextRow[column.key] = defaultValueFor(column);
+        });
+        nextRows.push(nextRow);
+        writeRows(nextRows);
+        render();
+      });
+
+      render();
+    })();
+  </script>`;
 }
 
 function normalizeLayoutNodes(templateJson: any): LayoutNode[] {
@@ -92,6 +526,7 @@ function isEmptyDisplayValue(value: unknown) {
 function hasDisplayValueForField(fieldKey: string, params: RenderLayoutParams) {
   const field = (params.templateJson?.fields ?? {})[fieldKey] ?? {};
   const kind = String(field.kind ?? 'unknown');
+  const uiInput = resolveUiInput(field);
   const isStatusWorkflowField = kind === 'workflow' && fieldKey === 'status';
   const dataValue = params.dataJson?.[fieldKey];
   const snapshotValue = params.snapshotsJson?.[fieldKey];
@@ -106,6 +541,10 @@ function hasDisplayValueForField(fieldKey: string, params: RenderLayoutParams) {
       return !isEmptyDisplayValue(params.documentStatus);
     }
     return !isEmptyDisplayValue(dataValue) || !isEmptyDisplayValue(snapshotValue) || !isEmptyDisplayValue(externalValue);
+  }
+
+  if (uiInput === 'journal') {
+    return normalizeJournalRows(dataValue).length > 0;
   }
 
   return !isEmptyDisplayValue(dataValue);
@@ -130,10 +569,12 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
   const field = (params.templateJson?.fields ?? {})[fieldKey] ?? {};
   const label = escapeHtml(field.label ?? fieldKey);
   const kind = String(field.kind ?? 'unknown');
-  const uiInputCandidate = field?.inputType ?? field?.control ?? field?.ui?.input ?? kind;
-  const uiInput = uiInputCandidate === 'date' || uiInputCandidate === 'checkbox' ? uiInputCandidate : 'text';
+  const uiInput = resolveUiInput(field);
   const isWorkflow = kind === 'workflow';
   const isStatusWorkflowField = isWorkflow && fieldKey === 'status';
+  const placeholder = resolveFieldPlaceholder(field);
+  const placeholderAttr = placeholder ? ` placeholder="${escapeAttr(placeholder)}"` : '';
+  const textareaRows = resolveFieldRows(field);
 
   if (params.mode === 'detail' && isStatusWorkflowField) {
     return '';
@@ -148,68 +589,99 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
   const isSystemLike = kind === 'system' || isWorkflow;
   const workflowDisplay = isStatusWorkflowField ? params.documentStatus : dataValue ?? snapshotValue ?? externalValue;
   const systemLikeDisplay = isWorkflow ? workflowDisplay : dataValue ?? snapshotValue ?? externalValue;
+  const displayValue = resolveFieldDisplayValue(field, dataValue ?? snapshotValue ?? externalValue);
 
   if (params.mode === 'preview') {
     if (isSystemLike) {
       if (isWorkflow) {
         const value = isEmptyDisplayValue(workflowDisplay) ? '—' : workflowDisplay;
-        return `<div class="row"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
+        return `<div class="row form-field"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
       }
-      return `<div class="row"><label>${label}</label><div class="muted">${escapeHtml(systemLikeDisplay ?? '—')}</div></div>`;
+      return `<div class="row form-field"><label>${label}</label><div class="muted">${escapeHtml(systemLikeDisplay ?? '—')}</div></div>`;
     }
 
     if (kind === 'lookup') {
-      return `<div class="row"><label>${label}</label><select disabled><option>Lookup field</option></select></div>`;
+      return wrapFieldContent(fieldKey, label, `<select disabled><option>Lookup field</option></select>`, field, node);
     }
 
-    if (field.multiline) {
-      return `<div class="row"><label>${label}</label><textarea rows="3" disabled placeholder="Preview"></textarea></div>`;
+    if (uiInput === 'radioGroup') {
+      return wrapFieldContent(fieldKey, label, renderRadioGroup(fieldKey, field, dataValue, false), field, node);
     }
 
-    return `<div class="row"><label>${label}</label><input type="text" disabled placeholder="Preview" /></div>`;
+    if (uiInput === 'checkboxGroup') {
+      return wrapFieldContent(fieldKey, label, renderCheckboxGroup(fieldKey, field, dataValue, false), field, node);
+    }
+
+    if (uiInput === 'journal') {
+      return wrapFieldContent(fieldKey, label, renderJournalReadonly(fieldKey, field, dataValue), field, node);
+    }
+
+    if (uiInput === 'textarea') {
+      return wrapFieldContent(fieldKey, label, `<textarea rows="${textareaRows}" disabled placeholder="Preview"></textarea>`, field, node);
+    }
+
+    return wrapFieldContent(fieldKey, label, `<input type="${uiInput === 'date' ? 'date' : uiInput === 'checkbox' ? 'checkbox' : 'text'}" disabled${uiInput === 'checkbox' ? ' value="1"' : placeholderAttr} />`, field, node);
   }
 
   if (params.mode === 'new') {
     if (isSystemLike) {
       if (isWorkflow) {
         const value = isEmptyDisplayValue(workflowDisplay) ? '—' : workflowDisplay;
-        return `<div class="row"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
+        return `<div class="row form-field"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
       }
       if (isEmptyDisplayValue(systemLikeDisplay)) {
         return '';
       }
-      return `<div class="row"><label>${label}</label><div>${escapeHtml(systemLikeDisplay)}</div></div>`;
+      return `<div class="row form-field"><label>${label}</label><div>${escapeHtml(systemLikeDisplay)}</div></div>`;
     }
 
     if (kind === 'lookup') {
       const templateId = params.templateId ?? '';
       const hxVals = JSON.stringify({ templateId, fieldKey });
       if (isEditable) {
-        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="#doc-form" hx-trigger="load, change from:#doc-form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="">Loading...</option></select></div>`;
+        return wrapFieldContent(fieldKey, label, `<select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="#doc-form" hx-trigger="load, change from:#doc-form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="">Loading...</option></select>`, field, node);
       }
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" disabled><option value="">—</option></select></div>`;
+      return wrapFieldContent(fieldKey, label, `<select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" disabled><option value="">—</option></select>`, field, node);
     }
 
-    if (isEditableFieldKind(kind) && field.multiline) {
+    if (isEditableFieldKind(kind) && uiInput === 'radioGroup') {
+      return wrapFieldContent(fieldKey, label, renderRadioGroup(fieldKey, field, dataValue, isEditable), field, node);
+    }
+
+    if (isEditableFieldKind(kind) && uiInput === 'checkboxGroup') {
+      return wrapFieldContent(fieldKey, label, renderCheckboxGroup(fieldKey, field, dataValue, isEditable), field, node);
+    }
+
+    if (isEditableFieldKind(kind) && uiInput === 'journal') {
+      return wrapFieldContent(
+        fieldKey,
+        label,
+        isEditable ? renderJournalEditable(fieldKey, field, dataValue, params.mode) : renderJournalReadonly(fieldKey, field, dataValue),
+        field,
+        node
+      );
+    }
+
+    if (isEditableFieldKind(kind) && uiInput === 'textarea') {
       const disabledAttr = isEditable ? '' : ' disabled';
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"${disabledAttr}>${escapeHtml(dataValue ?? '')}</textarea></div>`;
+      return wrapFieldContent(fieldKey, label, `<textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="${textareaRows}"${disabledAttr}${placeholderAttr}>${escapeHtml(dataValue ?? '')}</textarea>`, field, node);
     }
 
     if (isEditableFieldKind(kind)) {
       if (uiInput === 'date') {
         const disabledAttr = isEditable ? '' : ' disabled';
-        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
+        return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${disabledAttr}${placeholderAttr} />`, field, node);
       }
       if (uiInput === 'checkbox') {
         const checked = isCheckedValue(dataValue) ? ' checked' : '';
         const disabledAttr = isEditable ? '' : ' disabled';
-        return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked}${disabledAttr} /></div>`;
+        return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked}${disabledAttr} />`, field, node);
       }
       const disabledAttr = isEditable ? '' : ' disabled';
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
+      return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${disabledAttr}${placeholderAttr} />`, field, node);
     }
 
-    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" type="text" disabled value="" /></div>`;
+    return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" type="text" disabled value=""${placeholderAttr} />`, field, node);
   }
 
   if (kind === 'lookup') {
@@ -217,39 +689,54 @@ function renderField(node: LayoutNode, params: RenderLayoutParams) {
       const templateId = params.templateId ?? '';
       const hxVals = JSON.stringify({ templateId, fieldKey });
       const selectedLabel = escapeHtml(snapshotValue ?? 'Loading...');
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="closest form" hx-trigger="load, change from:closest form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="${escapeAttr(externalValue ?? '')}">${selectedLabel}</option></select></div>`;
+      return wrapFieldContent(fieldKey, label, `<select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" hx-get="/api/lookup" hx-target="this" hx-swap="innerHTML" hx-include="closest form" hx-trigger="load, change from:closest form, reloadLookup" hx-vals='${escapeAttr(hxVals)}'><option value="${escapeAttr(externalValue ?? '')}">${selectedLabel}</option></select>`, field, node);
     }
 
     const optionValue = externalValue ?? '';
     const optionLabel = snapshotValue ?? externalValue ?? '-';
-    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" disabled><option value="${escapeAttr(optionValue)}" selected>${escapeHtml(optionLabel)}</option></select></div>`;
+    return wrapFieldContent(fieldKey, label, `<select id="field-${escapeAttr(fieldKey)}" name="lookup:${escapeAttr(fieldKey)}" disabled><option value="${escapeAttr(optionValue)}" selected>${escapeHtml(optionLabel)}</option></select>`, field, node);
   }
 
   if (isEditableFieldKind(kind)) {
     const disabledAttr = isEditable ? '' : ' disabled';
-    if (field.multiline) {
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="4"${disabledAttr}>${escapeHtml(dataValue ?? '')}</textarea></div>`;
+    if (uiInput === 'radioGroup') {
+      return wrapFieldContent(fieldKey, label, renderRadioGroup(fieldKey, field, dataValue, isEditable), field, node);
+    }
+    if (uiInput === 'checkboxGroup') {
+      return wrapFieldContent(fieldKey, label, renderCheckboxGroup(fieldKey, field, dataValue, isEditable), field, node);
+    }
+    if (uiInput === 'journal') {
+      return wrapFieldContent(
+        fieldKey,
+        label,
+        isEditable ? renderJournalEditable(fieldKey, field, dataValue, params.mode) : renderJournalReadonly(fieldKey, field, dataValue),
+        field,
+        node
+      );
+    }
+    if (uiInput === 'textarea') {
+      return wrapFieldContent(fieldKey, label, `<textarea id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" rows="${textareaRows}"${disabledAttr}${placeholderAttr}>${escapeHtml(dataValue ?? '')}</textarea>`, field, node);
     }
     if (uiInput === 'date') {
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
+      return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="date" value="${escapeAttr(dataValue ?? '')}"${disabledAttr}${placeholderAttr} />`, field, node);
     }
     if (uiInput === 'checkbox') {
       const checked = isCheckedValue(dataValue) ? ' checked' : '';
-      return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked}${disabledAttr} /></div>`;
+      return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="checkbox" value="1"${checked}${disabledAttr} />`, field, node);
     }
-    return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${disabledAttr} /></div>`;
+    return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" name="data:${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(dataValue ?? '')}"${disabledAttr}${placeholderAttr} />`, field, node);
   }
 
   if (isSystemLike) {
     if (isWorkflow) {
       const value = isEmptyDisplayValue(workflowDisplay) ? '—' : workflowDisplay;
-      return `<div class="row"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
+      return `<div class="row form-field"><label>${label}</label><div><span class="badge badge-status">${escapeHtml(value)}</span></div></div>`;
     }
-    return `<div class="row"><label>${label}</label><div>${escapeHtml(isEmptyDisplayValue(systemLikeDisplay) ? '—' : systemLikeDisplay)}</div></div>`;
+    return `<div class="row form-field"><label>${label}</label><div>${escapeHtml(isEmptyDisplayValue(systemLikeDisplay) ? '—' : systemLikeDisplay)}</div></div>`;
   }
 
-  const readonlyValue = dataValue ?? snapshotValue ?? externalValue ?? '';
-  return `<div class="row"><label for="field-${escapeAttr(fieldKey)}">${label}</label><input id="field-${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(readonlyValue)}" readonly /></div>`;
+  const readonlyValue = displayValue ?? '';
+  return wrapFieldContent(fieldKey, label, `<input id="field-${escapeAttr(fieldKey)}" type="text" value="${escapeAttr(readonlyValue)}" readonly />`, field, node);
 }
 
 function resolveControlKeyFromAction(templateJson: any, action: string) {
@@ -479,6 +966,7 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
   }
 
   if (type === 'row') {
+    const alignClass = resolveAlignClass(node.align, 'row');
     const children = Array.isArray(node.children)
       ? node.children
           .map((child) => renderNode(child, params))
@@ -486,11 +974,15 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
           .join('')
       : '';
     if (!children) return '';
-    return `<div class="row">${children}</div>`;
+    const classes = ['row'];
+    if (alignClass) classes.push(alignClass);
+    return `<div class="${classes.join(' ')}">${children}</div>`;
   }
 
   if (type === 'col') {
-    const widthStyle = node.width ? ` style="flex:${escapeAttr(node.width)};"` : '';
+    const alignClass = resolveAlignClass(node.align, 'col');
+    const widthStyleValue = resolveColumnWidthStyle(node.width);
+    const widthStyle = widthStyleValue ? ` style="${widthStyleValue}"` : '';
     const children = Array.isArray(node.children)
       ? node.children
           .map((child) => renderNode(child, params))
@@ -498,7 +990,9 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
           .join('')
       : '';
     if (!children) return '';
-    return `<div class="col col-6"${widthStyle}>${children}</div>`;
+    const classes = ['col'];
+    if (alignClass) classes.push(alignClass);
+    return `<div class="${classes.join(' ')}"${widthStyle}>${children}</div>`;
   }
 
   if (type === 'button') {

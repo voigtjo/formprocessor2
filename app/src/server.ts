@@ -7,6 +7,18 @@ import fastifyView from '@fastify/view';
 import ejs from 'ejs';
 import path, { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createLocalAttachmentStorage } from './core/attachments.js';
+import { normalizeAppBaseUrl } from './core/app-links.js';
+import { createNoopAuditGateway } from './core/audit.js';
+import { createLocalOutboxNotificationGateway } from './core/notifications.js';
+import {
+  buildCoreRequestContext,
+  buildCurrentUserContext,
+  buildDefaultTenantContext,
+  type CoreRequestContext,
+  type CurrentUserContext,
+  type TenantContext
+} from './core/request-context.js';
 import { makeDb } from './db/index.js';
 import { fpUsers } from './db/schema.js';
 import { healthRoutes } from './routes/health.js';
@@ -18,6 +30,9 @@ declare module 'fastify' {
   interface FastifyRequest {
     currentUser: { id: string; username: string; displayName: string } | null;
     users: Array<{ id: string; username: string; displayName: string }> | null;
+    tenantContext: TenantContext;
+    currentUserContext: CurrentUserContext;
+    requestContext: CoreRequestContext;
   }
   interface FastifyReply {
     renderPage: (view: string, data?: Record<string, unknown>) => Promise<void>;
@@ -80,7 +95,15 @@ async function renderErrorDocument(params: {
 async function checkDocumentColumns(pool: { query: (sqlText: string, params?: unknown[]) => Promise<any> }) {
   const tableCheck = await pool.query(`select to_regclass('public.fp_documents') as rel`);
   const rel = tableCheck.rows?.[0]?.rel;
-  if (!rel) return { hasActorColumns: false, hasTemplateVersion: false, hasMultiAssignments: false };
+  if (!rel) {
+    return {
+      hasActorColumns: false,
+      hasTemplateVersion: false,
+      hasMultiAssignments: false,
+      hasAttachments: false,
+      hasAuditTrail: false
+    };
+  }
 
   const columnCheck = await pool.query(
     `
@@ -96,7 +119,9 @@ async function checkDocumentColumns(pool: { query: (sqlText: string, params?: un
     `
       select to_regclass('public.fp_document_editors') as editors_rel,
              to_regclass('public.fp_document_approvals') as approvals_rel,
-             to_regclass('public.fp_document_submissions') as submissions_rel
+             to_regclass('public.fp_document_submissions') as submissions_rel,
+             to_regclass('public.fp_document_attachments') as attachments_rel,
+             to_regclass('public.fp_document_audit_events') as audit_rel
     `
   );
   return {
@@ -105,7 +130,9 @@ async function checkDocumentColumns(pool: { query: (sqlText: string, params?: un
     hasMultiAssignments:
       !!multiTables.rows?.[0]?.editors_rel &&
       !!multiTables.rows?.[0]?.approvals_rel &&
-      !!multiTables.rows?.[0]?.submissions_rel
+      !!multiTables.rows?.[0]?.submissions_rel,
+    hasAttachments: !!multiTables.rows?.[0]?.attachments_rel,
+    hasAuditTrail: !!multiTables.rows?.[0]?.audit_rel
   };
 }
 
@@ -115,15 +142,21 @@ export async function buildApp() {
   let hasDocumentActorColumns = false;
   let hasDocumentTemplateVersion = false;
   let hasDocumentMultiAssignments = false;
+  let hasDocumentAttachments = false;
+  let hasDocumentAuditTrail = false;
   try {
     const checked = await checkDocumentColumns(pool);
     hasDocumentActorColumns = checked.hasActorColumns;
     hasDocumentTemplateVersion = checked.hasTemplateVersion;
     hasDocumentMultiAssignments = checked.hasMultiAssignments;
+    hasDocumentAttachments = checked.hasAttachments;
+    hasDocumentAuditTrail = checked.hasAuditTrail;
   } catch {
     hasDocumentActorColumns = false;
     hasDocumentTemplateVersion = false;
     hasDocumentMultiAssignments = false;
+    hasDocumentAttachments = false;
+    hasDocumentAuditTrail = false;
   }
   if (!hasDocumentActorColumns) {
     app.log.warn('DB missing editor_user_id/approver_user_id. Run: cd app && npm run db:push');
@@ -134,6 +167,12 @@ export async function buildApp() {
   if (!hasDocumentMultiAssignments) {
     app.log.warn('DB missing fp_document_editors/fp_document_approvals/fp_document_submissions. Run: cd app && npm run db:push');
   }
+  if (!hasDocumentAttachments) {
+    app.log.warn('DB missing fp_document_attachments. Run: cd app && npm run db:push');
+  }
+  if (!hasDocumentAuditTrail) {
+    app.log.warn('DB missing fp_document_audit_events. Run: cd app && npm run db:push');
+  }
 
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
@@ -142,6 +181,19 @@ export async function buildApp() {
   app.decorate('db', db);
   app.decorateRequest('currentUser', null);
   app.decorateRequest('users', null);
+  app.decorateRequest('tenantContext', null);
+  app.decorateRequest('currentUserContext', null);
+  app.decorateRequest('requestContext', null);
+
+  const attachmentStorage = createLocalAttachmentStorage({
+    rootDir: path.join(process.cwd(), 'var', 'attachments')
+  });
+  const auditGateway = createNoopAuditGateway();
+  const appBaseUrl = normalizeAppBaseUrl(process.env.APP_BASE_URL ?? 'http://localhost:3000');
+  const notificationGateway = createLocalOutboxNotificationGateway({
+    rootDir: path.join(process.cwd(), 'var', 'notifications'),
+    logger: app.log
+  });
 
   app.addHook('onClose', async () => {
     await pool.end();
@@ -170,9 +222,12 @@ export async function buildApp() {
       .orderBy(asc(fpUsers.username));
 
     request.users = users;
+    request.tenantContext = buildDefaultTenantContext();
 
     if (users.length === 0) {
       request.currentUser = null;
+      request.currentUserContext = buildCurrentUserContext(null);
+      request.requestContext = buildCoreRequestContext({ user: null });
       return;
     }
 
@@ -182,11 +237,15 @@ export async function buildApp() {
 
     if (cookieUser) {
       request.currentUser = cookieUser;
+      request.currentUserContext = buildCurrentUserContext(cookieUser);
+      request.requestContext = buildCoreRequestContext({ user: cookieUser });
       return;
     }
 
     const firstUser = users[0];
     request.currentUser = firstUser;
+    request.currentUserContext = buildCurrentUserContext(firstUser);
+    request.requestContext = buildCoreRequestContext({ user: firstUser });
     reply.header('set-cookie', buildUserCookie(firstUser.id));
   });
 
@@ -194,8 +253,12 @@ export async function buildApp() {
     const viewData = {
       ...data,
       currentUser: this.request.currentUser,
+      currentUserContext: this.request.currentUserContext,
+      tenantContext: this.request.tenantContext,
       users: this.request.users ?? [],
-      currentPath: this.request.url
+      currentPath: this.request.url,
+      attachmentStorageProvider: attachmentStorage.provider,
+      notificationProvider: notificationGateway.provider
     };
     const content = await ejs.renderFile(path.join(viewsRoot, view), viewData, { async: true });
     const html = await ejs.renderFile(path.join(viewsRoot, 'layout.ejs'), { ...viewData, content }, { async: true });
@@ -273,7 +336,13 @@ export async function buildApp() {
     erpBaseUrl: process.env.ERP_SIM_BASE_URL ?? 'http://localhost:3001',
     hasDocumentActorColumns,
     hasDocumentTemplateVersion,
-    hasDocumentMultiAssignments
+    hasDocumentMultiAssignments,
+    hasDocumentAttachments,
+    hasDocumentAuditTrail,
+    appBaseUrl,
+    attachmentStorage,
+    auditGateway,
+    notificationGateway
   });
 
   return app;

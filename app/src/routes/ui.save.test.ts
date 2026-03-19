@@ -69,4 +69,33 @@ describe('document save data merge', () => {
     const next = applyEditableDataUpdate(templateJson, {}, { 'data:due_date': '2026-03-09' }, ['due_date']);
     expect(next.due_date).toBe('2026-03-09');
   });
+
+  it('stores journal rows as structured array data', () => {
+    const templateJson = {
+      fields: {
+        findings: {
+          kind: 'journal',
+          columns: [
+            { key: 'finding', type: 'text' },
+            { key: 'closed', type: 'checkbox' }
+          ]
+        }
+      }
+    } as any;
+    const next = applyEditableDataUpdate(
+      templateJson,
+      {},
+      {
+        'data:findings': JSON.stringify([
+          { finding: 'Seal damaged', closed: false },
+          { finding: 'Label missing', closed: true }
+        ])
+      },
+      ['findings']
+    );
+    expect(next.findings).toEqual([
+      { finding: 'Seal damaged', closed: false },
+      { finding: 'Label missing', closed: true }
+    ]);
+  });
 });

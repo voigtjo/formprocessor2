@@ -1,0 +1,121 @@
+<header class="page-header">
+  <h1><%= template.name %></h1>
+  <p class="muted">
+    Key: <code><%= template.key %></code>
+    · Version: <code>v<%= template.version %></code>
+    · State: <span class="badge"><%= normalizedState %></span>
+    · Workflow: <code><%= template.workflowRef || '—' %></code>
+  </p>
+</header>
+
+<div class="card">
+  <h3 class="card-title">Template Overview</h3>
+  <p><%= template.description || 'No description.' %></p>
+  <% if (workflow) { %>
+    <p><a href="/workflows/<%= workflow.id %>">Open workflow <%= workflow.name %></a></p>
+  <% } else if (template.workflowRef) { %>
+    <p class="muted">Referenced workflow currently not available in the active workflow list.</p>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Document Data View</h3>
+  <p class="muted">System columns come from the document runtime. Additional columns come from <code>template_json.documentTable.columns</code>.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Document</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th>Updated</th>
+        <th>Editors</th>
+        <th>Approvers</th>
+        <% (documentTableColumns || []).forEach((column) => { %>
+          <th><%= column.label %></th>
+        <% }) %>
+      </tr>
+    </thead>
+    <tbody>
+      <% if (!documentTableRows || documentTableRows.length === 0) { %>
+        <tr>
+          <td colspan="<%= 6 + ((documentTableColumns || []).length) %>" class="muted">No documents for this template yet.</td>
+        </tr>
+      <% } %>
+      <% (documentTableRows || []).forEach((row) => { %>
+        <tr>
+          <td><a href="/documents/<%= row.id %>"><code><%= row.shortId %></code></a></td>
+          <td><span class="badge"><%= row.status %></span></td>
+          <td><%= row.createdAt ? new Date(row.createdAt).toLocaleString() : '—' %></td>
+          <td><%= row.updatedAt ? new Date(row.updatedAt).toLocaleString() : '—' %></td>
+          <td><%= row.editors && row.editors.length > 0 ? row.editors.join(', ') : '—' %></td>
+          <td><%= row.approvers && row.approvers.length > 0 ? row.approvers.join(', ') : '—' %></td>
+          <% (row.values || []).forEach((value) => { %>
+            <td><%= value.value %></td>
+          <% }) %>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Template Actions</h3>
+  <% if (!usedActions || usedActions.length === 0) { %>
+    <p class="muted">No fachliche actions defined.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Action</th>
+          <th>Type</th>
+          <th>Step Types</th>
+          <th>API Refs</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% usedActions.forEach((action) => { %>
+          <tr>
+            <td><code><%= action.actionKey %></code></td>
+            <td><%= action.actionType %></td>
+            <td><%= action.stepTypes && action.stepTypes.length > 0 ? action.stepTypes.join(', ') : '—' %></td>
+            <td><%= action.apiRefs && action.apiRefs.length > 0 ? action.apiRefs.join(', ') : '—' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Referenced APIs</h3>
+  <% if (missingApiRefs && missingApiRefs.length > 0) { %>
+    <div class="error-card">
+      <strong>Warning:</strong> Missing API refs: <%= missingApiRefs.join(', ') %>
+    </div>
+  <% } %>
+  <% if (!usedApis || usedApis.length === 0) { %>
+    <p class="muted">No APIs referenced.</p>
+  <% } else { %>
+    <ul>
+      <% usedApis.forEach((api) => { %>
+        <li>
+          <code><%= api.ref %></code>
+          <% if (api.exists && api.key) { %>
+            · <a href="/apis/<%= encodeURIComponent(api.key) %>"><%= api.name || api.key %></a>
+          <% } else { %>
+            · <span class="muted">missing</span>
+          <% } %>
+        </li>
+      <% }) %>
+    </ul>
+  <% } %>
+</div>
+
+<div class="actions">
+  <a class="btn btn-secondary" href="/templates/<%= template.id %>/edit">Edit JSON</a>
+  <a class="btn btn-secondary" href="/templates/<%= template.id %>/preview">Preview</a>
+  <% if (normalizedState === 'published') { %>
+    <a class="btn btn-primary" href="/documents/new?templateId=<%= template.id %>">New Document</a>
+  <% } %>
+  <a class="btn btn-secondary" href="/templates">Back to Templates</a>
+</div>

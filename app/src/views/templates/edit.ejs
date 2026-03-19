@@ -72,7 +72,7 @@
   <div class="row">
     <div class="col">
       <label for="template_json">template_json</label>
-      <p class="muted">V1 template JSON contains fields, layout and fachliche Zusatzaktionen. Workflow and standard process buttons come from the referenced workflow.</p>
+      <p class="muted">V1 template JSON contains fields, layout, fachliche Zusatzaktionen and optional <code>documentTable</code> columns for the per-template document overview. Workflow and standard process buttons come from the referenced workflow.</p>
       <textarea id="template_json" name="template_json" rows="22" <%= isInactiveTemplate ? 'disabled' : '' %>><%= form?.template_json ?? '' %></textarea>
     </div>
   </div>
@@ -255,6 +255,7 @@
 </div>
 
 <div class="actions">
+  <a class="btn btn-secondary" href="/templates/<%= template.id %>">Template View</a>
   <a class="btn btn-secondary" href="/templates/<%= template.id %>/preview">Preview</a>
   <% if (normalizedTemplateState === 'published') { %>
     <a class="btn btn-primary" href="/documents/new?templateId=<%= template.id %>">New Document</a>

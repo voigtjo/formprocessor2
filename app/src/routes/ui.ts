@@ -1,9 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FpDb } from '../db/index.js';
 import {
   fpDocumentApprovals,
+  fpDocumentAttachments,
+  fpDocumentAuditEvents,
   fpDocumentEditors,
   fpDocumentSubmissions,
   fpDocuments,
@@ -22,6 +25,16 @@ import { ExternalCallError, executeActionDefinition } from '../actions/index.js'
 import { collectMacroRefsFromActionDefinition, isUiSafeActionDefinition, resolveActionType } from '../actions/policy.js';
 import { renderLayout } from '../render/layout.js';
 import { extractTemplateUsage } from '../template-analysis.js';
+import {
+  normalizeRequiresValue,
+  type PermissionName
+} from '../core/authorization.js';
+import { executeIntegrationRequest } from '../core/integration-client.js';
+import type { AttachmentStorage } from '../core/attachments.js';
+import { buildDocumentDeepLink, resolveAppBaseUrl } from '../core/app-links.js';
+import type { AuditGateway } from '../core/audit.js';
+import type { NotificationGateway, NotificationType } from '../core/notifications.js';
+import { evaluateAssignmentTarget, evaluateGroupPermission, findGroupMembership } from '../core/policy.js';
 import {
   DOCUMENT_STATES,
   DOCUMENT_WORKFLOW_INITIAL,
@@ -50,6 +63,12 @@ type UiRouteOptions = {
   hasDocumentActorColumns?: boolean;
   hasDocumentTemplateVersion?: boolean;
   hasDocumentMultiAssignments?: boolean;
+  hasDocumentAttachments?: boolean;
+  hasDocumentAuditTrail?: boolean;
+  appBaseUrl?: string;
+  attachmentStorage?: AttachmentStorage;
+  auditGateway?: AuditGateway;
+  notificationGateway?: NotificationGateway;
 };
 const templateStateSchema = z.enum(TEMPLATE_STATES);
 const permissionRequiresSchema = z.union([
@@ -69,11 +88,23 @@ const layoutSectionsSchema = z.object({
 });
 
 const layoutNodesSchema = z.array(z.object({ type: z.string() }).passthrough());
+const templateDocumentTableSchema = z.object({
+  columns: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        label: z.string().optional()
+      })
+    )
+    .max(8)
+    .optional()
+});
 
 const templateCoreJsonSchema = z.object({
   fields: z.record(z.any()),
   layout: z.union([layoutSectionsSchema, layoutNodesSchema]).default({}),
-  actions: z.record(z.any()).optional()
+  actions: z.record(z.any()).optional(),
+  documentTable: templateDocumentTableSchema.optional()
 });
 
 const templateJsonSchema = templateCoreJsonSchema.extend({
@@ -87,6 +118,7 @@ const templateJsonSchema = templateCoreJsonSchema.extend({
   }).optional(),
   controls: z.record(z.any()).optional(),
   actions: z.record(z.any()).optional(),
+  documentTable: templateDocumentTableSchema.optional(),
   permissions: z
     .object({
       actions: z
@@ -103,7 +135,8 @@ const templateJsonSchema = templateCoreJsonSchema.extend({
 const templateEditorJsonSchema = z.object({
   fields: z.record(z.any()),
   layout: z.array(z.any()),
-  actions: z.record(z.any()).optional()
+  actions: z.record(z.any()).optional(),
+  documentTable: templateDocumentTableSchema.optional()
 }).strict();
 
 const templateFormSchema = z.object({
@@ -214,6 +247,9 @@ const apiFormSchema = z.object({
 const documentIdParamSchema = z.object({
   id: z.string().uuid()
 });
+const attachmentIdParamSchema = z.object({
+  id: z.string().min(1)
+});
 
 const documentActionParamSchema = z.object({
   id: z.string().uuid(),
@@ -225,6 +261,12 @@ const groupIdParamSchema = z.object({
 const documentAssignmentBodySchema = z.object({
   userId: z.string().uuid()
 });
+const documentAttachmentUploadSchema = z.object({
+  filename: z.string().min(1).max(255),
+  contentType: z.string().min(1).max(255),
+  base64Data: z.string().min(1),
+  kind: z.enum(['image', 'file']).optional()
+});
 
 type TemplateJson = z.infer<typeof templateJsonSchema>;
 
@@ -232,15 +274,26 @@ type TemplateField = {
   kind?: string;
   label?: string;
   multiline?: boolean;
-  inputType?: 'text' | 'date' | 'checkbox' | 'select';
-  control?: 'text' | 'date' | 'checkbox';
+  rows?: number;
+  placeholder?: string;
+  inputType?: 'text' | 'date' | 'checkbox' | 'select' | 'journal';
+  control?: 'text' | 'date' | 'checkbox' | 'radioGroup' | 'checkboxGroup' | 'journal';
+  options?: Array<{ value: string; label?: string; hint?: string }>;
+  columns?: Array<{
+    key: string;
+    label?: string;
+    type?: 'text' | 'number' | 'select' | 'checkbox';
+    placeholder?: string;
+    options?: Array<{ value: string; label?: string }>;
+  }>;
   apiRef?: string;
   valueField?: string;
   valueKey?: string;
   labelField?: string;
   labelKey?: string;
   ui?: {
-    input?: 'text' | 'date' | 'checkbox';
+    input?: 'text' | 'date' | 'checkbox' | 'journal';
+    placeholder?: string;
   };
   source?: {
     service?: string;
@@ -261,8 +314,45 @@ type TemplateField = {
   };
 };
 
-type PermissionName = 'read' | 'write' | 'execute';
 type CurrentUser = { id: string; username: string; displayName: string };
+type DocumentAttachmentRow = {
+  id: string;
+  documentId: string;
+  kind: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  storageKey: string;
+  uploadedBy: string | null;
+  createdAt: Date | null;
+};
+type DocumentAuditEventType =
+  | 'created'
+  | 'assigned_editor'
+  | 'unassigned_editor'
+  | 'assigned_approver'
+  | 'unassigned_approver'
+  | 'submitted'
+  | 'approved'
+  | 'rejected'
+  | 'status_changed'
+  | 'action_executed'
+  | 'attachment_uploaded'
+  | 'attachment_removed'
+  | 'journal_row_added'
+  | 'journal_row_updated'
+  | 'journal_row_removed'
+  | 'form_updated';
+type DocumentAuditEventRow = {
+  id: string;
+  documentId: string;
+  eventType: DocumentAuditEventType | string;
+  actorUserId: string | null;
+  actorDisplay: string | null;
+  summary: string;
+  detailJson: Record<string, unknown> | null;
+  createdAt: Date | null;
+};
 type LayoutButtonKind = 'ui' | 'process';
 type AdminErpTab = 'products' | 'customers' | 'batches' | 'serial-instances' | 'customer-orders';
 
@@ -286,7 +376,13 @@ const starterTemplate = {
     { type: 'field', key: 'customer_id' },
     { type: 'field', key: 'comment' }
   ],
-  actions: {}
+  actions: {},
+  documentTable: {
+    columns: [
+      { key: 'customer_id', label: 'Customer' },
+      { key: 'comment', label: 'Comment' }
+    ]
+  }
 };
 
 const STANDARD_PROCESS_ACTIONS = ['assign', 'submit', 'approve', 'reject', 'archive'] as const;
@@ -294,6 +390,34 @@ type StandardProcessAction = (typeof STANDARD_PROCESS_ACTIONS)[number];
 
 function isStandardProcessAction(value: string): value is StandardProcessAction {
   return (STANDARD_PROCESS_ACTIONS as readonly string[]).includes(value);
+}
+
+function sanitizeAttachmentFilename(filename: string) {
+  const cleaned = String(filename ?? '')
+    .replace(/[/\\]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.slice(0, 180) || 'attachment.bin';
+}
+
+function resolveAttachmentKind(contentType: string, requestedKind?: string) {
+  const normalizedMime = String(contentType ?? '').toLowerCase();
+  if (requestedKind === 'image') return 'image';
+  if (normalizedMime.startsWith('image/')) return 'image';
+  return 'file';
+}
+
+function decodeAttachmentPayload(base64Data: string) {
+  const normalized = String(base64Data ?? '').replace(/^data:[^;]+;base64,/, '').trim();
+  return Buffer.from(normalized, 'base64');
+}
+
+function formatBytes(value: number | null | undefined) {
+  const size = Number(value ?? 0);
+  if (!Number.isFinite(size) || size <= 0) return '0 B';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size >= 10 * 1024 ? 0 : 1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
 function resolveProcessButtonLabel(controlKey: string, templateJson?: TemplateJson) {
@@ -633,47 +757,6 @@ function parseCookies(cookieHeader: string | undefined) {
   );
 }
 
-function compactRequiredRights(requires: PermissionName[]) {
-  const map: Record<PermissionName, string> = {
-    read: 'r',
-    write: 'w',
-    execute: 'x'
-  };
-  const rights = new Set<string>();
-  for (const item of requires) rights.add(map[item]);
-  return Array.from(rights).sort().join('');
-}
-
-function describeRequiredRights(requires: PermissionName[]) {
-  const letters = compactRequiredRights(requires);
-  const names = requires.join('/');
-  return `${names} (${letters})`;
-}
-
-function hasRequiredRights(userRights: string, requires: PermissionName[]) {
-  const normalized = new Set(userRights.split(''));
-  const map: Record<PermissionName, string> = {
-    read: 'r',
-    write: 'w',
-    execute: 'x'
-  };
-  return requires.every((item) => normalized.has(map[item]));
-}
-
-function normalizeRequiresValue(raw: unknown): PermissionName[] {
-  const rawValues = Array.isArray(raw) ? raw : raw !== undefined && raw !== null ? [raw] : [];
-  const mapped = rawValues
-    .map((item) => String(item).trim().toLowerCase())
-    .map((item) => {
-      if (item === 'r' || item === 'read') return 'read' as const;
-      if (item === 'w' || item === 'write') return 'write' as const;
-      if (item === 'x' || item === 'execute') return 'execute' as const;
-      return null;
-    })
-    .filter((item): item is PermissionName => !!item);
-  return Array.from(new Set(mapped));
-}
-
 function resolveDefaultRequiredRights(controlKey: string, actionKey: string): PermissionName[] {
   const combined = `${controlKey} ${actionKey}`.toLowerCase();
   if (combined.includes('save') || combined.includes('submit')) return ['write'];
@@ -750,6 +833,34 @@ function collectLayoutButtonKinds(templateJson: TemplateJson) {
   }
 
   return byControlKey;
+}
+
+function collectTemplateUiActionButtons(templateJson: TemplateJson) {
+  const buttons: Array<{ key: string; label: string }> = [];
+  const seen = new Set<string>();
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    const n = node as Record<string, unknown>;
+    if (n.type === 'button' && n.kind !== 'process') {
+      const action = typeof n.action === 'string' ? n.action : '';
+      const key = typeof n.key === 'string' ? n.key : action;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        buttons.push({
+          key,
+          label: typeof n.label === 'string' && n.label.trim().length > 0 ? n.label.trim() : key
+        });
+      }
+    }
+    if (Array.isArray(n.children)) {
+      for (const child of n.children) visit(child);
+    }
+  };
+  const layout = (templateJson as any).layout;
+  if (Array.isArray(layout)) {
+    for (const node of layout) visit(node);
+  }
+  return buttons;
 }
 
 function resolveActionInvocation(params: {
@@ -991,6 +1102,131 @@ async function loadTemplateAssignmentView(db: FpDb, templateId: string) {
   return { assignedGroups, assignableGroups, hasGroups: allGroups.length > 0 };
 }
 
+async function loadTemplateDocumentTableView(
+  db: FpDb,
+  template: { id: string; templateJson: unknown },
+  options: { hasDocumentActorColumns: boolean; hasDocumentMultiAssignments: boolean }
+) {
+  const templateJson = parseTemplateJson(template.templateJson);
+  const columns = resolveTemplateDocumentTableColumns(templateJson);
+  const documents =
+    typeof (db as any).query?.fpDocuments?.findMany === 'function'
+      ? await (db as any).query.fpDocuments.findMany({
+          where: eq(fpDocuments.templateId, template.id)
+        })
+      : await db
+          .select({
+            id: fpDocuments.id,
+            status: fpDocuments.status,
+            templateVersion: fpDocuments.templateVersion,
+            createdAt: fpDocuments.createdAt,
+            updatedAt: fpDocuments.updatedAt,
+            ...(options.hasDocumentActorColumns
+              ? {
+                  editorUserId: fpDocuments.editorUserId,
+                  approverUserId: fpDocuments.approverUserId,
+                  assigneeUserId: fpDocuments.assigneeUserId,
+                  reviewerUserId: fpDocuments.reviewerUserId
+                }
+              : {}),
+            dataJson: fpDocuments.dataJson,
+            externalRefsJson: fpDocuments.externalRefsJson,
+            snapshotsJson: fpDocuments.snapshotsJson
+          })
+          .from(fpDocuments)
+          .where(eq(fpDocuments.templateId, template.id))
+          .orderBy(desc(fpDocuments.updatedAt));
+
+  const orderedDocuments = [...documents].sort(
+    (a: any, b: any) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime()
+  );
+  const documentIds = orderedDocuments.map((item: any) => item.id);
+  const useMultiAssignments =
+    options.hasDocumentMultiAssignments &&
+    typeof (db as any).query?.fpDocumentEditors?.findMany === 'function' &&
+    typeof (db as any).query?.fpDocumentApprovals?.findMany === 'function';
+
+  let editorRows: Array<{ documentId: string; userId: string }> = [];
+  let approverRows: Array<{ documentId: string; userId: string }> = [];
+  if (useMultiAssignments && documentIds.length > 0) {
+    editorRows = await (db as any).query.fpDocumentEditors.findMany();
+    approverRows = await (db as any).query.fpDocumentApprovals.findMany();
+    editorRows = editorRows.filter((item) => documentIds.includes(item.documentId));
+    approverRows = approverRows.filter((item) => documentIds.includes(item.documentId));
+  }
+
+  const userIds = new Set<string>();
+  for (const row of editorRows) userIds.add(row.userId);
+  for (const row of approverRows) userIds.add(row.userId);
+  if (!useMultiAssignments && options.hasDocumentActorColumns) {
+    for (const document of orderedDocuments as any[]) {
+      const { editorUserId, approverUserId } = resolveLegacyActorUserIds(document);
+      if (editorUserId) userIds.add(editorUserId);
+      if (approverUserId) userIds.add(approverUserId);
+    }
+  }
+
+  let usersById = new Map<string, { displayName: string; username: string }>();
+  if (userIds.size > 0) {
+    const rows =
+      typeof (db as any).query?.fpUsers?.findMany === 'function'
+        ? await (db as any).query.fpUsers.findMany()
+        : await db
+            .select({
+              id: fpUsers.id,
+              username: fpUsers.username,
+              displayName: fpUsers.displayName
+            })
+            .from(fpUsers)
+            .where(inArray(fpUsers.id, Array.from(userIds)));
+    usersById = new Map(
+      rows
+        .filter((row: any) => userIds.has(row.id))
+        .map((row: any) => [row.id, { displayName: row.displayName, username: row.username }])
+    );
+  }
+
+  const rows = orderedDocuments.map((document: any) => {
+    const editorNames = useMultiAssignments
+      ? editorRows
+          .filter((row) => row.documentId === document.id)
+          .map((row) => usersById.get(row.userId)?.displayName ?? usersById.get(row.userId)?.username ?? row.userId)
+      : (() => {
+          const { editorUserId } = resolveLegacyActorUserIds(document);
+          if (!editorUserId) return [];
+          const user = usersById.get(editorUserId);
+          return [user?.displayName ?? user?.username ?? editorUserId];
+        })();
+    const approverNames = useMultiAssignments
+      ? approverRows
+          .filter((row) => row.documentId === document.id)
+          .map((row) => usersById.get(row.userId)?.displayName ?? usersById.get(row.userId)?.username ?? row.userId)
+      : (() => {
+          const { approverUserId } = resolveLegacyActorUserIds(document);
+          if (!approverUserId) return [];
+          const user = usersById.get(approverUserId);
+          return [user?.displayName ?? user?.username ?? approverUserId];
+        })();
+
+    return {
+      id: document.id,
+      shortId: String(document.id).slice(0, 8),
+      status: normalizeDocumentStatus(document.status),
+      createdAt: document.createdAt ?? null,
+      updatedAt: document.updatedAt ?? null,
+      editors: editorNames,
+      approvers: approverNames,
+      values: columns.map((column) => ({
+        key: column.key,
+        label: column.label,
+        value: resolveDocumentTableFieldValue(document, column.key)
+      }))
+    };
+  });
+
+  return { columns, rows };
+}
+
 export async function ensureErpCustomerOrderReference(params: {
   templateJson: TemplateJson;
   externalRefs: Record<string, string>;
@@ -1011,20 +1247,21 @@ export async function ensureErpCustomerOrderReference(params: {
 
   const fetchImpl = params.fetchImpl ?? fetch;
   const body = params.externalRefs.customer_id ? { customer_id: params.externalRefs.customer_id } : undefined;
-  const response = await fetchImpl(new URL('/api/customer-orders', params.erpBaseUrl).toString(), {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json'
+  const response = await executeIntegrationRequest(
+    {
+      baseUrl: params.erpBaseUrl,
+      path: '/api/customer-orders',
+      method: 'POST',
+      jsonBody: body ?? {}
     },
-    ...(body ? { body: JSON.stringify(body) } : { body: '{}' })
-  });
+    fetchImpl
+  );
 
   if (!response.ok) {
     throw new Error(`Failed to create ERP customer order (${response.status})`);
   }
 
-  const payload = (await response.json()) as { id?: string; order_number?: string };
+  const payload = (response.bodyJson ?? {}) as { id?: string; order_number?: string };
   if (!payload.id || !payload.order_number) {
     throw new Error('ERP customer order response is incomplete');
   }
@@ -1076,6 +1313,85 @@ function orderedFieldKeys(templateJson: TemplateJson) {
   return ordered;
 }
 
+type TemplateDocumentTableColumn = {
+  key: string;
+  label: string;
+};
+
+function resolveTemplateDocumentTableColumns(templateJson: TemplateJson): TemplateDocumentTableColumn[] {
+  const configured = (templateJson as any).documentTable?.columns;
+  if (Array.isArray(configured) && configured.length > 0) {
+    return configured
+      .map((item) => {
+        if (typeof item === 'string' && item.trim().length > 0) {
+          const field = templateJson.fields[item] as TemplateField | undefined;
+          return { key: item, label: field?.label ?? item };
+        }
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+        const record = item as Record<string, unknown>;
+        const key = typeof record.key === 'string' ? record.key.trim() : '';
+        if (!key) return null;
+        const field = templateJson.fields[key] as TemplateField | undefined;
+        return {
+          key,
+          label:
+            typeof record.label === 'string' && record.label.trim().length > 0 ? record.label.trim() : field?.label ?? key
+        };
+      })
+      .filter((item): item is TemplateDocumentTableColumn => !!item);
+  }
+
+  return orderedFieldKeys(templateJson)
+    .slice(0, 2)
+    .map((key) => {
+      const field = templateJson.fields[key] as TemplateField | undefined;
+      return {
+        key,
+        label: field?.label ?? key
+      };
+    });
+}
+
+function formatDocumentTableCellValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (Array.isArray(value)) {
+    if (value.some((item) => item && typeof item === 'object' && !Array.isArray(item))) {
+      return `${value.length} rows`;
+    }
+    const normalized = value.map((item) => String(item ?? '').trim()).filter((item) => item.length > 0);
+    return normalized.length > 0 ? normalized.join(', ') : '—';
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function resolveDocumentTableFieldValue(document: {
+  dataJson?: unknown;
+  externalRefsJson?: unknown;
+  snapshotsJson?: unknown;
+}, fieldKey: string) {
+  const snapshots = (document.snapshotsJson ?? {}) as Record<string, unknown>;
+  const data = (document.dataJson ?? {}) as Record<string, unknown>;
+  const external = (document.externalRefsJson ?? {}) as Record<string, unknown>;
+  return formatDocumentTableCellValue(snapshots[fieldKey] ?? data[fieldKey] ?? external[fieldKey] ?? null);
+}
+
+function resolveLegacyActorUserIds(document: {
+  editorUserId?: string | null;
+  approverUserId?: string | null;
+  assigneeUserId?: string | null;
+  reviewerUserId?: string | null;
+}) {
+  return {
+    editorUserId: document.editorUserId ?? document.assigneeUserId ?? null,
+    approverUserId: document.approverUserId ?? document.reviewerUserId ?? null
+  };
+}
+
 function buildSections(templateJson: TemplateJson) {
   const layout = (templateJson as any).layout;
 
@@ -1116,13 +1432,30 @@ function getFormString(body: Record<string, unknown>, key: string) {
   return '';
 }
 
-function resolveEditableInputType(field: TemplateField): 'text' | 'date' | 'checkbox' {
+function resolveEditableInputType(field: TemplateField): 'text' | 'date' | 'checkbox' | 'radioGroup' | 'checkboxGroup' | 'textarea' | 'journal' {
   const input = field.inputType ?? field.control ?? field.ui?.input ?? field.kind;
-  return input === 'date' || input === 'checkbox' ? input : 'text';
+  if (field.multiline || input === 'textarea') return 'textarea';
+  return input === 'date' || input === 'checkbox' || input === 'radioGroup' || input === 'checkboxGroup' || input === 'journal'
+    ? input
+    : 'text';
 }
 
 function isEditableFieldKind(kind: unknown) {
-  return kind === 'editable' || kind === 'date' || kind === 'checkbox';
+  return kind === 'editable' || kind === 'date' || kind === 'checkbox' || kind === 'journal';
+}
+
+function normalizeJournalRowsFromFormValue(value: unknown) {
+  const raw = typeof value === 'string' ? value : Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '';
+  if (!raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row))
+      .map((row) => Object.fromEntries(Object.entries(row).map(([key, cell]) => [key, cell ?? ''])));
+  } catch {
+    return [];
+  }
 }
 
 function resolveEditableFormValue(form: Record<string, unknown>, field: TemplateField, fieldKey: string) {
@@ -1130,6 +1463,19 @@ function resolveEditableFormValue(form: Record<string, unknown>, field: Template
   const inputType = resolveEditableInputType(field);
   if (inputType === 'checkbox') {
     return Object.prototype.hasOwnProperty.call(form, formKey);
+  }
+  if (inputType === 'checkboxGroup') {
+    const value = form[formKey];
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item ?? '')).filter((item) => item.length > 0);
+    }
+    if (typeof value === 'string' && value.length > 0) {
+      return [value];
+    }
+    return [];
+  }
+  if (inputType === 'journal') {
+    return normalizeJournalRowsFromFormValue(form[formKey]);
   }
   return getFormString(form, formKey);
 }
@@ -1347,6 +1693,8 @@ async function renderDocumentDetailPage(params: {
   db: FpDb;
   hasDocumentActorColumns: boolean;
   hasDocumentMultiAssignments: boolean;
+  hasDocumentAttachments: boolean;
+  hasDocumentAuditTrail?: boolean;
   reply: FastifyReply;
   template: { id: string; key: string; name: string; templateJson: unknown };
   document: {
@@ -1384,6 +1732,7 @@ async function renderDocumentDetailPage(params: {
     key,
     label: resolveProcessButtonLabel(key, templateJson)
   }));
+  const templateActionButtons = collectTemplateUiActionButtons(templateJson);
   const workflowTimeline = (() => {
     const order = Array.isArray(params.workflowRuntime.order) && params.workflowRuntime.order.length > 0
       ? params.workflowRuntime.order
@@ -1497,11 +1846,13 @@ async function renderDocumentDetailPage(params: {
     if (params.document.editorUserId) assignmentEditorName = params.document.editorUserId;
     if (params.document.approverUserId) assignmentApproverName = params.document.approverUserId;
   }
+  const editorSubmissionStates = useMultiAssignments ? await loadEditorSubmissionStates(params.db, params.document.id) : [];
+  const approverDecisionStates = useMultiAssignments ? await loadApproverDecisionStates(params.db, params.document.id) : [];
   const workflowEvaluation = evaluateWorkflow({
     workflow: params.workflowRuntime,
     status: normalizedDocumentStatus,
-    editorSubmissions: useMultiAssignments ? await loadEditorSubmissionStates(params.db, params.document.id) : [],
-    approverDecisions: useMultiAssignments ? await loadApproverDecisionStates(params.db, params.document.id) : []
+    editorSubmissions: editorSubmissionStates,
+    approverDecisions: approverDecisionStates
   });
   const hasAnyAssignments = useMultiAssignments
     ? assignedEditors.length > 0 || assignedApprovers.length > 0
@@ -1509,6 +1860,75 @@ async function renderDocumentDetailPage(params: {
   const submittedEditorCount = assignedEditorsDetailed.filter((item) => item.submissionStatus === 'submitted').length;
   const approvedApproverCount = assignedApprovers.filter((item) => item.approvalStatus === 'approved').length;
   const rejectedApproverCount = assignedApprovers.filter((item) => item.approvalStatus === 'rejected').length;
+  const workflowHint = buildDocumentWorkflowHint({
+    status: normalizedDocumentStatus,
+    workflowEvaluation,
+    hasAssignments: hasAnyAssignments,
+    assignedEditorsCount: useMultiAssignments ? assignedEditorsDetailed.length : params.document.editorUserId ? 1 : 0,
+    assignedApproversCount: useMultiAssignments ? assignedApprovers.length : params.document.approverUserId ? 1 : 0,
+    submittedEditorCount,
+    approvedApproverCount,
+    rejectedApproverCount
+  });
+  const attachmentRows = params.hasDocumentAttachments ? await loadDocumentAttachments(params.db, params.document.id) : [];
+  const uploadedByIds = Array.from(
+    new Set(attachmentRows.map((item) => item.uploadedBy).filter((item): item is string => typeof item === 'string' && item.length > 0))
+  );
+  const uploaderRows =
+    uploadedByIds.length > 0
+      ? typeof (params.db as any).query?.fpUsers?.findMany === 'function'
+        ? await (params.db as any).query.fpUsers.findMany()
+        : await params.db
+            .select({
+              id: fpUsers.id,
+              username: fpUsers.username,
+              displayName: fpUsers.displayName
+            })
+            .from(fpUsers)
+            .where(inArray(fpUsers.id, uploadedByIds))
+      : [];
+  const uploadersById = new Map(
+    uploaderRows
+      .filter((item: any) => uploadedByIds.includes(item.id))
+      .map((item: any) => [item.id, item.displayName ?? item.username ?? item.id])
+  );
+  const attachments = attachmentRows.map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    filename: item.filename,
+    mimeType: item.mimeType,
+    sizeLabel: formatBytes(item.size),
+    uploadedByName: item.uploadedBy ? uploadersById.get(item.uploadedBy) ?? item.uploadedBy : 'Unknown user',
+    createdAt: item.createdAt,
+    contentUrl: `/attachments/${encodeURIComponent(item.id)}/content`,
+    downloadUrl: `/attachments/${encodeURIComponent(item.id)}/content?download=1`,
+    isImage: item.kind === 'image' || String(item.mimeType ?? '').toLowerCase().startsWith('image/')
+  }));
+  const attachmentCount = attachments.length;
+  const journalSummaries = orderedFieldKeys(templateJson)
+    .map((fieldKey) => {
+      const field = templateJson.fields[fieldKey] as TemplateField | undefined;
+      if (field?.kind !== 'journal') return null;
+      const documentData = ((params.document.dataJson ?? {}) as Record<string, unknown>) ?? {};
+      const rows = normalizeJournalRowsForAudit(documentData[fieldKey]);
+      return {
+        key: fieldKey,
+        label: field?.label ?? fieldKey,
+        rowCount: rows.length
+      };
+    })
+    .filter((item): item is { key: string; label: string; rowCount: number } => !!item);
+  const openWorkItems = buildDocumentOpenWorkItems({
+    status: normalizedDocumentStatus,
+    hasAssignments: hasAnyAssignments,
+    assignedEditorsCount: useMultiAssignments ? assignedEditorsDetailed.length : params.document.editorUserId ? 1 : 0,
+    assignedApproversCount: useMultiAssignments ? assignedApprovers.length : params.document.approverUserId ? 1 : 0,
+    submittedEditorCount,
+    approvedApproverCount,
+    rejectedApproverCount,
+    attachmentCount
+  });
+  const auditEvents = params.hasDocumentAuditTrail ? await loadDocumentAuditEvents(params.db, params.document.id) : [];
 
   await params.reply.renderPage('documents/detail.ejs', {
     template: params.template,
@@ -1517,6 +1937,7 @@ async function renderDocumentDetailPage(params: {
     layoutHtml,
     workflowTimeline,
     processButtons,
+    templateActionButtons,
     groupName: params.groupName ?? null,
     assignmentGroupId: params.assignmentGroupId ?? null,
     hasDocumentActorColumns: params.hasDocumentActorColumns,
@@ -1536,9 +1957,17 @@ async function renderDocumentDetailPage(params: {
     errorMessage: params.errorMessage,
     successMessage: params.successMessage,
     workflowEvaluation,
+    workflowHint,
     submittedEditorCount,
     approvedApproverCount,
     rejectedApproverCount,
+    attachmentCount,
+    journalSummaries,
+    openWorkItems,
+    hasDocumentAttachments: params.hasDocumentAttachments,
+    attachments,
+    hasDocumentAuditTrail: !!params.hasDocumentAuditTrail,
+    auditEvents,
     document: { ...params.document, status: normalizedDocumentStatus },
     dataJson: dataJsonForRender,
     externalRefsJson: (params.document.externalRefsJson ?? {}) as Record<string, unknown>,
@@ -1724,15 +2153,313 @@ async function loadApproverDecisionStates(db: FpDb, documentId: string): Promise
   return [];
 }
 
+async function loadDocumentAttachments(db: FpDb, documentId: string): Promise<DocumentAttachmentRow[]> {
+  if (typeof (db as any).query?.fpDocumentAttachments?.findMany === 'function') {
+    const rows = await (db as any).query.fpDocumentAttachments.findMany({
+      where: eq(fpDocumentAttachments.documentId, documentId)
+    });
+    return rows.map((row: any) => ({
+      id: row.id,
+      documentId: row.documentId,
+      kind: row.kind,
+      filename: row.filename,
+      mimeType: row.mimeType,
+      size: row.size,
+      storageKey: row.storageKey,
+      uploadedBy: row.uploadedBy ?? null,
+      createdAt: row.createdAt ?? null
+    }));
+  }
+
+  if (typeof (db as any).select !== 'function') {
+    return [];
+  }
+
+  return await db
+    .select({
+      id: fpDocumentAttachments.id,
+      documentId: fpDocumentAttachments.documentId,
+      kind: fpDocumentAttachments.kind,
+      filename: fpDocumentAttachments.filename,
+      mimeType: fpDocumentAttachments.mimeType,
+      size: fpDocumentAttachments.size,
+      storageKey: fpDocumentAttachments.storageKey,
+      uploadedBy: fpDocumentAttachments.uploadedBy,
+      createdAt: fpDocumentAttachments.createdAt
+    })
+    .from(fpDocumentAttachments)
+    .where(eq(fpDocumentAttachments.documentId, documentId))
+    .orderBy(desc(fpDocumentAttachments.createdAt));
+}
+
+async function loadAttachmentById(db: FpDb, attachmentId: string): Promise<DocumentAttachmentRow | null> {
+  if (typeof (db as any).query?.fpDocumentAttachments?.findFirst === 'function') {
+    const row = await (db as any).query.fpDocumentAttachments.findFirst({
+      where: eq(fpDocumentAttachments.id, attachmentId)
+    });
+    if (!row) return null;
+    return {
+      id: row.id,
+      documentId: row.documentId,
+      kind: row.kind,
+      filename: row.filename,
+      mimeType: row.mimeType,
+      size: row.size,
+      storageKey: row.storageKey,
+      uploadedBy: row.uploadedBy ?? null,
+      createdAt: row.createdAt ?? null
+    };
+  }
+
+  if (typeof (db as any).select !== 'function') {
+    return null;
+  }
+
+  const rows = await db
+    .select({
+      id: fpDocumentAttachments.id,
+      documentId: fpDocumentAttachments.documentId,
+      kind: fpDocumentAttachments.kind,
+      filename: fpDocumentAttachments.filename,
+      mimeType: fpDocumentAttachments.mimeType,
+      size: fpDocumentAttachments.size,
+      storageKey: fpDocumentAttachments.storageKey,
+      uploadedBy: fpDocumentAttachments.uploadedBy,
+      createdAt: fpDocumentAttachments.createdAt
+    })
+    .from(fpDocumentAttachments)
+    .where(eq(fpDocumentAttachments.id, attachmentId))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+async function loadDocumentAuditEvents(db: FpDb, documentId: string): Promise<DocumentAuditEventRow[]> {
+  if (typeof (db as any).query?.fpDocumentAuditEvents?.findMany === 'function') {
+    const rows = await (db as any).query.fpDocumentAuditEvents.findMany({
+      where: eq(fpDocumentAuditEvents.documentId, documentId)
+    });
+    return rows
+      .map((row: any) => ({
+        id: row.id,
+        documentId: row.documentId,
+        eventType: row.eventType,
+        actorUserId: row.actorUserId ?? null,
+        actorDisplay: row.actorDisplay ?? null,
+        summary: row.summary,
+        detailJson: row.detailJson ?? null,
+        createdAt: row.createdAt ?? null
+      }))
+      .sort((left: DocumentAuditEventRow, right: DocumentAuditEventRow) => {
+        const leftTime = left.createdAt ? new Date(left.createdAt).getTime() : 0;
+        const rightTime = right.createdAt ? new Date(right.createdAt).getTime() : 0;
+        return rightTime - leftTime;
+      });
+  }
+
+  if (typeof (db as any).select !== 'function') {
+    return [];
+  }
+
+  return await db
+    .select({
+      id: fpDocumentAuditEvents.id,
+      documentId: fpDocumentAuditEvents.documentId,
+      eventType: fpDocumentAuditEvents.eventType,
+      actorUserId: fpDocumentAuditEvents.actorUserId,
+      actorDisplay: fpDocumentAuditEvents.actorDisplay,
+      summary: fpDocumentAuditEvents.summary,
+      detailJson: fpDocumentAuditEvents.detailJson,
+      createdAt: fpDocumentAuditEvents.createdAt
+    })
+    .from(fpDocumentAuditEvents)
+    .where(eq(fpDocumentAuditEvents.documentId, documentId))
+    .orderBy(desc(fpDocumentAuditEvents.createdAt));
+}
+
+async function recordDocumentAuditEvent(params: {
+  db: FpDb;
+  request?: FastifyRequest;
+  documentId: string;
+  eventType: DocumentAuditEventType;
+  summary: string;
+  detail?: Record<string, unknown>;
+  actorUser?: CurrentUser | null;
+  auditGateway?: AuditGateway;
+}) {
+  const actor = params.actorUser ?? (params.request?.currentUser as CurrentUser | null | undefined) ?? null;
+  const actorDisplay = actor ? actor.displayName || actor.username : 'System';
+  if (typeof (params.db as any).insert === 'function') {
+    await params.db.insert(fpDocumentAuditEvents).values({
+      documentId: params.documentId,
+      eventType: params.eventType,
+      actorUserId: actor?.id ?? null,
+      actorDisplay,
+      summary: params.summary,
+      detailJson: params.detail ?? null
+    });
+  }
+
+  await params.auditGateway?.record({
+    tenantKey: params.request?.tenantContext?.tenantKey ?? 'default',
+    entityType: 'document',
+    entityId: params.documentId,
+    eventType: params.eventType,
+    actorUserId: actor?.id ?? null,
+    actorDisplay,
+    summary: params.summary,
+    payload: params.detail ?? {}
+  });
+}
+
+async function resolveAuditUserDisplay(db: FpDb, userId: string | null | undefined) {
+  if (!userId) return null;
+  if (typeof (db as any).query?.fpUsers?.findFirst === 'function') {
+    const user = await (db as any).query.fpUsers.findFirst({ where: eq(fpUsers.id, userId) });
+    if (user) return user.displayName ?? user.username ?? user.id;
+  }
+  return userId;
+}
+
+async function resolveNotificationRecipients(db: FpDb, userIds: string[]) {
+  const normalized = Array.from(new Set(userIds.filter((item) => typeof item === 'string' && item.length > 0)));
+  if (normalized.length === 0) return [];
+
+  if (typeof (db as any).select === 'function') {
+    const rows = await db
+      .select({
+        id: fpUsers.id,
+        username: fpUsers.username,
+        displayName: fpUsers.displayName,
+        email: fpUsers.email
+      })
+      .from(fpUsers)
+      .where(inArray(fpUsers.id, normalized));
+
+    return normalized.map((userId) => {
+      const match = rows.find((item) => item.id === userId);
+      const username = match?.username ?? userId;
+      return {
+        userId,
+        displayName: match?.displayName ?? username,
+        email: match?.email ?? `${username}@example.local`
+      };
+    });
+  }
+
+  return normalized.map((userId) => ({
+    userId,
+    displayName: userId,
+    email: `${userId}@example.local`
+  }));
+}
+
+async function publishDocumentNotification(params: {
+  db: FpDb;
+  request: FastifyRequest;
+  notificationGateway?: NotificationGateway;
+  appBaseUrl?: string;
+  documentId: string;
+  type: NotificationType;
+  subject: string;
+  body: string;
+  recipientUserIds: string[];
+  meta?: Record<string, unknown>;
+}) {
+  if (!params.notificationGateway) return;
+  const uniqueUserIds = Array.from(new Set(params.recipientUserIds.filter(Boolean)));
+  if (uniqueUserIds.length === 0) return;
+  const recipients = await resolveNotificationRecipients(params.db, uniqueUserIds);
+  if (recipients.length === 0) return;
+  const appBase = resolveAppBaseUrl({
+    configuredBaseUrl: params.appBaseUrl,
+    requestProtocol: requestProtocol(params.request.headers),
+    requestHost: params.request.headers.host ?? null
+  });
+  const linkUrl = buildDocumentDeepLink({
+    baseUrl: appBase,
+    documentId: params.documentId
+  });
+  await params.notificationGateway.publish({
+    type: params.type,
+    subject: params.subject,
+    body: `${params.body}\n\nOpen document: ${linkUrl}`,
+    recipientUserIds: uniqueUserIds,
+    recipients,
+    entityType: 'document',
+    entityId: params.documentId,
+    linkUrl,
+    tenantKey: params.request.tenantContext?.tenantKey ?? 'default',
+    meta: params.meta
+  });
+}
+
+function normalizeJournalRowsForAudit(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({ ...item }));
+}
+
+function buildJournalRowSignature(row: Record<string, unknown>) {
+  const sorted = Object.keys(row)
+    .sort()
+    .reduce<Record<string, unknown>>((out, key) => {
+      out[key] = row[key];
+      return out;
+    }, {});
+  return JSON.stringify(sorted);
+}
+
+function summarizeDocumentFieldChanges(params: {
+  previousData: Record<string, unknown>;
+  nextData: Record<string, unknown>;
+  templateJson: TemplateJson;
+}) {
+  const changedFields: string[] = [];
+  const journalChanges: Array<{ fieldKey: string; added: number; updated: number; removed: number }> = [];
+
+  for (const fieldKey of orderedFieldKeys(params.templateJson)) {
+    const field = params.templateJson.fields[fieldKey] as TemplateField | undefined;
+    const previousValue = params.previousData[fieldKey];
+    const nextValue = params.nextData[fieldKey];
+    if (JSON.stringify(previousValue) === JSON.stringify(nextValue)) continue;
+
+    if (field?.kind === 'journal') {
+      const previousRows = normalizeJournalRowsForAudit(previousValue);
+      const nextRows = normalizeJournalRowsForAudit(nextValue);
+      const previousSignatures = previousRows.map(buildJournalRowSignature);
+      const nextSignatures = nextRows.map(buildJournalRowSignature);
+      const previousSet = new Set(previousSignatures);
+      const nextSet = new Set(nextSignatures);
+      let added = 0;
+      let removed = 0;
+      for (const signature of nextSignatures) {
+        if (!previousSet.has(signature)) added += 1;
+      }
+      for (const signature of previousSignatures) {
+        if (!nextSet.has(signature)) removed += 1;
+      }
+      const updated = Math.max(0, Math.min(previousRows.length, nextRows.length) - Math.min(added, removed));
+      journalChanges.push({ fieldKey, added, updated, removed });
+      continue;
+    }
+
+    changedFields.push(fieldKey);
+  }
+
+  return { changedFields, journalChanges };
+}
+
 async function loadDocumentById(db: FpDb, id: string, withActorColumns: boolean, withTemplateVersion: boolean) {
   if (withActorColumns && withTemplateVersion && typeof (db as any).query?.fpDocuments?.findFirst === 'function') {
     const legacy = await (db as any).query?.fpDocuments?.findFirst?.({ where: eq(fpDocuments.id, id) });
     if (!legacy) return null;
+    const actorIds = resolveLegacyActorUserIds(legacy);
     return {
       ...legacy,
       templateVersion: withTemplateVersion ? legacy.templateVersion ?? 1 : 1,
-      editorUserId: withActorColumns ? legacy.editorUserId ?? legacy.assigneeUserId ?? null : null,
-      approverUserId: withActorColumns ? legacy.approverUserId ?? legacy.reviewerUserId ?? null : null
+      editorUserId: withActorColumns ? actorIds.editorUserId : null,
+      approverUserId: withActorColumns ? actorIds.approverUserId : null
     };
   }
 
@@ -1767,11 +2494,12 @@ async function loadDocumentById(db: FpDb, id: string, withActorColumns: boolean,
 
   const doc = rows[0];
   if (!doc) return null;
+  const actorIds = resolveLegacyActorUserIds(doc as any);
   return {
     ...doc,
     templateVersion: withTemplateVersion ? (doc as any).templateVersion ?? 1 : 1,
-    editorUserId: withActorColumns ? (doc as any).editorUserId ?? (doc as any).assigneeUserId ?? null : null,
-    approverUserId: withActorColumns ? (doc as any).approverUserId ?? (doc as any).reviewerUserId ?? null : null
+    editorUserId: withActorColumns ? actorIds.editorUserId : null,
+    approverUserId: withActorColumns ? actorIds.approverUserId : null
   };
 }
 
@@ -1785,28 +2513,105 @@ function normalizeOptionalFilter(raw: string) {
   return value.length > 0 ? value : '';
 }
 
+function requestProtocol(headers: Record<string, unknown>) {
+  const forwarded = headers['x-forwarded-proto'];
+  if (typeof forwarded === 'string' && forwarded.trim().length > 0) {
+    return forwarded.split(',')[0]?.trim() || 'http';
+  }
+  return 'http';
+}
+
+function buildDocumentWorkflowHint(params: {
+  status: string;
+  workflowEvaluation: ReturnType<typeof evaluateWorkflow>;
+  hasAssignments: boolean;
+  assignedEditorsCount: number;
+  assignedApproversCount: number;
+  submittedEditorCount: number;
+  approvedApproverCount: number;
+  rejectedApproverCount: number;
+}) {
+  const normalizedStatus = normalizeDocumentStatus(params.status);
+  if (normalizedStatus === 'archived') {
+    return 'This document is archived and read-only.';
+  }
+  if (normalizedStatus === 'approved') {
+    return 'All required approvals are complete. The document can now be archived when appropriate.';
+  }
+  if (!params.hasAssignments && (normalizedStatus === 'created' || normalizedStatus === 'assigned')) {
+    return 'Assign editors and approvers first so the document can move through the workflow.';
+  }
+  if (params.workflowEvaluation.approvalState === 'rejected') {
+    return 'At least one approver rejected the document. It remains in submitted so rework and renewed approval can happen in the same V1 flow.';
+  }
+  if (params.workflowEvaluation.submitMode === 'individual') {
+    const remainingSubmissions = Math.max(0, params.assignedEditorsCount - params.submittedEditorCount);
+    if (normalizedStatus === 'assigned' && remainingSubmissions > 0) {
+      return `Waiting for ${remainingSubmissions} editor submission${remainingSubmissions === 1 ? '' : 's'} before the document becomes globally submitted.`;
+    }
+  } else if (normalizedStatus === 'assigned' && params.assignedEditorsCount === 0) {
+    return 'No editor is assigned yet. Assign an editor before continuing.';
+  }
+  const remainingApprovals = Math.max(0, params.assignedApproversCount - params.approvedApproverCount - params.rejectedApproverCount);
+  if (normalizedStatus === 'submitted' && remainingApprovals > 0) {
+    return `Waiting for ${remainingApprovals} approver decision${remainingApprovals === 1 ? '' : 's'} before the document can become approved.`;
+  }
+  if ((normalizedStatus === 'assigned' || normalizedStatus === 'submitted') && params.assignedApproversCount === 0) {
+    return 'No approver is assigned yet. Assign an approver to continue the standard review flow.';
+  }
+  if (normalizedStatus === 'created') {
+    return 'The document is created and ready for assignment.';
+  }
+  return 'The document is in progress and follows the referenced workflow.';
+}
+
+function buildDocumentOpenWorkItems(params: {
+  status: string;
+  hasAssignments: boolean;
+  assignedEditorsCount: number;
+  assignedApproversCount: number;
+  submittedEditorCount: number;
+  approvedApproverCount: number;
+  rejectedApproverCount: number;
+  attachmentCount: number;
+}) {
+  const normalizedStatus = normalizeDocumentStatus(params.status);
+  const items: string[] = [];
+  if (!params.hasAssignments && (normalizedStatus === 'created' || normalizedStatus === 'assigned')) {
+    items.push('Assign editors and approvers.');
+  }
+  if (normalizedStatus === 'assigned' && params.assignedEditorsCount > 0 && params.submittedEditorCount < params.assignedEditorsCount) {
+    items.push(`Waiting for ${params.assignedEditorsCount - params.submittedEditorCount} editor submission(s).`);
+  }
+  if (normalizedStatus === 'submitted') {
+    const pendingApprovals = Math.max(0, params.assignedApproversCount - params.approvedApproverCount - params.rejectedApproverCount);
+    if (pendingApprovals > 0) items.push(`Waiting for ${pendingApprovals} approver decision(s).`);
+  }
+  if (params.rejectedApproverCount > 0) {
+    items.push('Document was rejected and needs follow-up or rework.');
+  }
+  if (params.attachmentCount === 0) {
+    items.push('No attachments uploaded yet.');
+  }
+  return items;
+}
+
 async function fetchErpCollection(params: {
   erpBaseUrl: string;
   path: string;
   query?: Record<string, string>;
 }): Promise<Record<string, unknown>[]> {
-  const url = new URL(params.path, params.erpBaseUrl);
-  for (const [key, value] of Object.entries(params.query ?? {})) {
-    if (value.trim().length > 0) {
-      url.searchParams.set(key, value);
-    }
-  }
-
-  const response = await fetch(url.toString(), {
-    headers: {
-      Accept: 'application/json'
-    }
+  const response = await executeIntegrationRequest({
+    baseUrl: params.erpBaseUrl,
+    path: params.path,
+    method: 'GET',
+    query: params.query
   });
   if (!response.ok) {
-    throw new Error(`ERP request failed (${response.status}) for ${url.toString()}`);
+    throw new Error(`ERP request failed (${response.status}) for ${response.url}`);
   }
 
-  const payload = (await response.json()) as unknown;
+  const payload = response.bodyJson as unknown;
   if (Array.isArray(payload)) {
     return payload.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
   }
@@ -1824,7 +2629,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     erpBaseUrl,
     hasDocumentActorColumns = true,
     hasDocumentTemplateVersion = true,
-    hasDocumentMultiAssignments = true
+    hasDocumentMultiAssignments = true,
+    hasDocumentAttachments = typeof (db as any).query?.fpDocumentAttachments?.findMany === 'function',
+    hasDocumentAuditTrail = typeof (db as any).query?.fpDocumentAuditEvents?.findMany === 'function',
+    appBaseUrl,
+    attachmentStorage,
+    auditGateway,
+    notificationGateway
   } = opts;
   const supportsMultiAssignments =
     hasDocumentMultiAssignments &&
@@ -2333,20 +3144,17 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return sendUiError(request, reply, 400, 'product_id (uuid) is required');
     }
 
-    const url = new URL('/api/batches', erpBaseUrl).toString();
-    const response = await fetch(url, {
+    const response = await executeIntegrationRequest({
+      baseUrl: erpBaseUrl,
+      path: '/api/batches',
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        Accept: 'application/json'
-      },
-      body: JSON.stringify({ product_id: productId })
+      jsonBody: { product_id: productId }
     });
 
     if (!response.ok) {
       let message = `Failed creating batch (${response.status})`;
       try {
-        const payload = (await response.json()) as { message?: unknown };
+        const payload = (response.bodyJson ?? {}) as { message?: unknown };
         if (typeof payload.message === 'string' && payload.message.trim().length > 0) {
           message = payload.message;
         }
@@ -2356,7 +3164,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return sendUiError(request, reply, 400, message);
     }
 
-    const payload = (await response.json()) as { batch_number?: unknown };
+    const payload = (response.bodyJson ?? {}) as { batch_number?: unknown };
     const batchNumber =
       typeof payload.batch_number === 'string' && payload.batch_number.trim().length > 0
         ? payload.batch_number
@@ -2935,17 +3743,25 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const requestUrl = url.toString();
     const requestPayloadText = hasBody ? JSON.stringify(requestPayload, null, 2) : JSON.stringify(requestPayload, null, 2);
     try {
-      const response = await fetch(url.toString(), {
+      const response = await executeIntegrationRequest({
+        baseUrl,
+        path: api.path,
         method,
-        headers: hasBody ? { ...headers, 'Content-Type': 'application/json' } : headers,
-        ...(hasBody ? { body: JSON.stringify(requestPayload) } : {})
+        query: hasBody
+          ? undefined
+          : Object.fromEntries(
+              Object.entries(requestPayload).filter(
+                ([, value]) => value !== undefined && value !== null && String(value).trim() !== ''
+              ) as Array<[string, string]>
+            ),
+        headers,
+        ...(hasBody ? { jsonBody: requestPayload } : {})
       });
       responseStatus = response.status;
-      const raw = await response.text();
-      try {
-        responseBody = JSON.stringify(JSON.parse(raw), null, 2);
-      } catch {
-        responseBody = raw;
+      if (response.bodyJson !== undefined) {
+        responseBody = JSON.stringify(response.bodyJson, null, 2);
+      } else {
+        responseBody = response.bodyText;
       }
       if (!response.ok) {
         errorMessage = `API test failed with HTTP ${response.status}.`;
@@ -3469,6 +4285,45 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     await reply.renderPage('templates/list.ejs', {
       templates: templatesWithGroups,
       filters: { state: stateFilter }
+    });
+  });
+
+  app.get('/templates/:id', async (request, reply) => {
+    const paramsParsed = templateIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ message: 'Invalid template id' });
+    }
+
+    const template = await db.query.fpTemplates.findFirst({ where: eq(fpTemplates.id, paramsParsed.data.id) });
+    if (!template) {
+      return reply.status(404).send({ message: 'Template not found' });
+    }
+
+    const workflow =
+      template.workflowRef && typeof (db as any).query?.fpWorkflows?.findMany === 'function'
+        ? (
+            await (db as any).query.fpWorkflows.findMany({
+              where: eq(fpWorkflows.key, template.workflowRef)
+            })
+          )
+            .sort((a: any, b: any) => Number(b.version ?? 0) - Number(a.version ?? 0))[0] ?? null
+        : null;
+    const apiUsageView = await loadTemplateApiUsageView(db, template);
+    const actionUsage = safeCollectTemplateActionUsage(template.templateJson);
+    const documentTableView = await loadTemplateDocumentTableView(db, template, {
+      hasDocumentActorColumns,
+      hasDocumentMultiAssignments
+    });
+
+    await reply.renderPage('templates/detail.ejs', {
+      template,
+      normalizedState: normalizeTemplateState(template.state),
+      workflow,
+      usedApis: apiUsageView.usedApis,
+      missingApiRefs: apiUsageView.missingApiRefs,
+      usedActions: actionUsage,
+      documentTableColumns: documentTableView.columns,
+      documentTableRows: documentTableView.rows
     });
   });
 
@@ -4423,6 +5278,24 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       })
       .returning({ id: fpDocuments.id });
 
+    if (hasDocumentAuditTrail) {
+      await recordDocumentAuditEvent({
+        db,
+        request,
+        documentId: inserted[0].id,
+        eventType: 'created',
+        summary: `Document created from template ${template.name ?? template.key ?? template.id}.`,
+        detail: {
+          templateId: template.id,
+          templateKey: template.key ?? null,
+          templateVersion: template.version ?? 1,
+          workflowRef: (template as any).workflowRef ?? null,
+          status: normalizeDocumentStatus(workflowRuntime.initialStatus)
+        },
+        auditGateway
+      });
+    }
+
     reply.code(303);
     return reply.redirect(`/documents/${inserted[0].id}`);
   });
@@ -4454,6 +5327,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       db,
       hasDocumentActorColumns,
       hasDocumentMultiAssignments: supportsMultiAssignments,
+      hasDocumentAttachments,
+      hasDocumentAuditTrail,
       reply,
       template,
       document,
@@ -4466,6 +5341,160 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       ...(errorFromQuery ? { errorMessage: errorFromQuery } : {}),
       ...(successFromQuery ? { successMessage: successFromQuery } : {})
     });
+  });
+
+  app.post('/documents/:id/attachments', async (request, reply) => {
+    if (!hasDocumentAttachments || !attachmentStorage) {
+      return sendUiError(request, reply, 503, 'Attachments unavailable until DB/storage support is configured.');
+    }
+
+    const paramsParsed = documentIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return sendUiError(request, reply, 400, 'Invalid document id');
+    }
+
+    const parsedBody = documentAttachmentUploadSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      return sendUiError(request, reply, 400, 'Invalid attachment upload payload.');
+    }
+
+    const document = await loadDocumentById(db, paramsParsed.data.id, hasDocumentActorColumns, hasDocumentTemplateVersion);
+    if (!document) {
+      return sendUiError(request, reply, 404, 'Document not found');
+    }
+    if (isArchivedDocumentStatus(document.status)) {
+      return sendUiError(request, reply, 400, 'Archived documents are read-only.');
+    }
+
+    const rbacGroupId = await resolveDocumentRbacGroupId(db, document);
+    if (rbacGroupId) {
+      const currentUser = request.currentUser as CurrentUser | null;
+      if (!currentUser) {
+        return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
+      }
+      const members = await db.query.fpGroupMembers.findMany({ where: eq(fpGroupMembers.groupId, rbacGroupId) });
+      const permission = evaluateGroupPermission({
+        memberships: members,
+        userId: currentUser.id,
+        requires: ['write']
+      });
+      if (!permission.allowed) {
+        return sendUiError(request, reply, 403, permission.errorMessage);
+      }
+    }
+
+    const bytes = decodeAttachmentPayload(parsedBody.data.base64Data);
+    if (bytes.length === 0) {
+      return sendUiError(request, reply, 400, 'Attachment payload is empty.');
+    }
+    if (bytes.length > 10 * 1024 * 1024) {
+      return sendUiError(request, reply, 400, 'Attachments are limited to 10 MB in V1.');
+    }
+
+    const attachmentId = randomUUID();
+    const filename = sanitizeAttachmentFilename(parsedBody.data.filename);
+    const mimeType = parsedBody.data.contentType.trim().toLowerCase();
+    const kind = resolveAttachmentKind(mimeType, parsedBody.data.kind);
+    const storageResult = await attachmentStorage.save({
+      tenantKey: request.tenantContext?.tenantKey ?? 'default',
+      documentId: document.id,
+      attachmentId,
+      filename,
+      contentType: mimeType,
+      bytes
+    });
+
+    await db.insert(fpDocumentAttachments).values({
+      id: attachmentId,
+      documentId: document.id,
+      kind,
+      filename,
+      mimeType,
+      size: bytes.length,
+      storageKey: storageResult.attachmentKey,
+      uploadedBy: request.currentUser?.id ?? null
+    });
+
+    if (hasDocumentAuditTrail) {
+      await recordDocumentAuditEvent({
+        db,
+        request,
+        documentId: document.id,
+        eventType: 'attachment_uploaded',
+        summary: `Uploaded attachment ${filename}.`,
+        detail: {
+          attachmentId,
+          filename,
+          mimeType,
+          size: bytes.length,
+          kind
+        },
+        auditGateway
+      });
+    }
+
+    return {
+      ok: true,
+      attachmentId,
+      filename,
+      kind,
+      size: bytes.length,
+      contentUrl: `/attachments/${encodeURIComponent(attachmentId)}/content`
+    };
+  });
+
+  app.get('/attachments/:id/content', async (request, reply) => {
+    if (!hasDocumentAttachments || !attachmentStorage) {
+      return reply.status(503).send({ message: 'Attachments unavailable until DB/storage support is configured.' });
+    }
+
+    const parsed = attachmentIdParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ message: 'Invalid attachment id' });
+    }
+
+    const attachment = await loadAttachmentById(db, parsed.data.id);
+    if (!attachment) {
+      return reply.status(404).send({ message: 'Attachment not found' });
+    }
+    const document = await loadDocumentById(db, attachment.documentId, hasDocumentActorColumns, hasDocumentTemplateVersion);
+    if (!document) {
+      return reply.status(404).send({ message: 'Document not found' });
+    }
+
+    const rbacGroupId = await resolveDocumentRbacGroupId(db, document);
+    if (rbacGroupId) {
+      const currentUser = request.currentUser as CurrentUser | null;
+      if (!currentUser) {
+        return reply.status(403).send({ message: 'No active user. Go to /admin or use the user dropdown.' });
+      }
+      const members = await db.query.fpGroupMembers.findMany({ where: eq(fpGroupMembers.groupId, rbacGroupId) });
+      const permission = evaluateGroupPermission({
+        memberships: members,
+        userId: currentUser.id,
+        requires: ['read']
+      });
+      if (!permission.allowed) {
+        return reply.status(403).send({ message: permission.errorMessage });
+      }
+    }
+
+    const bytes = await attachmentStorage.read({
+      tenantKey: request.tenantContext?.tenantKey ?? 'default',
+      attachmentKey: attachment.storageKey
+    });
+    if (!bytes) {
+      return reply.status(404).send({ message: 'Attachment content not found' });
+    }
+
+    const query = toFormRecord(request.query);
+    const download = ['1', 'true', 'yes', 'on'].includes(normalizeOptionalFilter(getFormString(query, 'download')).toLowerCase());
+    reply.header('content-type', attachment.mimeType || 'application/octet-stream');
+    reply.header(
+      'content-disposition',
+      `${download ? 'attachment' : 'inline'}; filename="${encodeURIComponent(attachment.filename)}"`
+    );
+    return reply.send(Buffer.from(bytes));
   });
 
   app.post('/documents/:id/save', async (request, reply) => {
@@ -4490,15 +5519,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       const groupMembers = await db.query.fpGroupMembers.findMany({
         where: eq(fpGroupMembers.groupId, rbacGroupIdForSave)
       });
-      const membership = groupMembers.find((item) => item.userId === currentUser.id);
-      const userRights = membership?.rights ?? '';
-      if (!membership || !hasRequiredRights(userRights, ['write'])) {
-        return sendUiError(
-          request,
-          reply,
-          403,
-          `Forbidden: requires ${describeRequiredRights(['write'])}, user has ${userRights || '-'}`
-        );
+      const permission = evaluateGroupPermission({
+        memberships: groupMembers,
+        userId: currentUser.id,
+        requires: ['write']
+      });
+      if (!permission.allowed) {
+        return sendUiError(request, reply, 403, permission.errorMessage);
       }
     }
 
@@ -4530,6 +5557,64 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           : {})
       })
       .where(eq(fpDocuments.id, document.id));
+
+    if (hasDocumentAuditTrail) {
+      const previousData = ((document.dataJson ?? {}) as Record<string, unknown>) ?? {};
+      const nextData = splitSave.dataJson ?? {};
+      const changes = summarizeDocumentFieldChanges({
+        previousData,
+        nextData,
+        templateJson
+      });
+
+      if (changes.changedFields.length > 0) {
+        await recordDocumentAuditEvent({
+          db,
+          request,
+          documentId: document.id,
+          eventType: 'form_updated',
+          summary: `Updated ${changes.changedFields.length} form field${changes.changedFields.length === 1 ? '' : 's'}.`,
+          detail: { fieldKeys: changes.changedFields },
+          auditGateway
+        });
+      }
+
+      for (const item of changes.journalChanges) {
+        if (item.added > 0) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'journal_row_added',
+            summary: `Added ${item.added} journal row${item.added === 1 ? '' : 's'} in ${item.fieldKey}.`,
+            detail: { fieldKey: item.fieldKey, count: item.added },
+            auditGateway
+          });
+        }
+        if (item.updated > 0) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'journal_row_updated',
+            summary: `Updated ${item.updated} journal row${item.updated === 1 ? '' : 's'} in ${item.fieldKey}.`,
+            detail: { fieldKey: item.fieldKey, count: item.updated },
+            auditGateway
+          });
+        }
+        if (item.removed > 0) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'journal_row_removed',
+            summary: `Removed ${item.removed} journal row${item.removed === 1 ? '' : 's'} from ${item.fieldKey}.`,
+            detail: { fieldKey: item.fieldKey, count: item.removed },
+            auditGateway
+          });
+        }
+      }
+    }
 
     reply.code(303);
     return reply.redirect(`/documents/${document.id}`);
@@ -4574,22 +5659,20 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const groupMembers = await db.query.fpGroupMembers.findMany({
       where: eq(fpGroupMembers.groupId, assignmentGroupId)
     });
-    const actorMembership = groupMembers.find((item) => item.userId === currentUser.id);
-    const actorRights = actorMembership?.rights ?? '';
-    if (!actorMembership || !hasRequiredRights(actorRights, ['execute'])) {
-      return sendUiError(
-        request,
-        reply,
-        403,
-        `Forbidden: requires ${describeRequiredRights(['execute'])}, user has ${actorRights || '-'}`
-      );
+    const actorPermission = evaluateGroupPermission({
+      memberships: groupMembers,
+      userId: currentUser.id,
+      requires: ['execute']
+    });
+    if (!actorPermission.allowed) {
+      return sendUiError(request, reply, 403, actorPermission.errorMessage);
     }
-    const targetMembership = groupMembers.find((item) => item.userId === bodyParsed.data.userId);
-    if (!targetMembership) {
-      return sendUiError(request, reply, 400, 'Selected user is not a member of the document group');
-    }
-    if (!targetMembership.rights.includes('w')) {
-      return sendUiError(request, reply, 400, 'Selected user lacks write rights for editor assignment');
+    const targetAssignment = evaluateAssignmentTarget({
+      membership: findGroupMembership(groupMembers, bodyParsed.data.userId),
+      role: 'editor'
+    });
+    if (!targetAssignment.allowed) {
+      return sendUiError(request, reply, 400, targetAssignment.errorMessage);
     }
 
     if (supportsMultiAssignments) {
@@ -4611,6 +5694,34 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         .set({ editorUserId: bodyParsed.data.userId, assigneeUserId: bodyParsed.data.userId })
         .where(eq(fpDocuments.id, document.id));
     }
+
+    if (hasDocumentAuditTrail) {
+      const targetDisplay = await resolveAuditUserDisplay(db, bodyParsed.data.userId);
+      await recordDocumentAuditEvent({
+        db,
+        request,
+        documentId: document.id,
+        eventType: 'assigned_editor',
+        summary: `Assigned editor ${targetDisplay ?? bodyParsed.data.userId}.`,
+        detail: { userId: bodyParsed.data.userId, userDisplay: targetDisplay },
+        auditGateway
+      });
+    }
+    await publishDocumentNotification({
+      db,
+      request,
+      notificationGateway,
+      appBaseUrl,
+      documentId: document.id,
+      type: 'editor_assigned',
+      subject: `Assigned as editor: ${document.id.slice(0, 8)}`,
+      body: `You were assigned as editor for document ${document.id.slice(0, 8)}.`,
+      recipientUserIds: [bodyParsed.data.userId],
+      meta: {
+        role: 'editor',
+        assignedBy: request.currentUser?.id ?? null
+      }
+    });
 
     reply.code(303);
     return reply.redirect(`/documents/${document.id}?assignments=1`);
@@ -4655,22 +5766,20 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const groupMembers = await db.query.fpGroupMembers.findMany({
       where: eq(fpGroupMembers.groupId, assignmentGroupId)
     });
-    const actorMembership = groupMembers.find((item) => item.userId === currentUser.id);
-    const actorRights = actorMembership?.rights ?? '';
-    if (!actorMembership || !hasRequiredRights(actorRights, ['execute'])) {
-      return sendUiError(
-        request,
-        reply,
-        403,
-        `Forbidden: requires ${describeRequiredRights(['execute'])}, user has ${actorRights || '-'}`
-      );
+    const actorPermission = evaluateGroupPermission({
+      memberships: groupMembers,
+      userId: currentUser.id,
+      requires: ['execute']
+    });
+    if (!actorPermission.allowed) {
+      return sendUiError(request, reply, 403, actorPermission.errorMessage);
     }
-    const targetMembership = groupMembers.find((item) => item.userId === bodyParsed.data.userId);
-    if (!targetMembership) {
-      return sendUiError(request, reply, 400, 'Selected user is not a member of the document group');
-    }
-    if (!targetMembership.rights.includes('x')) {
-      return sendUiError(request, reply, 400, 'Selected user lacks execute rights for approver assignment');
+    const targetAssignment = evaluateAssignmentTarget({
+      membership: findGroupMembership(groupMembers, bodyParsed.data.userId),
+      role: 'approver'
+    });
+    if (!targetAssignment.allowed) {
+      return sendUiError(request, reply, 400, targetAssignment.errorMessage);
     }
 
     if (supportsMultiAssignments) {
@@ -4688,6 +5797,34 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         .set({ approverUserId: bodyParsed.data.userId, reviewerUserId: bodyParsed.data.userId })
         .where(eq(fpDocuments.id, document.id));
     }
+
+    if (hasDocumentAuditTrail) {
+      const targetDisplay = await resolveAuditUserDisplay(db, bodyParsed.data.userId);
+      await recordDocumentAuditEvent({
+        db,
+        request,
+        documentId: document.id,
+        eventType: 'assigned_approver',
+        summary: `Assigned approver ${targetDisplay ?? bodyParsed.data.userId}.`,
+        detail: { userId: bodyParsed.data.userId, userDisplay: targetDisplay },
+        auditGateway
+      });
+    }
+    await publishDocumentNotification({
+      db,
+      request,
+      notificationGateway,
+      appBaseUrl,
+      documentId: document.id,
+      type: 'approver_assigned',
+      subject: `Assigned as approver: ${document.id.slice(0, 8)}`,
+      body: `You were assigned as approver for document ${document.id.slice(0, 8)}.`,
+      recipientUserIds: [bodyParsed.data.userId],
+      meta: {
+        role: 'approver',
+        assignedBy: request.currentUser?.id ?? null
+      }
+    });
 
     reply.code(303);
     return reply.redirect(`/documents/${document.id}?assignments=1`);
@@ -4715,6 +5852,18 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           assigneeUserId: document.editorUserId === userId ? null : document.editorUserId
         })
         .where(eq(fpDocuments.id, document.id));
+      if (hasDocumentAuditTrail && document.editorUserId === userId) {
+        const targetDisplay = await resolveAuditUserDisplay(db, userId);
+        await recordDocumentAuditEvent({
+          db,
+          request,
+          documentId: document.id,
+          eventType: 'unassigned_editor',
+          summary: `Removed editor ${targetDisplay ?? userId}.`,
+          detail: { userId, userDisplay: targetDisplay },
+          auditGateway
+        });
+      }
       reply.code(303);
       return reply.redirect(`/documents/${document.id}?assignments=1`);
     }
@@ -4732,6 +5881,18 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       .update(fpDocuments)
       .set({ editorUserId: fallbackEditor, assigneeUserId: fallbackEditor })
       .where(eq(fpDocuments.id, document.id));
+    if (hasDocumentAuditTrail) {
+      const targetDisplay = await resolveAuditUserDisplay(db, userId);
+      await recordDocumentAuditEvent({
+        db,
+        request,
+        documentId: document.id,
+        eventType: 'unassigned_editor',
+        summary: `Removed editor ${targetDisplay ?? userId}.`,
+        detail: { userId, userDisplay: targetDisplay },
+        auditGateway
+      });
+    }
     reply.code(303);
     return reply.redirect(`/documents/${document.id}?assignments=1`);
   });
@@ -4755,6 +5916,18 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           reviewerUserId: document.approverUserId === userId ? null : document.approverUserId
         })
         .where(eq(fpDocuments.id, document.id));
+      if (hasDocumentAuditTrail && document.approverUserId === userId) {
+        const targetDisplay = await resolveAuditUserDisplay(db, userId);
+        await recordDocumentAuditEvent({
+          db,
+          request,
+          documentId: document.id,
+          eventType: 'unassigned_approver',
+          summary: `Removed approver ${targetDisplay ?? userId}.`,
+          detail: { userId, userDisplay: targetDisplay },
+          auditGateway
+        });
+      }
       reply.code(303);
       return reply.redirect(`/documents/${document.id}?assignments=1`);
     }
@@ -4769,6 +5942,18 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       .update(fpDocuments)
       .set({ approverUserId: fallbackApprover, reviewerUserId: fallbackApprover })
       .where(eq(fpDocuments.id, document.id));
+    if (hasDocumentAuditTrail) {
+      const targetDisplay = await resolveAuditUserDisplay(db, userId);
+      await recordDocumentAuditEvent({
+        db,
+        request,
+        documentId: document.id,
+        eventType: 'unassigned_approver',
+        summary: `Removed approver ${targetDisplay ?? userId}.`,
+        detail: { userId, userDisplay: targetDisplay },
+        auditGateway
+      });
+    }
     reply.code(303);
     return reply.redirect(`/documents/${document.id}?assignments=1`);
   });
@@ -4799,19 +5984,29 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         return sendUiError(request, reply, 403, 'No active user. Go to /admin or use the user dropdown.');
       }
       const members = await db.query.fpGroupMembers.findMany({ where: eq(fpGroupMembers.groupId, rbacGroupId) });
-      const membership = members.find((item) => item.userId === currentUser.id);
-      const userRights = membership?.rights ?? '';
-      if (!membership || !hasRequiredRights(userRights, ['execute'])) {
-        return sendUiError(
-          request,
-          reply,
-          403,
-          `Forbidden: requires ${describeRequiredRights(['execute'])}, user has ${userRights || '-'}`
-        );
+      const permission = evaluateGroupPermission({
+        memberships: members,
+        userId: currentUser.id,
+        requires: ['execute']
+      });
+      if (!permission.allowed) {
+        return sendUiError(request, reply, 403, permission.errorMessage);
       }
     }
 
     await db.update(fpDocuments).set({ status: 'archived' }).where(eq(fpDocuments.id, document.id));
+
+    if (hasDocumentAuditTrail) {
+      await recordDocumentAuditEvent({
+        db,
+        request,
+        documentId: document.id,
+        eventType: 'status_changed',
+        summary: 'Document archived.',
+        detail: { fromStatus: normalizeDocumentStatus(document.status), toStatus: 'archived' },
+        auditGateway
+      });
+    }
 
     reply.code(303);
     return reply.redirect(`/documents/${document.id}`);
@@ -4932,13 +6127,14 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       const groupMembers = await db.query.fpGroupMembers.findMany({
         where: eq(fpGroupMembers.groupId, rbacGroupId)
       });
-      const membership = groupMembers.find((item) => item.userId === currentUser!.id);
-      const userRights = membership?.rights ?? '';
+      const permission = evaluateGroupPermission({
+        memberships: groupMembers,
+        userId: currentUser!.id,
+        requires: effectiveRequired
+      });
 
-      if (!membership || !hasRequiredRights(userRights, effectiveRequired)) {
-        return redirectWithActionError(
-          `Forbidden: requires ${describeRequiredRights(effectiveRequired)}, user has ${userRights || '-'}`
-        );
+      if (!permission.allowed) {
+        return redirectWithActionError(permission.errorMessage);
       }
     }
 
@@ -4957,6 +6153,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         const editorRows = await db.query.fpDocumentEditors.findMany({
           where: eq(fpDocumentEditors.documentId, document.id)
         });
+        if (editorRows.length === 0) {
+          return redirectWithActionError('No assigned editors. Assign at least one editor before submitting.');
+        }
         if (editorRows.length > 0 && !editorRows.some((item) => item.userId === currentUser.id)) {
           return redirectWithActionError('Forbidden: submit is limited to assigned editors.');
         }
@@ -4965,13 +6164,22 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         const approvalRows = await db.query.fpDocumentApprovals.findMany({
           where: eq(fpDocumentApprovals.documentId, document.id)
         });
+        if (approvalRows.length === 0) {
+          return redirectWithActionError('No assigned approvers. Assign at least one approver before approval.');
+        }
         if (approvalRows.length > 0 && !approvalRows.some((item) => item.userId === currentUser.id)) {
           return redirectWithActionError('Forbidden: approve/reject is limited to assigned approvers.');
         }
       }
     } else {
+      if (isSubmitAction && !document.editorUserId) {
+        return redirectWithActionError('No assigned editor. Set an editor before submitting.');
+      }
       if (isSubmitAction && document.editorUserId && currentUser && currentUser.id !== document.editorUserId) {
         return redirectWithActionError('Forbidden: submit is limited to the assigned editor.');
+      }
+      if (isApproveOrRejectAction && !document.approverUserId) {
+        return redirectWithActionError('No assigned approver. Set an approver before approval.');
       }
       if (isApproveOrRejectAction && document.approverUserId && currentUser && currentUser.id !== document.approverUserId) {
         return redirectWithActionError('Forbidden: approve/reject is limited to the assigned approver.');
@@ -5069,6 +6277,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         }
       });
 
+      let persistedNextStatus = normalizeDocumentStatus(result.status);
       await db.transaction(async (tx) => {
         const baseActionResultData = sanitizeStatusSourceOfTruthData(result.dataJson);
         const splitActionResult = hasDocumentActorColumns
@@ -5137,6 +6346,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
             nextStatus = derivedEvaluation.nextStatusByAction[actionKey];
           }
         }
+        persistedNextStatus = normalizeDocumentStatus(nextStatus);
         await tx
           .update(fpDocuments)
           .set({
@@ -5153,6 +6363,142 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           })
           .where(eq(fpDocuments.id, document.id));
       });
+      if (hasDocumentAuditTrail) {
+        if (isSubmitAction) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'submitted',
+            summary: supportsMultiAssignments
+              ? `${currentUser?.displayName ?? currentUser?.username ?? 'A user'} submitted their contribution.`
+              : 'Document submitted.',
+            detail: {
+              actionKey,
+              actorUserId: currentUser?.id ?? null,
+              status: persistedNextStatus
+            },
+            auditGateway
+          });
+        } else if (isRejectAction) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'rejected',
+            summary: `${currentUser?.displayName ?? currentUser?.username ?? 'An approver'} rejected the document.`,
+            detail: {
+              actionKey,
+              actorUserId: currentUser?.id ?? null,
+              status: persistedNextStatus
+            },
+            auditGateway
+          });
+        } else if (isApproveOrRejectAction) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'approved',
+            summary: `${currentUser?.displayName ?? currentUser?.username ?? 'An approver'} approved the document.`,
+            detail: {
+              actionKey,
+              actorUserId: currentUser?.id ?? null,
+              status: persistedNextStatus
+            },
+            auditGateway
+          });
+        } else {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'action_executed',
+            summary: `Executed action ${actionKey}.`,
+            detail: {
+              actionKey,
+              controlKey,
+              resultMessage: typeof result.message === 'string' ? result.message : null
+            },
+            auditGateway
+          });
+        }
+
+        if (persistedNextStatus !== normalizedDocumentStatus) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: 'status_changed',
+            summary: `Status changed from ${normalizedDocumentStatus} to ${persistedNextStatus}.`,
+            detail: {
+              actionKey,
+              fromStatus: normalizedDocumentStatus,
+              toStatus: persistedNextStatus
+            },
+            auditGateway
+          });
+        }
+      }
+      if (persistedNextStatus === 'submitted' && normalizedDocumentStatus !== 'submitted') {
+        const approverRecipientIds = supportsMultiAssignments
+          ? nextApproverDecisions.map((item) => item.userId)
+          : [document.approverUserId].filter((item): item is string => !!item);
+        await publishDocumentNotification({
+          db,
+          request,
+          notificationGateway,
+          appBaseUrl,
+          documentId: document.id,
+          type: 'submitted_for_approval',
+          subject: `Approval requested: ${document.id.slice(0, 8)}`,
+          body: `Document ${document.id.slice(0, 8)} is ready for approval.`,
+          recipientUserIds: approverRecipientIds,
+          meta: {
+            actionKey,
+            status: persistedNextStatus
+          }
+        });
+      }
+      if (isRejectAction) {
+        const editorRecipientIds = supportsMultiAssignments
+          ? nextEditorSubmissions.map((item) => item.userId)
+          : [document.editorUserId].filter((item): item is string => !!item);
+        await publishDocumentNotification({
+          db,
+          request,
+          notificationGateway,
+          appBaseUrl,
+          documentId: document.id,
+          type: 'rejected',
+          subject: `Document rejected: ${document.id.slice(0, 8)}`,
+          body: `Document ${document.id.slice(0, 8)} was rejected and needs follow-up.`,
+          recipientUserIds: editorRecipientIds,
+          meta: {
+            actionKey,
+            status: persistedNextStatus
+          }
+        });
+      } else if (persistedNextStatus === 'approved' && normalizedDocumentStatus !== 'approved') {
+        const editorRecipientIds = supportsMultiAssignments
+          ? nextEditorSubmissions.map((item) => item.userId)
+          : [document.editorUserId].filter((item): item is string => !!item);
+        await publishDocumentNotification({
+          db,
+          request,
+          notificationGateway,
+          appBaseUrl,
+          documentId: document.id,
+          type: 'approved',
+          subject: `Document approved: ${document.id.slice(0, 8)}`,
+          body: `Document ${document.id.slice(0, 8)} was approved.`,
+          recipientUserIds: editorRecipientIds,
+          meta: {
+            actionKey,
+            status: persistedNextStatus
+          }
+        });
+      }
       if (typeof result.message === 'string' && result.message.trim().length > 0) {
         return redirectWithActionMessage(result.message);
       }

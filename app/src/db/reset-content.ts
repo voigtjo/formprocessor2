@@ -7,6 +7,8 @@ dotenv.config({ path: resolve(process.cwd(), '../.env') });
 
 const TARGET_TABLES = [
   'fp_document_approvals',
+  'fp_document_attachments',
+  'fp_document_audit_events',
   'fp_document_editors',
   'fp_document_submissions',
   'fp_documents',

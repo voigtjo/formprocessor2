@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "seed": "tsx src/db/seed.ts",
+    "db:rebuild:reference": "tsx src/db/seed.ts",
     "seed:rbac": "tsx src/db/seed.ts",
     "db:reset:content": "tsx src/db/reset-content.ts",
     "db:generate": "DOTENV_CONFIG_PATH=../.env drizzle-kit generate",

@@ -44,6 +44,7 @@ function createMockDb() {
     id: '00000000-0000-0000-0000-0000000000d1',
     templateId: '00000000-0000-0000-0000-0000000000t1',
     status: currentStatus,
+    editorUserId: '00000000-0000-0000-0000-0000000000e1',
     dataJson: currentDataJson,
     externalRefsJson: {},
     snapshotsJson: {}
@@ -678,6 +679,7 @@ describe('workflow action execution', () => {
             id: '00000000-0000-0000-0000-0000000000a8',
             templateId: template.id,
             status: currentStatus,
+            editorUserId: '00000000-0000-0000-0000-0000000000a1',
             dataJson: {},
             externalRefsJson: {},
             snapshotsJson: {}

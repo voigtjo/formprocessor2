@@ -4,7 +4,8 @@
   "type": "module",
   "engines": {"node": ">=20"},
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:core-smoke": "vitest run e2e/core-v1-smoke.test.ts"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
