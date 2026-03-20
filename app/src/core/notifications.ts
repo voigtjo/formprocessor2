@@ -2,6 +2,12 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+/**
+ * V1 notification boundary.
+ * The Core App emits domain notifications, but delivery currently stays in a
+ * local Dev Outbox on disk rather than going through SMTP or a notification service.
+ */
+
 export type NotificationType =
   | 'editor_assigned'
   | 'approver_assigned'

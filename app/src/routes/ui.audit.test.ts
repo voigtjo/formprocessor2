@@ -437,8 +437,12 @@ describe('document audit trail', () => {
     const app = Fastify();
     app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
       const auditEvents = Array.isArray(data.auditEvents) ? (data.auditEvents as Array<Record<string, unknown>>) : [];
+      const hasAuditTrail = Boolean(data.hasDocumentAuditTrail);
       this.type('text/plain').send(
-        auditEvents.map((item) => `${String(item.eventType)}|${String(item.actorDisplay)}|${String(item.summary)}`).join('\n')
+        [
+          `auditTrail=${hasAuditTrail}`,
+          ...auditEvents.map((item) => `${String(item.eventType)}|${String(item.actorDisplay)}|${String(item.summary)}`)
+        ].join('\n')
       );
     });
     await app.register(uiRoutes, {
@@ -457,6 +461,7 @@ describe('document audit trail', () => {
     });
 
     expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('auditTrail=true');
     expect(res.body).toContain('approved|Alice|Alice approved the document.');
     expect(res.body).toContain('created|Alice|Document created from template Production Batch.');
 

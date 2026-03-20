@@ -71,6 +71,7 @@
 </section>
 <section class="card">
   <h3 class="card-title">Actions</h3>
+  <p class="muted">Workflow actions move the document through the referenced workflow. In V1, assignment and workflow notifications are written to the Dev Outbox under <code>app/var/notifications</code>.</p>
   <div class="action-section">
     <div>
       <div class="summary-label">Workflow actions</div>
@@ -209,7 +210,7 @@
         <div class="col">
           <label for="attachment-upload-input">Add file or image</label>
           <input id="attachment-upload-input" type="file" />
-          <p class="muted">Images are shown inline. Other files stay downloadable. V1 limit: 10 MB per file.</p>
+          <p class="muted">Images are shown inline. Other files stay downloadable. V1 limit: 10 MB per file. Files are stored locally under <code>app/var/attachments/default/&lt;documentId&gt;/...</code>.</p>
         </div>
         <div class="col">
           <button class="btn btn-secondary" type="button" id="attachment-upload-button">Upload attachment</button>
@@ -244,7 +245,8 @@
   <% } %>
 </section>
 <section class="card">
-  <h3 class="card-title">History</h3>
+  <h3 class="card-title">Audit Trail / History</h3>
+  <p class="muted">This is the document-level audit trail in V1. It records workflow events, form changes, journal changes and attachment activity.</p>
   <% if (!hasDocumentAuditTrail) { %>
     <p class="muted">Audit trail is unavailable until the DB migration is applied.</p>
   <% } else if ((auditEvents || []).length === 0) { %>
@@ -281,6 +283,23 @@
   <a class="btn btn-secondary" href="/templates">Templates</a>
 </div>
 <script>
+  function extractAttachmentUploadMessage(rawText) {
+    if (!rawText) return 'Upload failed.';
+    try {
+      var parsed = JSON.parse(rawText);
+      if (parsed && typeof parsed.message === 'string' && parsed.message.trim()) {
+        rawText = parsed.message;
+      }
+    } catch (_error) {
+      // Keep the raw text if the response was not JSON.
+    }
+
+    if (rawText === 'Request body is too large' || rawText.indexOf('body is too large') !== -1) {
+      return 'Attachment upload is too large. V1 limit is 10 MB per file.';
+    }
+    return rawText;
+  }
+
   document.addEventListener('submit', function (event) {
     var form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
@@ -330,7 +349,7 @@
 
         if (!response.ok) {
           var errorBody = await response.text();
-          throw new Error(errorBody || 'Upload failed.');
+          throw new Error(extractAttachmentUploadMessage(errorBody));
         }
 
         window.location.reload();

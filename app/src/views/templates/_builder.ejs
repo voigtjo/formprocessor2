@@ -1,0 +1,95 @@
+<section class="card template-builder-card">
+  <div class="builder-header">
+    <div>
+      <h3 class="card-title">V1 Form Builder</h3>
+      <p class="muted">Build the official V1 template core here: fields, layout, fachliche actions and optional document table columns. Workflow stays on the template record.</p>
+    </div>
+    <div class="builder-status-stack">
+      <span class="badge">V1 Core</span>
+      <% if (isInactiveTemplate) { %><span class="badge">read-only</span><% } %>
+    </div>
+  </div>
+
+  <div
+    data-template-builder
+    data-readonly="<%= isInactiveTemplate ? 'true' : 'false' %>"
+    data-template-json-source="template_json"
+  >
+    <div class="builder-summary-grid">
+      <article class="summary-card">
+        <div class="summary-label">Fields</div>
+        <div class="summary-value" data-builder-count="fields">0</div>
+      </article>
+      <article class="summary-card">
+        <div class="summary-label">Layout nodes</div>
+        <div class="summary-value" data-builder-count="layout">0</div>
+      </article>
+      <article class="summary-card">
+        <div class="summary-label">Form actions</div>
+        <div class="summary-value" data-builder-count="actions">0</div>
+      </article>
+      <article class="summary-card">
+        <div class="summary-label">Document table</div>
+        <div class="summary-value" data-builder-count="documentTable">0</div>
+      </article>
+    </div>
+
+    <div class="builder-panels">
+      <section class="builder-panel">
+        <div class="builder-panel-header">
+          <h4>Fields</h4>
+          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-field>Add field</button><% } %>
+        </div>
+        <p class="muted">Define field key, label, control type and the V1-specific display metadata.</p>
+        <div data-builder-fields></div>
+      </section>
+
+      <section class="builder-panel">
+        <div class="builder-panel-header">
+          <h4>Document Table</h4>
+          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-doc-column>Add table column</button><% } %>
+        </div>
+        <p class="muted">Choose which field values appear in the template-level document overview.</p>
+        <div data-builder-document-table></div>
+      </section>
+
+      <section class="builder-panel">
+        <div class="builder-panel-header">
+          <h4>Layout</h4>
+          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-layout>Add layout block</button><% } %>
+        </div>
+        <p class="muted">Arrange headings, text, fields, buttons and simple row/column sections without editing raw JSON.</p>
+        <div data-builder-layout></div>
+      </section>
+
+      <section class="builder-panel">
+        <div class="builder-panel-header">
+          <h4>Form Actions</h4>
+          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-action>Add action</button><% } %>
+        </div>
+        <p class="muted">Only template-specific form actions belong here. Workflow/process actions stay in the referenced workflow.</p>
+        <div data-builder-actions></div>
+      </section>
+
+      <section class="builder-panel">
+        <div class="builder-panel-header">
+          <h4>Builder Validation</h4>
+        </div>
+        <div class="builder-validation" data-builder-validation></div>
+      </section>
+    </div>
+  </div>
+
+  <details class="builder-advanced">
+    <summary>Technical JSON (advanced)</summary>
+    <p class="muted">This is the generated template JSON. You can inspect or edit it directly if needed, then reload the builder from JSON.</p>
+    <textarea id="template_json" name="template_json" rows="24" <%= isInactiveTemplate ? 'readonly' : '' %>><%= form?.template_json ?? '' %></textarea>
+    <div class="actions">
+      <% if (!isInactiveTemplate) { %>
+        <button class="btn btn-secondary" type="button" data-builder-reload-from-json>Reload builder from JSON</button>
+      <% } %>
+    </div>
+  </details>
+</section>
+
+<script src="/template-builder.js"></script>

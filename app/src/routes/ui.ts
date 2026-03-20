@@ -4347,6 +4347,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
   app.get('/templates/new', async (_request, reply) => {
     const workflows = await loadWorkflowOptions(db);
     await reply.renderPage('templates/new.ejs', {
+      builderEnabled: true,
       errorMessage: '',
       warnings: collectTemplateWarnings(starterTemplate),
       workflows,
@@ -4375,6 +4376,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!parsed.success) {
       const workflows = await loadWorkflowOptions(db);
       return reply.status(400).renderPage('templates/new.ejs', {
+        builderEnabled: true,
         errorMessage: 'Please provide key, name, state and template_json.',
         warnings: [],
         workflows,
@@ -4395,6 +4397,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     } catch (error) {
       const workflows = await loadWorkflowOptions(db);
       return reply.status(400).renderPage('templates/new.ejs', {
+        builderEnabled: true,
         errorMessage: error instanceof Error ? error.message : 'Invalid template_json',
         warnings: parsed.success ? collectTemplateWarnings(JSON.parse(parsed.data.template_json)) : [],
         workflows,
@@ -4489,6 +4492,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
 
     await reply.renderPage('templates/edit.ejs', {
       template,
+      builderEnabled: true,
       errorMessage: '',
       warnings: collectTemplateWarnings(template.templateJson),
       assignedGroups: assignmentView.assignedGroups,
@@ -4542,6 +4546,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     if (!parsed.success) {
       return reply.status(400).renderPage('templates/edit.ejs', {
         template,
+        builderEnabled: true,
         errorMessage: 'Please provide key, name, state and template_json.',
         warnings: [],
         assignedGroups: assignmentView.assignedGroups,
@@ -4570,6 +4575,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     } catch (error) {
       return reply.status(400).renderPage('templates/edit.ejs', {
         template,
+        builderEnabled: true,
         errorMessage: error instanceof Error ? error.message : 'Invalid template_json',
         warnings: parsed.success ? collectTemplateWarnings(JSON.parse(parsed.data.template_json)) : [],
         assignedGroups: assignmentView.assignedGroups,

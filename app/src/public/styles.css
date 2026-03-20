@@ -454,6 +454,108 @@ code {
   margin-top: 0.5rem;
 }
 
+.template-builder-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.builder-header,
+.builder-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.builder-status-stack {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.builder-summary-grid,
+.builder-panels {
+  display: grid;
+  gap: 1rem;
+}
+
+.builder-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.builder-panel,
+.builder-card,
+.builder-subcard,
+.builder-advanced {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+  background: #fcfdff;
+}
+
+.builder-card,
+.builder-subcard {
+  margin-bottom: 0.75rem;
+}
+
+.builder-grid {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.builder-grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.builder-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.builder-grid-4 {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.builder-grid-span-2 {
+  grid-column: span 2;
+}
+
+.builder-grid label,
+.builder-panel label,
+.builder-subcard label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.builder-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.75rem;
+}
+
+.builder-table th,
+.builder-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.45rem;
+  vertical-align: top;
+}
+
+.builder-inline-block {
+  margin-top: 0.75rem;
+}
+
+.builder-validation ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.builder-advanced summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 @media (max-width: 760px) {
   .col-6 {
     flex-basis: 100%;

@@ -69,13 +69,7 @@
     </div>
   </div>
 
-  <div class="row">
-    <div class="col">
-      <label for="template_json">template_json</label>
-      <p class="muted">V1 template JSON contains fields, layout, fachliche Zusatzaktionen and optional <code>documentTable</code> columns for the per-template document overview. Workflow and standard process buttons come from the referenced workflow.</p>
-      <textarea id="template_json" name="template_json" rows="22" <%= isInactiveTemplate ? 'disabled' : '' %>><%= form?.template_json ?? '' %></textarea>
-    </div>
-  </div>
+  <%- include('_builder', { form, isInactiveTemplate }) %>
 
   <div class="actions">
     <% if (!isInactiveTemplate) { %>

@@ -69,6 +69,21 @@ function isApiRequest(url: string) {
   return url.startsWith('/api/');
 }
 
+export function normalizeUiErrorMessage(params: { url: string; message: string; statusCode: number }) {
+  const message = String(params.message ?? '').trim() || 'Unexpected error';
+  if (
+    message === 'Request body is too large' ||
+    message.includes('body is too large') ||
+    message.includes('FST_ERR_CTP_BODY_TOO_LARGE')
+  ) {
+    if (params.url.includes('/attachments')) {
+      return 'Attachment upload is too large. V1 limit is 10 MB per file.';
+    }
+    return 'Request body is too large.';
+  }
+  return message;
+}
+
 async function renderErrorDocument(params: {
   viewsRoot: string;
   statusCode: number;
@@ -267,7 +282,11 @@ export async function buildApp() {
 
   app.setErrorHandler(async (error, request, reply) => {
     const statusCode = (error as any)?.statusCode && Number((error as any).statusCode) >= 400 ? Number((error as any).statusCode) : 500;
-    const message = error instanceof Error ? error.message : 'Unexpected error';
+    const message = normalizeUiErrorMessage({
+      url: request.url,
+      message: error instanceof Error ? error.message : 'Unexpected error',
+      statusCode
+    });
     if (!isApiRequest(request.url) && requestWantsHtml(request.headers.accept)) {
       const title =
         statusCode === 403 ? 'Forbidden' : statusCode === 404 ? 'Not Found' : statusCode === 400 ? 'Bad Request' : 'Error';

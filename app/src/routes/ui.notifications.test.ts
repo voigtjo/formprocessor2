@@ -186,6 +186,7 @@ describe('document notifications', () => {
 
     expect(mock.publishCalls.map((item) => item.type)).toEqual(['editor_assigned', 'approver_assigned']);
     expect(mock.publishCalls[0]?.linkUrl).toBe(`http://localhost:3000/documents/${docId}`);
+    expect(mock.publishCalls[0]?.recipients?.[0]?.email).toBe(`${bob.id}@example.local`);
     await app.close();
   });
 

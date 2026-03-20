@@ -2,6 +2,22 @@
 
 Small smoke and E2E-preparation layer for the Core App.
 
+## V1 collaboration add-ons
+
+Notifications / "Email":
+- V1 currently uses a local Dev Outbox, not SMTP delivery.
+- Notification files are written to `app/var/notifications`.
+- Reference users:
+  - `alice@example.local`
+  - `bob@example.local`
+
+Audit Trail:
+- The `Audit Trail / History` section on the document detail page is the official V1 document audit trail.
+
+Attachments:
+- Files are stored locally under `app/var/attachments/<tenant>/<documentId>/...`
+- In the seeded reference setup the tenant is `default`.
+
 ## Smoke matrix
 
 The current V1 smoke focus is:
@@ -88,6 +104,7 @@ What should be visible:
 6. `evidence-product-check` stays ready for a manual attachment upload path
 7. template detail shows document table columns and document rows
 8. after assigning/submitting/approving in the UI, new notification JSON files appear in `app/var/notifications`
+9. the document detail page labels `Audit Trail / History` explicitly as the V1 audit trail
 
 ## E2E status
 

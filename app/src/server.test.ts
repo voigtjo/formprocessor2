@@ -19,6 +19,17 @@ vi.mock('./db/index.js', () => {
 });
 
 describe('server boot smoke', () => {
+  it('normalizes attachment upload body-limit errors into a user-facing message', async () => {
+    const { normalizeUiErrorMessage } = await import('./server.js');
+    expect(
+      normalizeUiErrorMessage({
+        url: '/documents/doc-1/attachments',
+        message: 'Request body is too large',
+        statusCode: 413
+      })
+    ).toBe('Attachment upload is too large. V1 limit is 10 MB per file.');
+  });
+
   it('builds app and serves /health', async () => {
     const { buildApp } = await import('./server.js');
     const app = await buildApp();

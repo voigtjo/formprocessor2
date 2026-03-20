@@ -30,4 +30,77 @@ describe('template V1 core schema + normalization', () => {
       }
     });
   });
+
+  it('accepts richer builder-style V1 templates with lookup, journal, rows and form actions', () => {
+    const parsed = parseTemplateEditorJson(
+      JSON.stringify({
+        fields: {
+          product_id: {
+            kind: 'lookup',
+            label: 'Product',
+            apiRef: 'products.listValid',
+            valueKey: 'id',
+            labelKey: 'name'
+          },
+          findings: {
+            kind: 'journal',
+            label: 'Findings',
+            columns: [
+              { key: 'finding', label: 'Finding', type: 'text' },
+              { key: 'closed', label: 'Closed', type: 'checkbox' }
+            ]
+          }
+        },
+        layout: [
+          { type: 'h1', text: 'Builder Example' },
+          {
+            type: 'row',
+            children: [
+              { type: 'col', width: 6, align: 'left', children: [{ type: 'field', key: 'product_id' }] },
+              {
+                type: 'col',
+                width: 6,
+                align: 'right',
+                children: [{ type: 'button', key: 'refresh_lookup', action: 'refresh_lookup', kind: 'ui', label: 'Refresh Lookup' }]
+              }
+            ]
+          },
+          { type: 'field', key: 'findings' }
+        ],
+        actions: {
+          refresh_lookup: {
+            type: 'composite',
+            steps: [
+              { type: 'require', from: 'external.product_id', message: 'Select product first.' },
+              { type: 'message', value: 'Lookup refreshed.' }
+            ]
+          }
+        },
+        documentTable: {
+          columns: [{ key: 'product_id', label: 'Product' }]
+        }
+      })
+    );
+
+    expect(parsed).toMatchObject({
+      fields: {
+        product_id: {
+          kind: 'lookup',
+          apiRef: 'products.listValid'
+        },
+        findings: {
+          kind: 'journal'
+        }
+      },
+      layout: expect.any(Array),
+      actions: {
+        refresh_lookup: {
+          type: 'composite'
+        }
+      },
+      documentTable: {
+        columns: [{ key: 'product_id', label: 'Product' }]
+      }
+    });
+  });
 });

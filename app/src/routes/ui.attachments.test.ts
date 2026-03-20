@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLocalAttachmentStorage } from '../core/attachments.js';
 import { uiRoutes } from './ui.js';
 import { buildV1MinimalEvidenceTemplateJson } from './test-template-fixtures.js';
+import { normalizeUiErrorMessage } from '../server.js';
 
 const tempDirs: string[] = [];
 
@@ -150,6 +151,16 @@ describe('document attachments', () => {
     expect(response.body).toBe('jpeg-bytes');
 
     await app.close();
+  });
+
+  it('maps oversized upload failures to a friendly attachment message', () => {
+    expect(
+      normalizeUiErrorMessage({
+        url: '/documents/00000000-0000-0000-0000-0000000000d1/attachments',
+        message: 'Request body is too large',
+        statusCode: 413
+      })
+    ).toBe('Attachment upload is too large. V1 limit is 10 MB per file.');
   });
 
   it('renders attachments on the document detail page', async () => {
