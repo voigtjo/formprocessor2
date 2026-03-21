@@ -493,19 +493,41 @@ function buildProductionBatchTemplateJson() {
         ]
       }
     },
-    layout: [
-      { type: 'h1', text: 'Production Batch' },
-      {
-        type: 'row',
-        children: [
-          { type: 'col', width: 7, children: [{ type: 'field', key: 'product_id' }] },
-          { type: 'col', width: 5, align: 'right', children: [{ type: 'field', key: 'batch_priority' }] }
-        ]
-      },
-      { type: 'button', key: 'create_batch', action: 'create_batch', kind: 'ui', label: 'Create Batch' },
-      { type: 'field', key: 'batch_number' },
-      { type: 'field', key: 'inspection_steps' }
-    ],
+    form: {
+      rows: [
+        {
+          cells: [
+            { width: 12, content: { type: 'markdown', style: 'heading1', text: 'Production Batch' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 7, content: { type: 'field', fieldKey: 'product_id' } },
+            { width: 5, align: 'right', content: { type: 'field', fieldKey: 'batch_priority' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 5, content: { type: 'button', action: 'create_batch', label: 'Create Batch', key: 'create_batch', kind: 'ui' } },
+            { width: 1, content: { type: 'spacer', size: 'sm' } },
+            { width: 6, content: { type: 'field', fieldKey: 'batch_number' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 8, content: { type: 'journal', fieldKey: 'inspection_steps' } },
+            {
+              width: 4,
+              content: {
+                type: 'attachmentArea',
+                title: 'Batch Attachments',
+                helpText: 'Store certificates, photos and production evidence here.'
+              }
+            }
+          ]
+        }
+      ]
+    },
     documentTable: {
       columns: [
         { key: 'product_id', label: 'Product' },
@@ -591,19 +613,44 @@ function buildEvidenceBasicTemplateJson() {
         ]
       }
     },
-    layout: [
-      { type: 'h1', text: 'Evidence Basic' },
-      {
-        type: 'row',
-        children: [
-          { type: 'col', width: 6, children: [{ type: 'field', key: 'evidence_title' }] },
-          { type: 'col', width: 6, align: 'center', children: [{ type: 'field', key: 'evidence_type' }] }
-        ]
-      },
-      { type: 'field', key: 'evidence_flags' },
-      { type: 'field', key: 'evidence_note' },
-      { type: 'field', key: 'findings' }
-    ],
+    form: {
+      rows: [
+        {
+          cells: [
+            { width: 12, content: { type: 'markdown', style: 'heading1', text: 'Evidence Basic' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 6, content: { type: 'field', fieldKey: 'evidence_title' } },
+            { width: 6, align: 'center', content: { type: 'field', fieldKey: 'evidence_type' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 12, content: { type: 'field', fieldKey: 'evidence_flags' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 12, content: { type: 'field', fieldKey: 'evidence_note' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 8, content: { type: 'journal', fieldKey: 'findings' } },
+            {
+              width: 4,
+              content: {
+                type: 'attachmentArea',
+                title: 'Evidence Attachments',
+                helpText: 'Upload photos or files that support this evidence note.'
+              }
+            }
+          ]
+        }
+      ]
+    },
     documentTable: {
       columns: [
         { key: 'evidence_title', label: 'Title' },
@@ -656,18 +703,39 @@ function buildEvidenceProductCheckTemplateJson() {
         ]
       }
     },
-    layout: [
-      { type: 'h1', text: 'Evidence Product Check' },
-      {
-        type: 'row',
-        children: [
-          { type: 'col', width: 5, children: [{ type: 'field', key: 'product_id' }] },
-          { type: 'col', width: 4, children: [{ type: 'field', key: 'check_result' }] },
-          { type: 'col', width: 3, align: 'right', children: [{ type: 'field', key: 'issue_tags' }] }
-        ]
-      },
-      { type: 'field', key: 'inspection_note' }
-    ],
+    form: {
+      rows: [
+        {
+          cells: [
+            { width: 12, content: { type: 'markdown', style: 'heading1', text: 'Evidence Product Check' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 5, content: { type: 'field', fieldKey: 'product_id' } },
+            { width: 4, content: { type: 'field', fieldKey: 'check_result' } },
+            { width: 3, align: 'right', content: { type: 'field', fieldKey: 'issue_tags' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 12, content: { type: 'field', fieldKey: 'inspection_note' } }
+          ]
+        },
+        {
+          cells: [
+            {
+              width: 12,
+              content: {
+                type: 'attachmentArea',
+                title: 'Product Evidence',
+                helpText: 'Keep product photos and supporting files together with this check.'
+              }
+            }
+          ]
+        }
+      ]
+    },
     documentTable: {
       columns: [
         { key: 'product_id', label: 'Product' },
@@ -706,18 +774,28 @@ function buildCustomerOrderTemplateJson() {
         ]
       }
     },
-    layout: [
-      { type: 'h1', text: 'Customer Order Test' },
-      {
-        type: 'row',
-        children: [
-          { type: 'col', width: 7, children: [{ type: 'field', key: 'customer_id' }] },
-          { type: 'col', width: 5, align: 'center', children: [{ type: 'field', key: 'fulfillment_flags' }] }
-        ]
-      },
-      { type: 'button', key: 'create_customer_order', action: 'create_customer_order', kind: 'ui', label: 'Create Customer Order' },
-      { type: 'field', key: 'customer_order_number' }
-    ],
+    form: {
+      rows: [
+        {
+          cells: [
+            { width: 12, content: { type: 'markdown', style: 'heading1', text: 'Customer Order Test' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 7, content: { type: 'field', fieldKey: 'customer_id' } },
+            { width: 5, align: 'center', content: { type: 'field', fieldKey: 'fulfillment_flags' } }
+          ]
+        },
+        {
+          cells: [
+            { width: 5, content: { type: 'button', action: 'create_customer_order', label: 'Create Customer Order', key: 'create_customer_order', kind: 'ui' } },
+            { width: 1, content: { type: 'spacer', size: 'sm' } },
+            { width: 6, content: { type: 'field', fieldKey: 'customer_order_number' } }
+          ]
+        }
+      ]
+    },
     documentTable: {
       columns: [
         { key: 'customer_id', label: 'Customer' },

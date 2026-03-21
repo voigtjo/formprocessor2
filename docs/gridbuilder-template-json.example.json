@@ -1,0 +1,188 @@
+{
+    "fields": {
+    "customer_id": {
+      "kind": "lookup",
+      "label": "Customer",
+      "apiRef": "customers.listValid",
+      "labelKey": "name",
+      "required": true,
+      "valueKey": "id"
+    },
+    "fulfillment_flags": {
+      "kind": "editable",
+      "label": "Fulfillment Flags",
+      "control": "checkboxGroup",
+      "options": [
+        {
+          "label": "Expedite",
+          "value": "expedite"
+        },
+        {
+          "label": "Gift wrap",
+          "value": "gift"
+        },
+        {
+          "label": "Quality hold",
+          "value": "quality_hold"
+        }
+      ]
+    },
+    "customer_order_number": {
+      "kind": "editable",
+      "label": "Customer Order Number"
+    }
+  },
+  "form": {
+    "rows": [
+      {
+        "id": "row-1",
+        "height": 80,
+        "cells": [
+          {
+            "id": "row-1-cell-1",
+            "width": 1,
+            "align": {
+              "horizontal": "center",
+              "vertical": "center"
+            },
+            "content": {
+              "type": "markdown",
+              "style": "heading1",
+              "text": "Customer Order Test"
+            }
+          }
+        ]
+      },
+      {
+        "id": "row-2",
+        "height": 80,
+        "cells": [
+          {
+            "id": "row-2-cell-1",
+            "width": 7,
+            "align": {
+              "horizontal": "left",
+              "vertical": "top"
+            },
+            "content": {
+              "type": "field",
+              "fieldKey": "customer_id"
+            }
+          },
+          {
+            "id": "row-2-cell-2",
+            "width": 5,
+            "align": {
+              "horizontal": "center",
+              "vertical": "top"
+            },
+            "content": {
+              "type": "field",
+              "fieldKey": "fulfillment_flags"
+            }
+          }
+        ]
+      },
+      {
+        "id": "row-3",
+        "height": 80,
+        "cells": [
+          {
+            "id": "row-3-cell-1",
+            "width": 5,
+            "align": {
+              "horizontal": "left",
+              "vertical": "top"
+            },
+            "content": {
+              "type": "button",
+              "action": "create_customer_order",
+              "label": "Create Customer Order",
+              "key": "create_customer_order",
+              "kind": "ui"
+            }
+          },
+          {
+            "id": "row-3-cell-2",
+            "width": 1,
+            "align": {
+              "horizontal": "left",
+              "vertical": "top"
+            },
+            "content": {
+              "type": "spacer",
+              "size": "sm"
+            }
+          },
+          {
+            "id": "row-3-cell-3",
+            "width": 6,
+            "align": {
+              "horizontal": "left",
+              "vertical": "top"
+            },
+            "content": {
+              "type": "field",
+              "fieldKey": "customer_order_number"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "actions": {
+    "create_customer_order": {
+      "type": "composite",
+      "steps": [
+        {
+          "from": "external.customer_id",
+          "type": "require",
+          "message": "Select a customer first."
+        },
+        {
+          "to": "vars.customerOrderResponse",
+          "type": "callApi",
+          "apiRef": "customerOrders.create",
+          "request": {
+            "customer_id": "{{external.customer_id}}"
+          }
+        },
+        {
+          "to": "data.customer_order_number",
+          "type": "write",
+          "value": "{{vars.customerOrderResponse.order_number}}"
+        },
+        {
+          "to": "external.customer_order_id",
+          "type": "write",
+          "value": "{{vars.customerOrderResponse.id}}"
+        },
+        {
+          "to": "snapshot.customer_order_number",
+          "type": "write",
+          "value": "{{vars.customerOrderResponse.order_number}}"
+        },
+        {
+          "type": "message",
+          "value": "Customer order created: {{vars.customerOrderResponse.order_number}}"
+        }
+      ]
+    }
+  },
+  "documentTable": {
+    "columns": [
+      {
+        "key": "customer_id",
+        "label": "Customer"
+      },
+      {
+        "key": "fulfillment_flags",
+        "label": "Flags"
+      },
+      {
+        "key": "customer_order_number",
+        "label": "Customer Order Number"
+      }
+    ]
+  }
+}

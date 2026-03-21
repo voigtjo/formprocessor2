@@ -1,8 +1,9 @@
 <section class="card template-builder-card">
-  <div class="builder-header">
+  <div class="builder-shell-header">
     <div>
-      <h3 class="card-title">V1 Form Builder</h3>
-      <p class="muted">Build the official V1 template core here: fields, layout, fachliche actions and optional document table columns. Workflow stays on the template record.</p>
+      <div class="builder-eyebrow">Form Builder</div>
+      <h3 class="card-title">Grid Canvas Workspace</h3>
+      <p class="muted">Select a row, select a cell, assign a control from the left, then edit details on the right.</p>
     </div>
     <div class="builder-status-stack">
       <span class="badge">V1 Core</span>
@@ -10,86 +11,178 @@
     </div>
   </div>
 
-  <div
-    data-template-builder
-    data-readonly="<%= isInactiveTemplate ? 'true' : 'false' %>"
-    data-template-json-source="template_json"
-  >
-    <div class="builder-summary-grid">
-      <article class="summary-card">
-        <div class="summary-label">Fields</div>
-        <div class="summary-value" data-builder-count="fields">0</div>
-      </article>
-      <article class="summary-card">
-        <div class="summary-label">Layout nodes</div>
-        <div class="summary-value" data-builder-count="layout">0</div>
-      </article>
-      <article class="summary-card">
-        <div class="summary-label">Form actions</div>
-        <div class="summary-value" data-builder-count="actions">0</div>
-      </article>
-      <article class="summary-card">
-        <div class="summary-label">Document table</div>
-        <div class="summary-value" data-builder-count="documentTable">0</div>
-      </article>
-    </div>
+  <div class="builder-view-toggle" role="tablist" aria-label="Template editing mode">
+    <button class="btn btn-secondary is-active" type="button" role="tab" aria-selected="true" data-builder-view-tab="builder">Builder</button>
+    <button class="btn btn-secondary" type="button" role="tab" aria-selected="false" data-builder-view-tab="preview">Preview</button>
+    <button class="btn btn-secondary" type="button" role="tab" aria-selected="false" data-builder-view-tab="json">JSON</button>
+  </div>
 
-    <div class="builder-panels">
-      <section class="builder-panel">
-        <div class="builder-panel-header">
-          <h4>Fields</h4>
-          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-field>Add field</button><% } %>
-        </div>
-        <p class="muted">Define field key, label, control type and the V1-specific display metadata.</p>
-        <div data-builder-fields></div>
-      </section>
+  <div class="builder-view-panel" data-builder-view-panel="builder">
+    <div
+      class="builder-studio"
+      data-template-builder
+      data-template-json-source="template_json"
+      data-readonly="<%= isInactiveTemplate ? 'true' : 'false' %>"
+    >
+      <section class="builder-panel builder-row-toolbar" data-builder-row-config></section>
 
-      <section class="builder-panel">
-        <div class="builder-panel-header">
-          <h4>Document Table</h4>
-          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-doc-column>Add table column</button><% } %>
-        </div>
-        <p class="muted">Choose which field values appear in the template-level document overview.</p>
-        <div data-builder-document-table></div>
-      </section>
+      <div class="builder-stage">
+        <aside class="builder-control-rail">
+          <section class="builder-panel builder-control-rail-panel">
+            <div class="builder-panel-header">
+              <div>
+                <h4>Controls</h4>
+                <p class="muted">Apply a control to the selected cell or add a new row.</p>
+              </div>
+            </div>
+            <div data-builder-tools></div>
+          </section>
+        </aside>
 
-      <section class="builder-panel">
-        <div class="builder-panel-header">
-          <h4>Layout</h4>
-          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-layout>Add layout block</button><% } %>
-        </div>
-        <p class="muted">Arrange headings, text, fields, buttons and simple row/column sections without editing raw JSON.</p>
-        <div data-builder-layout></div>
-      </section>
+        <main class="builder-canvas-stage">
+          <section class="builder-panel builder-canvas-panel">
+            <div class="builder-panel-header builder-header--workspace">
+              <div>
+                <div class="builder-eyebrow">Canvas</div>
+                <h4>Form Canvas</h4>
+              </div>
+              <div class="builder-status-stack">
+                <span class="badge" data-builder-template-key><%= form?.key ?? 'template-key' %></span>
+                <span class="badge" data-builder-workflow-ref><%= form?.workflow_ref ?? '—' %></span>
+              </div>
+            </div>
+            <div class="builder-canvas-frame" data-builder-form-rows></div>
+          </section>
 
-      <section class="builder-panel">
-        <div class="builder-panel-header">
-          <h4>Form Actions</h4>
-          <% if (!isInactiveTemplate) { %><button class="btn btn-secondary" type="button" data-builder-add-action>Add action</button><% } %>
-        </div>
-        <p class="muted">Only template-specific form actions belong here. Workflow/process actions stay in the referenced workflow.</p>
-        <div data-builder-actions></div>
-      </section>
+          <details class="builder-panel builder-setup-drawer">
+            <summary>Builder Setup</summary>
+            <div class="builder-setup-grid">
+              <section class="builder-panel">
+                <div class="builder-panel-header">
+                  <div>
+                    <h4>Field Library</h4>
+                    <p class="muted">Define fields here. Field and journal cells reference these definitions.</p>
+                  </div>
+                  <% if (!isInactiveTemplate) { %>
+                    <button class="btn btn-secondary" type="button" data-builder-add-field>Add field</button>
+                  <% } %>
+                </div>
+                <div data-builder-fields></div>
+              </section>
 
-      <section class="builder-panel">
-        <div class="builder-panel-header">
-          <h4>Builder Validation</h4>
+              <section class="builder-panel">
+                <div class="builder-panel-header">
+                  <div>
+                    <h4>Form Actions</h4>
+                    <p class="muted">Button cells can reference these form actions.</p>
+                  </div>
+                  <% if (!isInactiveTemplate) { %>
+                    <button class="btn btn-secondary" type="button" data-builder-add-action>Add action</button>
+                  <% } %>
+                </div>
+                <div data-builder-actions></div>
+              </section>
+
+              <section class="builder-panel">
+                <div class="builder-panel-header">
+                  <div>
+                    <h4>Document Table</h4>
+                    <p class="muted">Optional columns for the document overview.</p>
+                  </div>
+                  <% if (!isInactiveTemplate) { %>
+                    <button class="btn btn-secondary" type="button" data-builder-add-doc-column>Add column</button>
+                  <% } %>
+                </div>
+                <div data-builder-document-table></div>
+              </section>
+
+              <section class="builder-panel">
+                <div class="builder-panel-header">
+                  <div>
+                    <h4>Validation</h4>
+                    <p class="muted">The JSON below is generated from the current canvas state.</p>
+                  </div>
+                </div>
+                <div data-builder-validation></div>
+              </section>
+            </div>
+          </details>
+        </main>
+
+        <aside class="builder-properties-stage">
+          <section class="builder-panel builder-properties-panel">
+            <div class="builder-panel-header">
+              <div>
+                <h4>Properties</h4>
+              </div>
+              <div class="builder-status-stack builder-properties-header-actions">
+                <span class="badge" data-builder-template-name><%= form?.name ?? 'Untitled Template' %></span>
+                <button class="builder-icon-button builder-row-action-button" type="button" data-builder-clear-selection aria-label="Close properties" title="Close properties">✕</button>
+              </div>
+            </div>
+            <div data-builder-properties></div>
+          </section>
+        </aside>
+      </div>
+
+      <dialog class="builder-control-dialog" data-builder-cell-picker>
+        <div class="builder-control-dialog-card">
+          <div class="builder-panel-header">
+            <div>
+              <h4>Add Cell</h4>
+              <p class="muted">Choose a control for the selected row.</p>
+            </div>
+            <button class="btn btn-secondary" type="button" data-builder-close-cell-picker aria-label="Close cell picker">✕</button>
+          </div>
+          <div class="builder-control-dialog-grid">
+            <button class="builder-icon-button builder-icon-button--picker" type="button" data-builder-picker-type="field" aria-label="Field" title="Field">▣</button>
+            <button class="builder-icon-button builder-icon-button--picker" type="button" data-builder-picker-type="markdown" aria-label="Text" title="Text">¶</button>
+            <button class="builder-icon-button builder-icon-button--picker" type="button" data-builder-picker-type="button" aria-label="Button" title="Button">◉</button>
+            <button class="builder-icon-button builder-icon-button--picker" type="button" data-builder-picker-type="journal" aria-label="Journal" title="Journal">≣</button>
+            <button class="builder-icon-button builder-icon-button--picker" type="button" data-builder-picker-type="attachmentArea" aria-label="Attachment" title="Attachment">📎</button>
+            <button class="builder-icon-button builder-icon-button--picker" type="button" data-builder-picker-type="spacer" aria-label="Spacer" title="Spacer">↔</button>
+          </div>
         </div>
-        <div class="builder-validation" data-builder-validation></div>
-      </section>
+      </dialog>
     </div>
   </div>
 
-  <details class="builder-advanced">
-    <summary>Technical JSON (advanced)</summary>
-    <p class="muted">This is the generated template JSON. You can inspect or edit it directly if needed, then reload the builder from JSON.</p>
-    <textarea id="template_json" name="template_json" rows="24" <%= isInactiveTemplate ? 'readonly' : '' %>><%= form?.template_json ?? '' %></textarea>
-    <div class="actions">
-      <% if (!isInactiveTemplate) { %>
-        <button class="btn btn-secondary" type="button" data-builder-reload-from-json>Reload builder from JSON</button>
-      <% } %>
+  <section class="builder-view-panel" data-builder-view-panel="preview" hidden>
+    <div class="builder-panel builder-preview-panel">
+      <div class="builder-panel-header">
+        <div>
+          <h4>Preview</h4>
+          <p class="muted">Preview stays available, but the main editing flow happens on the canvas.</p>
+        </div>
+        <div class="builder-status-stack">
+          <span class="badge">Live</span>
+        </div>
+      </div>
+      <div class="builder-preview-surface" data-builder-preview>
+        <%- typeof builderPreviewHtml === 'string' && builderPreviewHtml.trim().length > 0
+          ? builderPreviewHtml
+          : '<div class="card"><p class="muted">Preview will appear here.</p></div>' %>
+      </div>
     </div>
-  </details>
+  </section>
+
+  <section class="builder-view-panel" data-builder-view-panel="json" hidden>
+    <div class="builder-panel builder-json-panel">
+      <div class="builder-panel-header">
+        <div>
+          <h4>Template JSON</h4>
+          <p class="muted">Advanced path for direct inspection or precise edits.</p>
+        </div>
+        <div class="builder-status-stack">
+          <span class="badge">Advanced</span>
+        </div>
+      </div>
+      <div class="builder-json-meta">
+        <p class="muted">The template JSON only covers the form core. Workflow configuration stays outside this JSON and is controlled through <code>workflow_ref</code>.</p>
+      </div>
+      <textarea id="template_json" name="template_json" rows="24" <%= isInactiveTemplate ? 'readonly' : '' %>><%= form?.template_json ?? '' %></textarea>
+    </div>
+  </section>
 </section>
 
-<script src="/template-builder.js"></script>
+<script src="/public/template-builder.js"></script>

@@ -43,6 +43,11 @@ describe('server smoke', () => {
     expect(workspaceRes.statusCode).toBe(403);
     expect(workspaceRes.body).toContain('No active user');
 
+    const builderAssetRes = await app.inject({ method: 'GET', url: '/public/template-builder.js' });
+    expect(builderAssetRes.statusCode).toBe(200);
+    expect(builderAssetRes.headers['content-type']).toContain('javascript');
+    expect(builderAssetRes.body).toContain('data-builder-view-tab');
+
     await app.close();
   });
 });

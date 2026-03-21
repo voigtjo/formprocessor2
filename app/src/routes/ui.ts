@@ -88,6 +88,66 @@ const layoutSectionsSchema = z.object({
 });
 
 const layoutNodesSchema = z.array(z.object({ type: z.string() }).passthrough());
+const templateFormCellContentSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('field'),
+    fieldKey: z.string().min(1)
+  }),
+  z.object({
+    type: z.literal('markdown'),
+    text: z.string().default(''),
+    style: z.enum(['heading1', 'heading2', 'text', 'hint', 'divider']).optional()
+  }),
+  z.object({
+    type: z.literal('button'),
+    action: z.string().min(1),
+    label: z.string().optional(),
+    key: z.string().optional(),
+    kind: z.enum(['ui', 'process']).optional()
+  }),
+  z.object({
+    type: z.literal('spacer'),
+    size: z.enum(['sm', 'md', 'lg']).optional()
+  }),
+  z.object({
+    type: z.literal('journal'),
+    fieldKey: z.string().min(1)
+  }),
+  z.object({
+    type: z.literal('attachmentArea'),
+    title: z.string().optional(),
+    helpText: z.string().optional()
+  }),
+  z.object({
+    type: z.literal('attachments'),
+    title: z.string().optional(),
+    helpText: z.string().optional()
+  })
+]);
+const templateCellAlignSchema = z.union([
+  z.enum(['left', 'center', 'right']),
+  z.object({
+    horizontal: z.enum(['left', 'center', 'right']).optional(),
+    vertical: z.enum(['top', 'center', 'bottom']).optional()
+  })
+]);
+const templateFormCellSchema = z.object({
+  id: z.string().optional(),
+  width: z.union([z.number().int().min(1).max(12), z.string()]).optional(),
+  span: z.union([z.number().int().min(1).max(12), z.string()]).optional(),
+  align: templateCellAlignSchema.optional(),
+  content: templateFormCellContentSchema
+});
+const templateFormRowSchema = z.object({
+  id: z.string().optional(),
+  key: z.string().optional(),
+  height: z.number().int().min(1).optional(),
+  distribution: z.string().optional(),
+  cells: z.array(templateFormCellSchema).min(1).max(4)
+});
+const templateFormSchemaV1 = z.object({
+  rows: z.array(templateFormRowSchema)
+});
 const templateDocumentTableSchema = z.object({
   columns: z
     .array(
@@ -102,14 +162,16 @@ const templateDocumentTableSchema = z.object({
 
 const templateCoreJsonSchema = z.object({
   fields: z.record(z.any()),
-  layout: z.union([layoutSectionsSchema, layoutNodesSchema]).default({}),
+  form: templateFormSchemaV1.optional(),
+  layout: z.union([layoutSectionsSchema, layoutNodesSchema]).optional(),
   actions: z.record(z.any()).optional(),
   documentTable: templateDocumentTableSchema.optional()
 });
 
 const templateJsonSchema = templateCoreJsonSchema.extend({
   fields: z.record(z.any()),
-  layout: z.union([layoutSectionsSchema, layoutNodesSchema]).default({}),
+  form: templateFormSchemaV1.optional(),
+  layout: z.union([layoutSectionsSchema, layoutNodesSchema]).optional(),
   fieldAccess: z.record(z.any()).optional(),
   workflow: z.object({
     initial: z.string().optional(),
@@ -134,7 +196,8 @@ const templateJsonSchema = templateCoreJsonSchema.extend({
 
 const templateEditorJsonSchema = z.object({
   fields: z.record(z.any()),
-  layout: z.array(z.any()),
+  form: templateFormSchemaV1.optional(),
+  layout: z.array(z.any()).optional(),
   actions: z.record(z.any()).optional(),
   documentTable: templateDocumentTableSchema.optional()
 }).strict();
@@ -356,6 +419,253 @@ type DocumentAuditEventRow = {
 type LayoutButtonKind = 'ui' | 'process';
 type AdminErpTab = 'products' | 'customers' | 'batches' | 'serial-instances' | 'customer-orders';
 
+function normalizeCellSpan(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(1, Math.min(12, Math.round(value)));
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim();
+  }
+  return 12;
+}
+
+function normalizeCellAlign(value: unknown) {
+  if (typeof value === 'string' && ['left', 'center', 'right'].includes(value)) {
+    return value;
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const horizontal = (value as Record<string, unknown>).horizontal;
+    if (typeof horizontal === 'string' && ['left', 'center', 'right'].includes(horizontal)) {
+      return horizontal;
+    }
+  }
+  return undefined;
+}
+
+function normalizeFormRows(form: z.infer<typeof templateFormSchemaV1>) {
+  return {
+    rows: form.rows.map((row, rowIndex) => ({
+      id: typeof row.id === 'string' && row.id.trim().length > 0 ? row.id : `row-${rowIndex + 1}`,
+      key: row.key,
+      height: typeof row.height === 'number' ? row.height : undefined,
+      distribution: typeof row.distribution === 'string' ? row.distribution : undefined,
+      cells: row.cells.map((cell, cellIndex) => ({
+        id: typeof cell.id === 'string' && cell.id.trim().length > 0 ? cell.id : `row-${rowIndex + 1}-cell-${cellIndex + 1}`,
+        width: normalizeCellSpan(cell.width ?? cell.span),
+        align: normalizeCellAlign(cell.align),
+        content: cell.content
+      }))
+    }))
+  };
+}
+
+function layoutNodeToFormRows(node: unknown, fields: Record<string, unknown>): Array<Record<string, unknown>> {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return [];
+  const record = node as Record<string, unknown>;
+  const type = typeof record.type === 'string' ? record.type : '';
+
+  if (type === 'group') {
+    const rows: Array<Record<string, unknown>> = [];
+    if (typeof record.title === 'string' && record.title.trim().length > 0) {
+      rows.push({
+        cells: [{ width: 12, content: { type: 'markdown', style: 'heading2', text: record.title } }]
+      });
+    }
+    const children = Array.isArray(record.children) ? record.children : [];
+    for (const child of children) rows.push(...layoutNodeToFormRows(child, fields));
+    return rows;
+  }
+
+  if (type === 'row') {
+    const rawChildren = Array.isArray(record.children) ? record.children : [];
+    const cells = rawChildren
+      .map((child) => {
+        if (!child || typeof child !== 'object' || Array.isArray(child)) return null;
+        const childRecord = child as Record<string, unknown>;
+        const isColumn = childRecord.type === 'col';
+        const candidate = isColumn
+          ? (Array.isArray(childRecord.children) ? childRecord.children[0] : null)
+          : childRecord;
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+        const candidateRecord = candidate as Record<string, unknown>;
+        const candidateType = typeof candidateRecord.type === 'string' ? candidateRecord.type : '';
+        const fieldKey = typeof candidateRecord.key === 'string' ? candidateRecord.key : '';
+        let content: Record<string, unknown> | null = null;
+        if (candidateType === 'field' && fieldKey) {
+          const field = fields[fieldKey] as Record<string, unknown> | undefined;
+          content = { type: field?.kind === 'journal' ? 'journal' : 'field', fieldKey };
+        } else if (candidateType === 'button') {
+          content = {
+            type: 'button',
+            action: typeof candidateRecord.action === 'string' ? candidateRecord.action : '',
+            label: typeof candidateRecord.label === 'string' ? candidateRecord.label : undefined,
+            key: fieldKey || undefined,
+            kind: typeof candidateRecord.kind === 'string' ? candidateRecord.kind : undefined
+          };
+        } else if (candidateType === 'text') {
+          content = {
+            type: 'markdown',
+            style: 'text',
+            text: typeof candidateRecord.text === 'string' ? candidateRecord.text : ''
+          };
+        }
+        if (!content) return null;
+        return {
+          width: normalizeCellSpan(isColumn ? childRecord.width : 12),
+          align: normalizeCellAlign(isColumn ? childRecord.align : candidateRecord.align),
+          content
+        };
+      })
+      .filter((item): item is Record<string, unknown> => !!item);
+    return cells.length > 0 ? [{ cells }] : [];
+  }
+
+  if (type === 'field') {
+    const fieldKey = typeof record.key === 'string' ? record.key : '';
+    if (!fieldKey) return [];
+    const field = fields[fieldKey] as Record<string, unknown> | undefined;
+    return [{
+      cells: [{ width: 12, content: { type: field?.kind === 'journal' ? 'journal' : 'field', fieldKey } }]
+    }];
+  }
+
+  if (type === 'button') {
+    return [{
+      cells: [{
+        width: 12,
+        content: {
+          type: 'button',
+          action: typeof record.action === 'string' ? record.action : '',
+          label: typeof record.label === 'string' ? record.label : undefined,
+          key: typeof record.key === 'string' ? record.key : undefined,
+          kind: typeof record.kind === 'string' ? record.kind : undefined
+        }
+      }]
+    }];
+  }
+
+  if (type === 'h1' || type === 'h2' || type === 'text' || type === 'hint' || type === 'divider') {
+    return [{
+      cells: [{
+        width: 12,
+        content: {
+          type: 'markdown',
+          style:
+            type === 'h1' ? 'heading1' :
+            type === 'h2' ? 'heading2' :
+            type === 'hint' ? 'hint' :
+            type === 'divider' ? 'divider' : 'text',
+          text: typeof record.text === 'string' ? record.text : ''
+        }
+      }]
+    }];
+  }
+
+  return [];
+}
+
+function buildFormFromLayout(templateJson: Record<string, unknown>) {
+  const fields = templateJson.fields && typeof templateJson.fields === 'object' && !Array.isArray(templateJson.fields)
+    ? (templateJson.fields as Record<string, unknown>)
+    : {};
+  const layout = templateJson.layout;
+
+  if (Array.isArray(layout)) {
+    const rows = layout.flatMap((node) => layoutNodeToFormRows(node, fields));
+    if (rows.length > 0) return { rows };
+  }
+
+  if (layout && typeof layout === 'object' && Array.isArray((layout as any).sections)) {
+    const rows = ((layout as any).sections as Array<Record<string, unknown>>).flatMap((section) => {
+      const nextRows: Array<Record<string, unknown>> = [];
+      if (typeof section.title === 'string' && section.title.trim().length > 0) {
+        nextRows.push({ cells: [{ width: 12, content: { type: 'markdown', style: 'heading2', text: section.title } }] });
+      }
+      const fieldKeys = Array.isArray(section.fields) ? section.fields.filter((key): key is string => typeof key === 'string') : [];
+      for (const fieldKey of fieldKeys) {
+        const field = fields[fieldKey] as Record<string, unknown> | undefined;
+        nextRows.push({
+          cells: [{ width: 12, content: { type: field?.kind === 'journal' ? 'journal' : 'field', fieldKey } }]
+        });
+      }
+      return nextRows;
+    });
+    if (rows.length > 0) return { rows };
+  }
+
+  const fallbackKeys = Object.keys(fields);
+  return {
+    rows: fallbackKeys.map((fieldKey) => {
+      const field = fields[fieldKey] as Record<string, unknown> | undefined;
+      return {
+        cells: [{ width: 12, content: { type: field?.kind === 'journal' ? 'journal' : 'field', fieldKey } }]
+      };
+    })
+  };
+}
+
+function buildLayoutFromForm(form: unknown) {
+  const parsed = templateFormSchemaV1.safeParse(form);
+  if (!parsed.success) return [];
+  const normalizedForm = normalizeFormRows(parsed.data);
+  return normalizedForm.rows.map((row) => ({
+    type: 'row',
+    children: row.cells.map((cell) => {
+      const content = cell.content;
+      let child: Record<string, unknown>;
+      if (content.type === 'field' || content.type === 'journal') {
+        child = { type: 'field', key: content.fieldKey };
+      } else if (content.type === 'button') {
+        child = {
+          type: 'button',
+          key: content.key ?? content.action,
+          action: content.action,
+          label: content.label ?? content.action,
+          kind: content.kind ?? 'ui'
+        };
+      } else if (content.type === 'attachmentArea' || content.type === 'attachments') {
+        child = {
+          type: 'attachments',
+          title: content.title ?? 'Attachments',
+          text: content.helpText ?? 'Attachments and images are managed on the document workspace.'
+        };
+      } else if (content.type === 'spacer') {
+        child = { type: 'spacer', size: content.size ?? 'md' };
+      } else {
+        child = {
+          type:
+            content.style === 'heading1' ? 'h1' :
+            content.style === 'heading2' ? 'h2' :
+            content.style === 'hint' ? 'hint' :
+            content.style === 'divider' ? 'divider' : 'text',
+          text: content.text
+        };
+      }
+      return {
+        type: 'col',
+        width: cell.width,
+        align: cell.align,
+        children: [child]
+      };
+    })
+  }));
+}
+
+function ensureBuilderReadyTemplateCore(rawTemplateJson: Record<string, unknown>) {
+  const next = { ...rawTemplateJson } as Record<string, unknown>;
+  const parsedForm = templateFormSchemaV1.safeParse(next.form);
+  if (parsedForm.success) {
+    next.form = normalizeFormRows(parsedForm.data);
+    next.layout = buildLayoutFromForm(next.form);
+    return next;
+  }
+
+  const derivedForm = buildFormFromLayout(next);
+  next.form = derivedForm;
+  next.layout = buildLayoutFromForm(derivedForm);
+  return next;
+}
+
 const starterTemplate = {
   fields: {
     customer_id: {
@@ -371,11 +681,25 @@ const starterTemplate = {
       multiline: true
     }
   },
-  layout: [
-    { type: 'h1', text: 'Start' },
-    { type: 'field', key: 'customer_id' },
-    { type: 'field', key: 'comment' }
-  ],
+  form: {
+    rows: [
+      {
+        id: 'row-1',
+        height: 80,
+        cells: [{ id: 'row-1-cell-1', width: 12, content: { type: 'markdown', style: 'heading1', text: 'Start' } }]
+      },
+      {
+        id: 'row-2',
+        height: 80,
+        cells: [{ id: 'row-2-cell-1', width: 12, content: { type: 'field', fieldKey: 'customer_id' } }]
+      },
+      {
+        id: 'row-3',
+        height: 80,
+        cells: [{ id: 'row-3-cell-1', width: 12, content: { type: 'field', fieldKey: 'comment' } }]
+      }
+    ]
+  },
   actions: {},
   documentTable: {
     columns: [
@@ -384,6 +708,7 @@ const starterTemplate = {
     ]
   }
 };
+const builderReadyStarterTemplate = ensureBuilderReadyTemplateCore(starterTemplate);
 
 const STANDARD_PROCESS_ACTIONS = ['assign', 'submit', 'approve', 'reject', 'archive'] as const;
 type StandardProcessAction = (typeof STANDARD_PROCESS_ACTIONS)[number];
@@ -436,10 +761,11 @@ function resolveProcessButtonLabel(controlKey: string, templateJson?: TemplateJs
 }
 
 export function normalizeTemplateJsonForV1Storage(templateJson: TemplateJson) {
-  const next = { ...templateJson } as Record<string, unknown>;
+  const next = ensureBuilderReadyTemplateCore({ ...(templateJson as Record<string, unknown>) });
   delete next.workflow;
   delete next.controls;
   delete next.fieldAccess;
+  delete next.layout;
 
   if (next.actions && typeof next.actions === 'object' && !Array.isArray(next.actions)) {
     const filteredActions = Object.fromEntries(
@@ -453,6 +779,16 @@ export function normalizeTemplateJsonForV1Storage(templateJson: TemplateJson) {
   }
 
   return next as TemplateJson;
+}
+
+function buildTemplateBuilderPreviewHtmlFromText(raw: string | undefined) {
+  try {
+    const parsed = parseTemplateEditorJson(String(raw ?? ''));
+    const normalized = normalizeTemplateJsonForV1Storage(parsed as TemplateJson);
+    return renderLayout({ mode: 'preview', templateJson: normalized });
+  } catch {
+    return '<div class="card"><p class="muted">Preview unavailable until template_json is valid.</p></div>';
+  }
 }
 
 function resolvePublishedAtForStateChange(nextState: 'draft' | 'published' | 'inactive', existing?: Date | null) {
@@ -592,7 +928,7 @@ function parseWorkflowJson(raw: unknown): WorkflowRuntimeModel {
 }
 
 function parseTemplateJson(raw: unknown): TemplateJson {
-  const parsed = templateJsonSchema.parse(raw) as any;
+  const parsed = ensureBuilderReadyTemplateCore(templateJsonSchema.parse(raw) as any);
   return {
     ...parsed,
     // Legacy bridge only: controls/workflow/fieldAccess may still exist in older templates.
@@ -604,6 +940,7 @@ function parseTemplateJson(raw: unknown): TemplateJson {
 function buildActionRuntimeTemplateContext(templateJson: TemplateJson) {
   const fullSchema = {
     fields: templateJson.fields,
+    form: (templateJson as any).form,
     workflow: templateJson.workflow,
     controls: templateJson.controls ?? {},
     actions: templateJson.actions ?? {},
@@ -629,22 +966,22 @@ export function parseTemplateEditorJson(raw: string) {
 
   const validatedCore = templateEditorJsonSchema.safeParse(parsed);
   if (validatedCore.success) {
-    return {
+    return ensureBuilderReadyTemplateCore({
       ...validatedCore.data,
       actions: validatedCore.data.actions ?? {}
-    };
+    }) as any;
   }
 
   const validatedCompat = templateJsonSchema.safeParse(parsed);
   if (!validatedCompat.success) {
-    throw new Error('template_json must contain the V1 core fields, layout and optional actions');
+    throw new Error('template_json must contain fields, form.rows and optional actions/documentTable');
   }
 
-  return {
+  return ensureBuilderReadyTemplateCore({
     ...validatedCompat.data,
     controls: validatedCompat.data.controls ?? {},
     actions: validatedCompat.data.actions ?? {}
-  };
+  }) as any;
 }
 
 function parseOptionalJsonField(raw: string | undefined, fieldName: string) {
@@ -670,6 +1007,9 @@ export function collectTemplateWarnings(templateJson: unknown) {
   }
   if (root.controls && typeof root.controls === 'object') {
     warnings.push('template_json.controls is legacy. Standard process buttons come from the workflow.');
+  }
+  if (!root.form && root.layout) {
+    warnings.push('template_json.layout is now a transition bridge. New builder-ready templates should use template_json.form.rows[].cells[].');
   }
   const actions = root.actions && typeof root.actions === 'object' && !Array.isArray(root.actions)
     ? (root.actions as Record<string, unknown>)
@@ -4345,11 +4685,13 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
   });
 
   app.get('/templates/new', async (_request, reply) => {
+    const starterTemplateJsonText = JSON.stringify(builderReadyStarterTemplate, null, 2);
     const workflows = await loadWorkflowOptions(db);
     await reply.renderPage('templates/new.ejs', {
       builderEnabled: true,
       errorMessage: '',
-      warnings: collectTemplateWarnings(starterTemplate),
+      warnings: collectTemplateWarnings(builderReadyStarterTemplate),
+      builderPreviewHtml: buildTemplateBuilderPreviewHtmlFromText(starterTemplateJsonText),
       workflows,
       form: {
         key: '',
@@ -4357,7 +4699,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         description: '',
         state: 'draft',
         workflow_ref: workflows[0]?.key ?? '',
-        template_json: JSON.stringify(starterTemplate, null, 2)
+        template_json: starterTemplateJsonText
       }
     });
   });
@@ -4379,6 +4721,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         builderEnabled: true,
         errorMessage: 'Please provide key, name, state and template_json.',
         warnings: [],
+        builderPreviewHtml: buildTemplateBuilderPreviewHtmlFromText(getFormString(form, 'template_json')),
         workflows,
         form: {
           key: getFormString(form, 'key'),
@@ -4400,6 +4743,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         builderEnabled: true,
         errorMessage: error instanceof Error ? error.message : 'Invalid template_json',
         warnings: parsed.success ? collectTemplateWarnings(JSON.parse(parsed.data.template_json)) : [],
+        builderPreviewHtml: buildTemplateBuilderPreviewHtmlFromText(parsed.data.template_json),
         workflows,
         form: parsed.data
       });
@@ -4489,12 +4833,14 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const apiUsageView = await loadTemplateApiUsageView(db, template);
     const actionUsage = safeCollectTemplateActionUsage(template.templateJson);
     const workflows = await loadWorkflowOptions(db);
+    const builderReadyTemplateJson = normalizeTemplateJsonForV1Storage(parseTemplateJson(template.templateJson));
 
     await reply.renderPage('templates/edit.ejs', {
       template,
       builderEnabled: true,
       errorMessage: '',
       warnings: collectTemplateWarnings(template.templateJson),
+      builderPreviewHtml: buildTemplateBuilderPreviewHtmlFromText(JSON.stringify(builderReadyTemplateJson, null, 2)),
       assignedGroups: assignmentView.assignedGroups,
       assignableGroups: assignmentView.assignableGroups,
       hasGroups: assignmentView.hasGroups,
@@ -4510,7 +4856,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         description: template.description ?? '',
         state: normalizeTemplateState(template.state),
         workflow_ref: (template as any).workflowRef ?? '',
-        template_json: JSON.stringify(template.templateJson, null, 2)
+        template_json: JSON.stringify(builderReadyTemplateJson, null, 2)
       }
     });
   });
@@ -4549,6 +4895,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         builderEnabled: true,
         errorMessage: 'Please provide key, name, state and template_json.',
         warnings: [],
+        builderPreviewHtml: buildTemplateBuilderPreviewHtmlFromText(getFormString(form, 'template_json')),
         assignedGroups: assignmentView.assignedGroups,
         assignableGroups: assignmentView.assignableGroups,
         hasGroups: assignmentView.hasGroups,
@@ -4578,6 +4925,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
         builderEnabled: true,
         errorMessage: error instanceof Error ? error.message : 'Invalid template_json',
         warnings: parsed.success ? collectTemplateWarnings(JSON.parse(parsed.data.template_json)) : [],
+        builderPreviewHtml: buildTemplateBuilderPreviewHtmlFromText(parsed.data.template_json),
         assignedGroups: assignmentView.assignedGroups,
         assignableGroups: assignmentView.assignableGroups,
         hasGroups: assignmentView.hasGroups,

@@ -1,0 +1,112 @@
+{
+  "reference": {
+    "source": "GridFormBuilder-main.zip and screenshots from 2026-03-21",
+    "intent": "UX and interaction reference only, not a runtime contract"
+  },
+  "workspace": {
+    "formName": "customer",
+    "newFormName": "New Form Name",
+    "theme": "green-garden",
+    "selectedRowId": "row-2",
+    "selectedCellId": "row-2-cell-2"
+  },
+  "rowToolbar": {
+    "selectedRowId": "row-2",
+    "numCells": 3,
+    "distribution": "1:2:1",
+    "height": 80
+  },
+  "controlRail": {
+    "controls": [
+      "markdown",
+      "input",
+      "dropdown",
+      "date",
+      "checkbox"
+    ]
+  },
+  "rows": [
+    {
+      "id": "row-1",
+      "height": 80,
+      "cells": [
+        {
+          "id": "row-1-cell-1",
+          "widthRatio": 1,
+          "control": {
+            "type": "markdown",
+            "content": "### Markdown text",
+            "hAlign": "center",
+            "vAlign": "center"
+          }
+        },
+        {
+          "id": "row-1-cell-2",
+          "widthRatio": 1,
+          "control": {
+            "type": "input",
+            "label": "Input Label",
+            "inputType": "text",
+            "hAlign": "left",
+            "vAlign": "top"
+          }
+        }
+      ]
+    },
+    {
+      "id": "row-2",
+      "height": 80,
+      "cells": [
+        {
+          "id": "row-2-cell-1",
+          "widthRatio": 1,
+          "control": {
+            "type": "dropdown",
+            "label": "Select Option",
+            "options": [
+              { "label": "Option A", "value": "a" },
+              { "label": "Option B", "value": "b" }
+            ],
+            "hAlign": "left",
+            "vAlign": "top"
+          }
+        },
+        {
+          "id": "row-2-cell-2",
+          "widthRatio": 2,
+          "control": {
+            "type": "date",
+            "label": "Select Date",
+            "hAlign": "left",
+            "vAlign": "top"
+          }
+        },
+        {
+          "id": "row-2-cell-3",
+          "widthRatio": 1,
+          "control": null
+        }
+      ]
+    },
+    {
+      "id": "row-3",
+      "height": 80,
+      "cells": [
+        {
+          "id": "row-3-cell-1",
+          "widthRatio": 1,
+          "control": null
+        }
+      ]
+    }
+  ],
+  "selectedControlConfig": {
+    "cellId": "row-2-cell-2",
+    "control": {
+      "type": "date",
+      "label": "Select Date",
+      "hAlign": "left",
+      "vAlign": "top"
+    }
+  }
+}

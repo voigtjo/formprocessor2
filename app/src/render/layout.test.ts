@@ -382,6 +382,87 @@ describe('layout renderer v2', () => {
     expect(html).toContain('--col-basis:41.66666666666667%');
   });
 
+  it('renders builder-ready form rows and cells without relying on legacy layout as the primary source', () => {
+    const html = renderLayout({
+      mode: 'new',
+      templateId: 'tpl-1',
+      templateJson: {
+        fields: {
+          product_id: { kind: 'lookup', label: 'Product' },
+          findings: {
+            kind: 'journal',
+            label: 'Findings',
+            columns: [{ key: 'finding', label: 'Finding', type: 'text' }]
+          }
+        },
+        form: {
+          rows: [
+            {
+              cells: [
+                { width: 12, content: { type: 'markdown', style: 'heading1', text: 'Builder Ready Form' } }
+              ]
+            },
+            {
+              cells: [
+                { width: 6, align: 'left', content: { type: 'field', fieldKey: 'product_id' } },
+                { width: 6, align: 'right', content: { type: 'button', action: 'refresh_lookup', label: 'Refresh Lookup', kind: 'ui' } }
+              ]
+            },
+            {
+              cells: [
+                { width: 12, content: { type: 'journal', fieldKey: 'findings' } }
+              ]
+            },
+            {
+              cells: [
+                { width: 12, content: { type: 'attachmentArea', title: 'Evidence Attachments', helpText: 'Managed in the document workspace.' } }
+              ]
+            }
+          ]
+        },
+        actions: {
+          refresh_lookup: { type: 'message', value: 'Lookup refreshed.' }
+        }
+      }
+    });
+
+    expect(html).toContain('Builder Ready Form');
+    expect(html).toContain('name="lookup:product_id"');
+    expect(html).toContain('Refresh Lookup');
+    expect(html).toContain('Findings');
+    expect(html).toContain('Evidence Attachments');
+  });
+
+  it('renders attachmentArea as the new builder-facing cell type while keeping attachment runtime output', () => {
+    const html = renderLayout({
+      mode: 'detail',
+      documentId: 'doc-1',
+      templateJson: {
+        fields: {},
+        form: {
+          rows: [
+            {
+              cells: [
+                {
+                  width: 12,
+                  content: {
+                    type: 'attachmentArea',
+                    title: 'Site Evidence',
+                    helpText: 'Upload photos and supporting files.'
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    });
+
+    expect(html).toContain('Site Evidence');
+    expect(html).toContain('Upload photos and supporting files.');
+    expect(html).toContain('<div class="card"><h3 class="card-title">Site Evidence</h3>');
+  });
+
   it('renders journal control with add-row ui and hidden json field', () => {
     const html = renderLayout({
       mode: 'detail',

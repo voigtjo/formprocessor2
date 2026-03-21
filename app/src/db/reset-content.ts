@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { sql } from 'drizzle-orm';
+import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { makeDb } from './index.js';
 
@@ -52,7 +53,12 @@ async function run() {
 
     const truncateSql = `TRUNCATE TABLE ${truncateTables.map((tableName) => `"${tableName}"`).join(', ')} RESTART IDENTITY CASCADE`;
     await db.execute(sql.raw(truncateSql));
+    await rm(resolve(process.cwd(), 'var', 'attachments'), { recursive: true, force: true });
+    await rm(resolve(process.cwd(), 'var', 'notifications'), { recursive: true, force: true });
+    await mkdir(resolve(process.cwd(), 'var', 'attachments'), { recursive: true });
+    await mkdir(resolve(process.cwd(), 'var', 'notifications'), { recursive: true });
     console.log(`Truncated tables: ${truncateTables.join(', ')}`);
+    console.log('Cleared local attachments + notification outbox.');
     console.log('DB content reset complete (schema kept).');
   } finally {
     await pool.end();

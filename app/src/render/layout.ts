@@ -29,6 +29,7 @@ type LayoutNode = {
   params?: Record<string, unknown>;
   confirm?: string;
   children?: LayoutNode[];
+  size?: string;
 };
 
 type ResolvedFieldOption = {
@@ -220,7 +221,7 @@ function resolveColumnWidthStyle(width: unknown) {
   if (typeof width === 'number' && Number.isFinite(width)) {
     const clamped = Math.max(1, Math.min(12, Math.round(width)));
     const percentage = (clamped / 12) * 100;
-    return `--col-basis:${percentage}%;`;
+    return `--col-span:${clamped};--col-basis:${percentage}%;`;
   }
 
   if (typeof width !== 'string') return '';
@@ -240,14 +241,16 @@ function resolveColumnWidthStyle(width: unknown) {
   };
 
   if (ratioMap[normalized]) {
-    return `--col-basis:${ratioMap[normalized]}%;`;
+    const percentage = ratioMap[normalized];
+    const span = Math.max(1, Math.min(12, Math.round((percentage / 100) * 12)));
+    return `--col-span:${span};--col-basis:${percentage}%;`;
   }
 
   const asNumber = Number(normalized);
   if (Number.isFinite(asNumber) && normalized !== '') {
     const clamped = Math.max(1, Math.min(12, Math.round(asNumber)));
     const percentage = (clamped / 12) * 100;
-    return `--col-basis:${percentage}%;`;
+    return `--col-span:${clamped};--col-basis:${percentage}%;`;
   }
 
   if (normalized.endsWith('%')) {
@@ -490,6 +493,81 @@ function renderJournalEditable(fieldKey: string, field: any, value: unknown, mod
 }
 
 function normalizeLayoutNodes(templateJson: any): LayoutNode[] {
+  const normalizeCellAlign = (value: unknown) => {
+    if (typeof value === 'string' && ['left', 'center', 'right'].includes(value)) return value;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const horizontal = (value as Record<string, unknown>).horizontal;
+      if (typeof horizontal === 'string' && ['left', 'center', 'right'].includes(horizontal)) return horizontal;
+    }
+    return undefined;
+  };
+  const formRows = Array.isArray(templateJson?.form?.rows) ? templateJson.form.rows : null;
+  if (formRows) {
+    return formRows
+      .map((row: any) => {
+        if (!row || typeof row !== 'object' || !Array.isArray(row.cells)) return null;
+        const children = row.cells
+          .map((cell: any) => {
+            if (!cell || typeof cell !== 'object' || !cell.content || typeof cell.content !== 'object') return null;
+            const content = cell.content as Record<string, unknown>;
+            const contentType = typeof content.type === 'string' ? content.type : '';
+            let child: LayoutNode | null = null;
+
+            if ((contentType === 'field' || contentType === 'journal') && typeof content.fieldKey === 'string') {
+              child = { type: 'field', key: content.fieldKey };
+            } else if (contentType === 'markdown') {
+              const style = typeof content.style === 'string' ? content.style : 'text';
+              child = {
+                type:
+                  style === 'heading1' ? 'h1' :
+                  style === 'heading2' ? 'h2' :
+                  style === 'hint' ? 'hint' :
+                  style === 'divider' ? 'divider' : 'text',
+                text: typeof content.text === 'string' ? content.text : ''
+              };
+            } else if (contentType === 'button' && typeof content.action === 'string') {
+              child = {
+                type: 'button',
+                key: typeof content.key === 'string' && content.key.trim().length > 0 ? content.key : content.action,
+                action: content.action,
+                label: typeof content.label === 'string' ? content.label : undefined,
+                kind: typeof content.kind === 'string' ? content.kind : undefined
+              };
+            } else if (contentType === 'spacer') {
+              child = {
+                type: 'spacer',
+                size: typeof content.size === 'string' ? content.size : 'md'
+              };
+            } else if (contentType === 'attachmentArea' || contentType === 'attachments') {
+              child = {
+                type: 'attachments',
+                title: typeof content.title === 'string' ? content.title : 'Attachments',
+                text:
+                  typeof content.helpText === 'string'
+                    ? content.helpText
+                    : 'Attachments and images are managed on the document workspace.'
+              };
+            }
+
+            if (!child) return null;
+            return {
+              type: 'col',
+              width: (cell as any).width ?? (cell as any).span,
+              align: normalizeCellAlign(cell.align),
+              children: [child]
+            } satisfies LayoutNode;
+          })
+          .filter((item): item is LayoutNode => !!item);
+
+        if (children.length === 0) return null;
+        return {
+          type: 'row',
+          children
+        } satisfies LayoutNode;
+      })
+      .filter((row): row is LayoutNode => !!row);
+  }
+
   const layout = templateJson?.layout;
 
   if (Array.isArray(layout)) {
@@ -938,6 +1016,21 @@ function renderNode(node: LayoutNode, params: RenderLayoutParams): string {
 
   if (type === 'divider') {
     return '<hr />';
+  }
+
+  if (type === 'spacer') {
+    const size = typeof node.size === 'string' ? node.size : 'md';
+    const height = size === 'sm' ? '0.75rem' : size === 'lg' ? '2rem' : '1.25rem';
+    return `<div class="form-spacer" style="min-height:${escapeAttr(height)};"></div>`;
+  }
+
+  if (type === 'attachments') {
+    const title = typeof node.title === 'string' && node.title.trim().length > 0 ? node.title : 'Attachments';
+    const text =
+      typeof node.text === 'string' && node.text.trim().length > 0
+        ? node.text
+        : 'Attachments and images are managed in the document workspace.';
+    return `<div class="card"><h3 class="card-title">${escapeHtml(title)}</h3><p class="muted">${escapeHtml(text)}</p></div>`;
   }
 
   if (type === 'field') {

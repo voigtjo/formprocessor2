@@ -2,13 +2,20 @@
   "name": "formprocessor2-tests",
   "private": true,
   "type": "module",
-  "engines": {"node": ">=20"},
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "vitest run",
-    "test:core-smoke": "vitest run e2e/core-v1-smoke.test.ts"
+    "test:core-smoke": "vitest run e2e/core-v1-smoke.test.ts",
+    "test:builder-happy-path": "playwright test e2e/builder-happy-path.spec.ts"
   },
   "devDependencies": {
+    "@fastify/formbody": "^8.0.2",
+    "@fastify/static": "^8.3.0",
+    "@playwright/test": "^1.58.2",
     "@types/node": "^20.14.10",
+    "fastify": "^5.8.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"
   }

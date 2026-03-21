@@ -43,6 +43,7 @@ Important files:
 - [tests/e2e/core-v1-smoke.test.ts](/Users/jvoigt/Projects/_formapps/formprocessor2/tests/e2e/core-v1-smoke.test.ts)
 - [tests/e2e/smoke.test.ts](/Users/jvoigt/Projects/_formapps/formprocessor2/tests/e2e/smoke.test.ts)
 - [tests/e2e/golden-path.test.ts](/Users/jvoigt/Projects/_formapps/formprocessor2/tests/e2e/golden-path.test.ts)
+- [tests/e2e/builder-happy-path.spec.ts](/Users/jvoigt/Projects/_formapps/formprocessor2/tests/e2e/builder-happy-path.spec.ts)
 
 ## Run automated smoke checks
 
@@ -59,6 +60,25 @@ Or via package script:
 cd /Users/jvoigt/Projects/_formapps/formprocessor2/tests
 npm run test:core-smoke
 ```
+
+Builder browser happy path:
+
+```bash
+cd /Users/jvoigt/Projects/_formapps/formprocessor2/tests
+npm run test:builder-happy-path
+```
+
+This browser test currently covers the template editor shell after the builder reset:
+- `/templates/new`
+- `Builder` tab shows the intentional empty state
+- `Preview` stays reachable
+- `JSON` stays reachable
+
+It also covers the same tab shell on an existing reference template:
+- open `production-batch` in `/templates/:id/edit`
+- `Builder` stays intentionally empty
+- `Preview` stays reachable
+- `JSON` stays reachable
 
 All tests workspace smoke:
 
@@ -105,6 +125,37 @@ What should be visible:
 7. template detail shows document table columns and document rows
 8. after assigning/submitting/approving in the UI, new notification JSON files appear in `app/var/notifications`
 9. the document detail page labels `Audit Trail / History` explicitly as the V1 audit trail
+
+## Template editor shell
+
+Prerequisites:
+
+```bash
+cd /Users/jvoigt/Projects/_formapps/formprocessor2/app
+npm run dev
+```
+
+Open:
+
+1. `/templates/new`
+
+Then:
+
+1. open `/templates/new`
+2. verify `Builder` shows `Builder intentionally cleared`
+3. switch to `Preview`
+4. verify the preview area is still visible
+5. switch to `JSON`
+6. verify `template_json` is editable/visible
+
+Existing template variant:
+
+1. open `/templates/<production-batch-id>/edit`
+2. verify `Builder` shows `Builder intentionally cleared`
+3. switch to `Preview`
+4. verify the stored template preview is visible
+5. switch to `JSON`
+6. verify the stored template JSON is visible
 
 ## E2E status
 
