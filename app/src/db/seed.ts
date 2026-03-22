@@ -20,12 +20,13 @@ import {
   fpWorkflows
 } from './schema.js';
 import { createLocalAttachmentStorage } from '../core/attachments.js';
+import { listConnectorOperations, toApiCatalogEntry } from '../connectors/registry.js';
 
 dotenv.config({ path: resolve(process.cwd(), '../.env') });
 
 type Db = ReturnType<typeof makeDb>['db'];
 
-const REFERENCE_WORKFLOW_KEYS = ['production.standard.v1', 'evidence.group-submit.v1'] as const;
+const REFERENCE_WORKFLOW_KEYS = ['production.standard.v1', 'evidence.group-submit.v1', 'customer-order.group-submit.v1'] as const;
 const REFERENCE_TEMPLATE_KEYS = ['evidence-basic', 'evidence-product-check', 'production-batch', 'customer-order-test'] as const;
 const REFERENCE_DOCUMENT_IDS = [
   '10000000-0000-0000-0000-000000000001',
@@ -429,10 +430,10 @@ function buildEvidenceGroupSubmitWorkflowJson() {
     initialStatus: 'created',
     order: ['created', 'assigned', 'submitted', 'approved', 'archived'],
     states: {
-      created: { buttons: ['assign'], editable: ['customer_id'], readonly: ['customer_order_number'] },
-      assigned: { buttons: ['submit'], editable: ['customer_id'], readonly: ['customer_order_number'] },
-      submitted: { buttons: ['approve'], editable: [], readonly: ['customer_id', 'customer_order_number'] },
-      approved: { buttons: ['archive'], editable: [], readonly: ['customer_id', 'customer_order_number'] },
+      created: { buttons: ['assign'], editable: ['customer_id', 'fulfillment_flags'], readonly: ['customer_order_number'] },
+      assigned: { buttons: ['submit'], editable: ['customer_id', 'fulfillment_flags'], readonly: ['customer_order_number'] },
+      submitted: { buttons: ['approve'], editable: [], readonly: ['customer_id', 'fulfillment_flags', 'customer_order_number'] },
+      approved: { buttons: ['archive'], editable: [], readonly: ['customer_id', 'fulfillment_flags', 'customer_order_number'] },
       archived: { buttons: [] }
     },
     semantics: {
@@ -443,6 +444,53 @@ function buildEvidenceGroupSubmitWorkflowJson() {
     actorModel: {
       editors: 'multiple',
       approvers: 'multiple'
+    }
+  } satisfies Record<string, unknown>;
+}
+
+function buildCustomerOrderWorkflowJson() {
+  return {
+    statuses: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+    initialStatus: 'created',
+    order: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+    states: {
+      created: { buttons: ['assign'], editable: ['customer_id', 'fulfillment_flags'], readonly: ['customer_order_number'] },
+      assigned: { buttons: ['submit'], editable: ['customer_id', 'fulfillment_flags'], readonly: ['customer_order_number'] },
+      submitted: { buttons: ['approve'], editable: [], readonly: ['customer_id', 'fulfillment_flags', 'customer_order_number'] },
+      approved: { buttons: ['archive'], editable: [], readonly: ['customer_id', 'fulfillment_flags', 'customer_order_number'] },
+      archived: { buttons: [] }
+    },
+    semantics: {
+      submit: 'individual',
+      approval: 'individual',
+      completionRule: 'all_required_approvers'
+    },
+    actorModel: {
+      editors: 'multiple',
+      approvers: 'multiple'
+    },
+    hooks: {
+      onTransition: [
+        {
+          from: 'submitted',
+          to: 'approved',
+          effects: [
+            {
+              operationRef: 'customerOrders.setStatusFromContext',
+              apiRef: 'customerOrders.setStatus',
+              request: {
+                status: 'approved'
+              },
+              responseMapping: {
+                snapshot: {
+                  customer_order_sync_ok: 'ok'
+                }
+              },
+              description: 'Sync ERP customer order status when the workflow is approved.'
+            }
+          ]
+        }
+      ]
     }
   } satisfies Record<string, unknown>;
 }
@@ -754,6 +802,7 @@ function buildCustomerOrderTemplateJson() {
       customer_id: {
         kind: 'lookup',
         label: 'Customer',
+        operationRef: 'customers.listValid',
         apiRef: 'customers.listValid',
         valueKey: 'id',
         labelKey: 'name',
@@ -810,6 +859,7 @@ function buildCustomerOrderTemplateJson() {
           { type: 'require', from: 'external.customer_id', message: 'Select a customer first.' },
           {
             type: 'callApi',
+            operationRef: 'customerOrders.create',
             apiRef: 'customerOrders.create',
             request: { customer_id: '{{external.customer_id}}' },
             to: 'vars.customerOrderResponse'
@@ -887,6 +937,14 @@ async function run() {
       state: 'active',
       workflowJson: buildEvidenceGroupSubmitWorkflowJson()
     });
+    const customerOrderWorkflow = await upsertWorkflow(db, {
+      key: 'customer-order.group-submit.v1',
+      version: 1,
+      name: 'Customer Order Group Submit V1',
+      description: 'Evidence-style review workflow with approval hook to sync external customer order status.',
+      state: 'active',
+      workflowJson: buildCustomerOrderWorkflowJson()
+    });
 
     const productionTemplateId = await upsertTemplateVersion(db, {
       key: 'production-batch',
@@ -930,50 +988,30 @@ async function run() {
       name: 'Customer Order Test',
       description: 'Reference template for evidence/customer-order workflow',
       state: 'published',
-      workflowRef: evidenceWorkflow.key,
+      workflowRef: customerOrderWorkflow.key,
       templateJson: buildCustomerOrderTemplateJson()
     });
     await clearTemplateMacroLinks(db, customerOrderTemplateId);
     await upsertTemplateAssignment(db, customerOrderTemplateId, opsId);
 
-    await upsertApi(db, {
-      key: 'products.listValid',
-      name: 'List Valid Products',
-      description: 'Fetch products with valid=true from ERP',
-      method: 'GET',
-      baseUrl: erpBaseUrl,
-      path: '/api/products',
-      requestSchemaJson: { query: { valid: true } }
-    });
-    await upsertApi(db, {
-      key: 'customers.listValid',
-      name: 'List Valid Customers',
-      description: 'Fetch customers with valid=true from ERP',
-      method: 'GET',
-      baseUrl: erpBaseUrl,
-      path: '/api/customers',
-      requestSchemaJson: { query: { valid: true } }
-    });
-    await upsertApi(db, {
-      key: 'customerOrders.create',
-      name: 'Create Customer Order',
-      description: 'Create customer order in ERP',
-      method: 'POST',
-      baseUrl: erpBaseUrl,
-      path: '/api/customer-orders',
-      requestSchemaJson: { body: { customer_id: 'uuid' } },
-      responseSchemaJson: { id: 'uuid', order_number: 'string', status: 'string' }
-    });
-    await upsertApi(db, {
-      key: 'batches.create',
-      name: 'Create Batch',
-      description: 'Create batch in ERP',
-      method: 'POST',
-      baseUrl: erpBaseUrl,
-      path: '/api/batches',
-      requestSchemaJson: { body: { product_id: 'uuid' } },
-      responseSchemaJson: { id: 'uuid', batch_number: 'string', status: 'string' }
-    });
+    for (const connectorOperation of listConnectorOperations().filter((item) =>
+      ['products.listValid', 'customers.listValid', 'customerOrders.create', 'customerOrders.setStatus', 'batches.create'].includes(item.ref)
+    )) {
+      const catalogEntry = toApiCatalogEntry(connectorOperation, {
+        defaultErpBaseUrl: erpBaseUrl,
+        env: process.env as Record<string, string | undefined>
+      });
+      await upsertApi(db, {
+        key: catalogEntry.key,
+        name: catalogEntry.name,
+        description: `[TS Connector] ${catalogEntry.description ?? catalogEntry.name}`,
+        method: catalogEntry.method,
+        baseUrl: catalogEntry.baseUrl ?? erpBaseUrl,
+        path: catalogEntry.path,
+        requestSchemaJson: catalogEntry.requestSchemaJson ?? null,
+        responseSchemaJson: catalogEntry.responseSchemaJson ?? null
+      });
+    }
 
     // A few stable reference documents make the recent V1 capabilities visible:
     // richer controls, journal, attachments, audit, approval flow and document tables.

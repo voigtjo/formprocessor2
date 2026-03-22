@@ -229,6 +229,41 @@ describe('action engine', () => {
     ).rejects.toThrow('API ref not found in catalog: api:erp/unknown@1');
   });
 
+  it('executes callApi via ts connector registry as the primary path', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ id: 'co-77', customer_id: 'c-1', order_number: 'CO-77', status: 'received' }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    const result = await executeActionDefinition({
+      actionDef: {
+        type: 'composite',
+        steps: [
+          {
+            type: 'callApi',
+            apiRef: 'customerOrders.create',
+            request: { customer_id: '{{external.customer_id}}' },
+            to: 'vars.customerOrderResponse'
+          },
+          { type: 'write', to: 'data.customer_order_number', value: '{{vars.customerOrderResponse.order_number}}' }
+        ]
+      },
+      context: {
+        doc: { id: 'doc-call-api-connector-1', status: 'created' },
+        data: {},
+        external: { customer_id: '11111111-1111-1111-1111-111111111111' },
+        snapshot: {}
+      },
+      erpBaseUrl: 'http://localhost:3001',
+      fetchImpl: fetchMock as unknown as typeof fetch
+    });
+
+    expect(result.dataJson.customer_order_number).toBe('CO-77');
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://localhost:3001/api/customer-orders');
+  });
+
   it('resolves callApi from fp_apis catalog when runtime db is provided', async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ ok: true }), {
@@ -242,7 +277,7 @@ describe('action engine', () => {
           where: () => ({
             limit: async () => [
               {
-                key: 'customerOrders.create',
+                key: 'bridge.customerOrdersCreate',
                 name: 'Create Customer Order',
                 description: null,
                 state: 'active',
@@ -262,8 +297,8 @@ describe('action engine', () => {
     await executeActionDefinition({
       actionDef: {
         type: 'callApi',
-        apiRef: 'customerOrders.create',
-        body: { customer_id: 'c-1' }
+        apiRef: 'bridge.customerOrdersCreate',
+        body: { customer_id: '11111111-1111-1111-1111-111111111111' }
       },
       context: {
         doc: { id: 'doc-call-api-db-1', status: 'created' },
@@ -285,7 +320,12 @@ describe('action engine', () => {
 
   it('executes api action type with response mapping and success message', async () => {
     const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ id: 'co-300', order_number: 'CO-300' }), {
+      new Response(JSON.stringify({
+        id: 'co-300',
+        customer_id: '11111111-1111-1111-1111-111111111111',
+        order_number: 'CO-300',
+        status: 'received'
+      }), {
         status: 201,
         headers: { 'content-type': 'application/json' }
       })
@@ -348,7 +388,12 @@ describe('action engine', () => {
 
   it('executes composite action with require + callApi(request,to) + write + message without macro', async () => {
     const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ id: 'co-901', order_number: 'CO-901' }), {
+      new Response(JSON.stringify({
+        id: 'co-901',
+        customer_id: '11111111-1111-1111-1111-111111111111',
+        order_number: 'CO-901',
+        status: 'received'
+      }), {
         status: 201,
         headers: { 'content-type': 'application/json' }
       })

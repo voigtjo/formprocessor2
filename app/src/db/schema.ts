@@ -106,6 +106,7 @@ export const fpDocuments = pgTable(
     dataJson: jsonb('data_json').notNull().default(sql`'{}'::jsonb`),
     externalRefsJson: jsonb('external_refs_json').notNull().default(sql`'{}'::jsonb`),
     snapshotsJson: jsonb('snapshots_json').notNull().default(sql`'{}'::jsonb`),
+    integrationContextJson: jsonb('integration_context_json').notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },

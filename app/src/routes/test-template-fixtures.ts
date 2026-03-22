@@ -294,6 +294,7 @@ export function buildV1LookupTemplateJson(fieldKey = 'customer_id', apiRef = 'cu
       [fieldKey]: {
         kind: 'lookup',
         label,
+        operationRef: apiRef,
         apiRef,
         valueKey: 'id',
         labelKey: 'name'
@@ -321,6 +322,7 @@ export function buildV1CustomerOrderTemplateJson() {
       customer_id: {
         kind: 'lookup',
         label: 'Customer',
+        operationRef: 'customers.listValid',
         apiRef: 'customers.listValid',
         valueKey: 'id',
         labelKey: 'name',
@@ -377,6 +379,7 @@ export function buildV1CustomerOrderTemplateJson() {
           { type: 'require', from: 'external.customer_id', message: 'Select a customer first.' },
           {
             type: 'callApi',
+            operationRef: 'customerOrders.create',
             apiRef: 'customerOrders.create',
             request: { customer_id: '{{external.customer_id}}' },
             to: 'vars.customerOrderResponse'

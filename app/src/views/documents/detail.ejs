@@ -1,6 +1,19 @@
 <%
   const shortId = String(document.id || '').slice(0, 8);
   const isArchived = String(document.status || '').toLowerCase() === 'archived';
+  const assignmentSummaryItems = [];
+  if (useMultiAssignments) {
+    (assignedEditorsDetailed || []).forEach((member) => {
+      assignmentSummaryItems.push(`${member.name}: Editor`);
+    });
+    (assignedApprovers || []).forEach((member) => {
+      assignmentSummaryItems.push(`${member.name}: Approver`);
+    });
+  } else {
+    if (assignmentEditorName) assignmentSummaryItems.push(`${assignmentEditorName}: Editor`);
+    if (assignmentApproverName) assignmentSummaryItems.push(`${assignmentApproverName}: Approver`);
+  }
+  const assignmentsSummary = assignmentSummaryItems.length ? assignmentSummaryItems.join(' · ') : '—';
 %>
 <header class="page-header">
   <h1><%= template.name %></h1>
@@ -19,183 +32,223 @@
     <strong>Archived document:</strong> This document is read-only.
   </div>
 <% } %>
-<section class="card">
-  <h3 class="card-title">Work Summary</h3>
-  <div class="summary-grid">
-    <article class="summary-card">
-      <div class="summary-label">Current status</div>
-      <div class="summary-value"><span class="badge badge-status"><%= document.status %></span></div>
-      <% if (workflowHint) { %><div class="muted"><%= workflowHint %></div><% } %>
-    </article>
-    <article class="summary-card">
-      <div class="summary-label">People</div>
-      <div class="summary-value"><%= assignmentEditorName || '—' %></div>
-      <div class="muted">Editors</div>
-      <div class="summary-value" style="margin-top:0.4rem;"><%= assignmentApproverName || '—' %></div>
-      <div class="muted">Approvers</div>
-    </article>
-    <article class="summary-card">
-      <div class="summary-label">Evidence</div>
-      <div class="summary-value"><%= attachmentCount || 0 %></div>
-      <div class="muted">Attachments</div>
-      <% if ((journalSummaries || []).length > 0) { %>
-        <div class="muted" style="margin-top:0.4rem;">
-          <% (journalSummaries || []).forEach((item, index) => { %>
-            <% if (index > 0) { %> · <% } %><%= item.label %>: <%= item.rowCount %>
-          <% }) %>
-        </div>
-      <% } %>
-    </article>
-    <article class="summary-card">
-      <div class="summary-label">Progress</div>
-      <% if (workflowEvaluation) { %>
-        <div class="muted">Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span></div>
-        <div class="muted">Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span></div>
-      <% } %>
+<section class="card document-section-card">
+  <details class="document-section-toggle" data-section-key="work-summary">
+    <summary class="document-section-summary">
+      <span class="document-section-title">Work Summary</span>
+      <span class="document-section-meta"><span class="badge badge-status"><%= document.status %></span></span>
+    </summary>
+    <div class="document-section-body">
+      <div class="summary-grid">
+        <article class="summary-card">
+          <div class="summary-label">Current status</div>
+          <div class="summary-value"><span class="badge badge-status"><%= document.status %></span></div>
+          <% if (workflowHint) { %><div class="muted"><%= workflowHint %></div><% } %>
+        </article>
+        <article class="summary-card">
+          <div class="summary-label">People</div>
+          <div class="summary-value"><%= assignmentEditorName || '—' %></div>
+          <div class="muted">Editors</div>
+          <div class="summary-value" style="margin-top:0.4rem;"><%= assignmentApproverName || '—' %></div>
+          <div class="muted">Approvers</div>
+        </article>
+        <article class="summary-card">
+          <div class="summary-label">Evidence</div>
+          <div class="summary-value"><%= attachmentCount || 0 %></div>
+          <div class="muted">Attachments</div>
+          <% if ((journalSummaries || []).length > 0) { %>
+            <div class="muted" style="margin-top:0.4rem;">
+              <% (journalSummaries || []).forEach((item, index) => { %>
+                <% if (index > 0) { %> · <% } %><%= item.label %>: <%= item.rowCount %>
+              <% }) %>
+            </div>
+          <% } %>
+        </article>
+        <article class="summary-card">
+          <div class="summary-label">Progress</div>
+          <% if (workflowEvaluation) { %>
+            <div class="muted">Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span></div>
+            <div class="muted">Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span></div>
+          <% } %>
+          <% if ((openWorkItems || []).length > 0) { %>
+            <div class="summary-value" style="margin-top:0.4rem;"><%= openWorkItems.length %></div>
+            <div class="muted">Open work items</div>
+          <% } %>
+        </article>
+      </div>
       <% if ((openWorkItems || []).length > 0) { %>
-        <div class="summary-value" style="margin-top:0.4rem;"><%= openWorkItems.length %></div>
-        <div class="muted">Open work items</div>
+        <div class="card muted-card">
+          <strong>Open work</strong>
+          <ul class="plain-list">
+            <% (openWorkItems || []).forEach((item) => { %>
+              <li><%= item %></li>
+            <% }) %>
+          </ul>
+        </div>
       <% } %>
-    </article>
-  </div>
-  <% if ((openWorkItems || []).length > 0) { %>
-    <div class="card muted-card">
-      <strong>Open work</strong>
-      <ul class="plain-list">
-        <% (openWorkItems || []).forEach((item) => { %>
-          <li><%= item %></li>
-        <% }) %>
-      </ul>
     </div>
-  <% } %>
+  </details>
 </section>
-<section class="card">
-  <h3 class="card-title">Actions</h3>
-  <p class="muted">Workflow actions move the document through the referenced workflow. In V1, assignment and workflow notifications are written to the Dev Outbox under <code>app/var/notifications</code>.</p>
-  <div class="action-section">
-    <div>
-      <div class="summary-label">Workflow actions</div>
-      <div class="actions">
-      <% if (!isArchived) { %>
-      <% (processButtons || []).forEach((button) => { %>
-        <button class="btn btn-primary" type="submit" form="document-form" formaction="/documents/<%= document.id %>/action/<%= button.key %>" formmethod="post"><%= button.label %></button>
-      <% }) %>
-      <% } %>
-      <% if (isArchived || !(processButtons || []).length) { %>
-        <span class="muted">No workflow action available right now.</span>
-      <% } %>
+<section class="card document-section-card">
+  <details class="document-section-toggle" data-section-key="actions">
+    <summary class="document-section-summary">
+      <span class="document-section-title">Actions</span>
+      <span class="document-section-meta">
+        <% if (!isArchived && (processButtons || []).length > 0) { %>
+          <span class="document-section-summary-actions">
+            <% (processButtons || []).forEach((button) => { %>
+              <button
+                class="btn btn-primary document-summary-action"
+                type="submit"
+                form="document-form"
+                formaction="/documents/<%= document.id %>/action/<%= button.key %>"
+                formmethod="post"
+                data-summary-action="true"
+              ><%= button.label %></button>
+            <% }) %>
+          </span>
+        <% } %>
+      </span>
+    </summary>
+    <div class="document-section-body">
+      <p class="muted">Workflow actions move the document through the referenced workflow. In V1, assignment and workflow notifications are written to the Dev Outbox under <code>app/var/notifications</code>.</p>
+      <div class="action-section">
+        <div>
+          <div class="summary-label">Workflow actions</div>
+          <div class="actions">
+          <% if (isArchived || !(processButtons || []).length) { %>
+            <span class="muted">No workflow action available right now.</span>
+          <% } %>
+          </div>
+        </div>
+        <div>
+          <div class="summary-label">Form actions</div>
+          <% if ((templateActionButtons || []).length > 0) { %>
+            <div class="muted">
+              <% (templateActionButtons || []).forEach((button, index) => { %>
+                <% if (index > 0) { %> · <% } %><%= button.label %>
+              <% }) %>
+            </div>
+            <p class="muted">Form actions are available inside the form where their field context is visible.</p>
+          <% } else { %>
+            <span class="muted">No additional form actions configured for this template.</span>
+          <% } %>
+        </div>
       </div>
     </div>
-    <div>
-      <div class="summary-label">Form actions</div>
-      <% if ((templateActionButtons || []).length > 0) { %>
-        <div class="muted">
-          <% (templateActionButtons || []).forEach((button, index) => { %>
-            <% if (index > 0) { %> · <% } %><%= button.label %>
-          <% }) %>
+  </details>
+</section>
+<section class="card document-section-card">
+  <details class="document-section-toggle" data-section-key="assignments">
+    <summary class="document-section-summary">
+      <span class="document-section-title">Assignments</span>
+      <span class="document-section-meta"><%= assignmentsSummary %></span>
+    </summary>
+    <div class="document-section-body">
+      <p class="muted">Editors: <strong><%= assignmentEditorName || '—' %></strong> · Approvers: <strong><%= assignmentApproverName || '—' %></strong></p>
+      <% if (workflowEvaluation) { %>
+        <p class="muted">
+          Submit mode: <span class="badge"><%= workflowEvaluation.submitMode %></span>
+          · Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span>
+          <% if (useMultiAssignments) { %> · <span><%= submittedEditorCount || 0 %>/<%= (assignedEditorsDetailed || []).length %> submitted</span><% } %>
+        </p>
+        <p class="muted">
+          Approval mode: <span class="badge"><%= workflowEvaluation.approvalMode %></span>
+          · Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span>
+          <% if (useMultiAssignments) { %> · <span><%= approvedApproverCount || 0 %>/<%= (assignedApprovers || []).length %> approved<% if ((rejectedApproverCount || 0) > 0) { %>, <%= rejectedApproverCount %> rejected<% } %></span><% } %>
+        </p>
+        <% if (workflowHint) { %>
+          <p><strong>Next step:</strong> <%= workflowHint %></p>
+        <% } %>
+      <% } %>
+      <% if (useMultiAssignments) { %>
+        <div class="row">
+          <div class="col col-6">
+            <label>Assigned Editors</label>
+            <% if ((assignedEditorsDetailed || []).length === 0) { %>
+              <p class="muted">—</p>
+            <% } %>
+            <% (assignedEditorsDetailed || []).forEach((member) => { %>
+              <form method="post" action="/documents/<%= document.id %>/assign/editor/remove" class="row">
+                <input type="hidden" name="userId" value="<%= member.id %>" />
+                <div class="col"><span><%= member.name %> (@<%= member.username %>) · <span class="badge"><%= member.submissionStatus %></span><% if (member.submittedAt) { %> · <span class="muted"><%= new Date(member.submittedAt).toLocaleString() %></span><% } %></span></div>
+                <% if (!isArchived) { %><div class="col"><button class="btn btn-secondary" type="submit">Remove</button></div><% } %>
+              </form>
+            <% }) %>
+          </div>
+          <div class="col col-6">
+            <label>Assigned Approvers</label>
+            <% if ((assignedApprovers || []).length === 0) { %>
+              <p class="muted">—</p>
+            <% } %>
+            <% (assignedApprovers || []).forEach((member) => { %>
+              <form method="post" action="/documents/<%= document.id %>/assign/approver/remove" class="row">
+                <input type="hidden" name="userId" value="<%= member.id %>" />
+                <div class="col"><span><%= member.name %> (@<%= member.username %>) · <span class="badge"><%= member.approvalStatus %></span><% if (member.decidedAt) { %> · <span class="muted"><%= new Date(member.decidedAt).toLocaleString() %></span><% } %></span></div>
+                <% if (!isArchived) { %><div class="col"><button class="btn btn-secondary" type="submit">Remove</button></div><% } %>
+              </form>
+            <% }) %>
+          </div>
         </div>
-        <p class="muted">Form actions are available inside the form where their field context is visible.</p>
+      <% } %>
+      <% if (isArchived) { %>
+        <p class="muted">Assignments are locked for archived documents.</p>
+      <% } else if (!hasDocumentActorColumns) { %>
+        <p class="muted">Assignments unavailable until DB migration is applied.</p>
+      <% } else if (!assignmentGroupId) { %>
+        <p class="muted">No group assigned</p>
       <% } else { %>
-        <span class="muted">No additional form actions configured for this template.</span>
+        <details <%= assignmentsOpen ? 'open' : '' %> data-section-key="change-assignments">
+          <summary class="btn btn-secondary"><%= hasAnyAssignments ? 'Change assignments' : 'Edit assignments' %></summary>
+          <form method="post" action="/documents/<%= document.id %>/assign/editor" class="row">
+            <div class="col col-6">
+              <label for="editor-user-id">Editor</label>
+              <select id="editor-user-id" name="userId">
+                <% (assignmentEditorCandidates || []).forEach((member) => { %>
+                  <option value="<%= member.id %>" <%= !useMultiAssignments && document.editorUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
+                <% }) %>
+              </select>
+              <% if (assignmentEditorHint) { %>
+                <p class="muted"><%= assignmentEditorHint %></p>
+              <% } %>
+            </div>
+            <div class="col">
+              <button class="btn btn-secondary" type="submit"><%= useMultiAssignments ? 'Add Editor' : 'Set Editor' %></button>
+            </div>
+          </form>
+          <form method="post" action="/documents/<%= document.id %>/assign/approver" class="row">
+            <div class="col col-6">
+              <label for="approver-user-id">Approver</label>
+              <select id="approver-user-id" name="userId">
+                <% (assignmentApproverCandidates || []).forEach((member) => { %>
+                  <option value="<%= member.id %>" <%= !useMultiAssignments && document.approverUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
+                <% }) %>
+              </select>
+              <% if (assignmentApproverHint) { %>
+                <p class="muted"><%= assignmentApproverHint %></p>
+              <% } %>
+            </div>
+            <div class="col">
+              <button class="btn btn-secondary" type="submit"><%= useMultiAssignments ? 'Add Approver' : 'Set Approver' %></button>
+            </div>
+          </form>
+        </details>
       <% } %>
     </div>
-  </div>
+  </details>
 </section>
 <section class="card">
-  <h3 class="card-title">Assignments</h3>
-  <p class="muted">Editors: <strong><%= assignmentEditorName || '—' %></strong> · Approvers: <strong><%= assignmentApproverName || '—' %></strong></p>
-  <% if (workflowEvaluation) { %>
-    <p class="muted">
-      Submit mode: <span class="badge"><%= workflowEvaluation.submitMode %></span>
-      · Submissions: <span class="badge"><%= workflowEvaluation.submissionState %></span>
-      <% if (useMultiAssignments) { %> · <span><%= submittedEditorCount || 0 %>/<%= (assignedEditorsDetailed || []).length %> submitted</span><% } %>
-    </p>
-    <p class="muted">
-      Approval mode: <span class="badge"><%= workflowEvaluation.approvalMode %></span>
-      · Approvals: <span class="badge"><%= workflowEvaluation.approvalState %></span>
-      <% if (useMultiAssignments) { %> · <span><%= approvedApproverCount || 0 %>/<%= (assignedApprovers || []).length %> approved<% if ((rejectedApproverCount || 0) > 0) { %>, <%= rejectedApproverCount %> rejected<% } %></span><% } %>
-    </p>
-    <% if (workflowHint) { %>
-      <p><strong>Next step:</strong> <%= workflowHint %></p>
-    <% } %>
-  <% } %>
-  <% if (useMultiAssignments) { %>
-    <div class="row">
-      <div class="col col-6">
-        <label>Assigned Editors</label>
-        <% if ((assignedEditorsDetailed || []).length === 0) { %>
-          <p class="muted">—</p>
-        <% } %>
-        <% (assignedEditorsDetailed || []).forEach((member) => { %>
-          <form method="post" action="/documents/<%= document.id %>/assign/editor/remove" class="row">
-            <input type="hidden" name="userId" value="<%= member.id %>" />
-            <div class="col"><span><%= member.name %> (@<%= member.username %>) · <span class="badge"><%= member.submissionStatus %></span><% if (member.submittedAt) { %> · <span class="muted"><%= new Date(member.submittedAt).toLocaleString() %></span><% } %></span></div>
-            <% if (!isArchived) { %><div class="col"><button class="btn btn-secondary" type="submit">Remove</button></div><% } %>
-          </form>
-        <% }) %>
-      </div>
-      <div class="col col-6">
-        <label>Assigned Approvers</label>
-        <% if ((assignedApprovers || []).length === 0) { %>
-          <p class="muted">—</p>
-        <% } %>
-        <% (assignedApprovers || []).forEach((member) => { %>
-          <form method="post" action="/documents/<%= document.id %>/assign/approver/remove" class="row">
-            <input type="hidden" name="userId" value="<%= member.id %>" />
-            <div class="col"><span><%= member.name %> (@<%= member.username %>) · <span class="badge"><%= member.approvalStatus %></span><% if (member.decidedAt) { %> · <span class="muted"><%= new Date(member.decidedAt).toLocaleString() %></span><% } %></span></div>
-            <% if (!isArchived) { %><div class="col"><button class="btn btn-secondary" type="submit">Remove</button></div><% } %>
-          </form>
-        <% }) %>
-      </div>
+  <div class="document-form-header">
+    <div>
+      <h3 class="card-title">Form</h3>
+      <p class="muted">Use the form below to capture the core document data, journal rows and any template-specific actions.</p>
     </div>
-  <% } %>
-  <% if (isArchived) { %>
-    <p class="muted">Assignments are locked for archived documents.</p>
-  <% } else if (!hasDocumentActorColumns) { %>
-    <p class="muted">Assignments unavailable until DB migration is applied.</p>
-  <% } else if (!assignmentGroupId) { %>
-    <p class="muted">No group assigned</p>
-  <% } else { %>
-    <details <%= assignmentsOpen ? 'open' : '' %>>
-      <summary class="btn btn-secondary"><%= hasAnyAssignments ? 'Change assignments' : 'Edit assignments' %></summary>
-      <form method="post" action="/documents/<%= document.id %>/assign/editor" class="row">
-        <div class="col col-6">
-          <label for="editor-user-id">Editor</label>
-          <select id="editor-user-id" name="userId">
-            <% (assignmentEditorCandidates || []).forEach((member) => { %>
-              <option value="<%= member.id %>" <%= !useMultiAssignments && document.editorUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
-            <% }) %>
-          </select>
-          <% if (assignmentEditorHint) { %>
-            <p class="muted"><%= assignmentEditorHint %></p>
-          <% } %>
-        </div>
-        <div class="col">
-          <button class="btn btn-secondary" type="submit"><%= useMultiAssignments ? 'Add Editor' : 'Set Editor' %></button>
-        </div>
-      </form>
-      <form method="post" action="/documents/<%= document.id %>/assign/approver" class="row">
-        <div class="col col-6">
-          <label for="approver-user-id">Approver</label>
-          <select id="approver-user-id" name="userId">
-            <% (assignmentApproverCandidates || []).forEach((member) => { %>
-              <option value="<%= member.id %>" <%= !useMultiAssignments && document.approverUserId === member.id ? 'selected' : '' %>><%= member.name %> (@<%= member.username %>)</option>
-            <% }) %>
-          </select>
-          <% if (assignmentApproverHint) { %>
-            <p class="muted"><%= assignmentApproverHint %></p>
-          <% } %>
-        </div>
-        <div class="col">
-          <button class="btn btn-secondary" type="submit"><%= useMultiAssignments ? 'Add Approver' : 'Set Approver' %></button>
-        </div>
-      </form>
-    </details>
-  <% } %>
-</section>
-<section class="card">
-  <h3 class="card-title">Form</h3>
-  <p class="muted">Use the form below to capture the core document data, journal rows and any template-specific actions.</p>
+    <% if (!isArchived) { %>
+      <div class="document-form-actions">
+        <button class="btn btn-secondary" type="submit" form="document-form">Save</button>
+      </div>
+    <% } %>
+  </div>
   <form id="document-form" method="post" action="/documents/<%= document.id %>/save" class="document-form-shell">
     <%- layoutHtml %>
   </form>
@@ -244,29 +297,43 @@
     </div>
   <% } %>
 </section>
-<section class="card">
-  <h3 class="card-title">Audit Trail / History</h3>
-  <p class="muted">This is the document-level audit trail in V1. It records workflow events, form changes, journal changes and attachment activity.</p>
-  <% if (!hasDocumentAuditTrail) { %>
-    <p class="muted">Audit trail is unavailable until the DB migration is applied.</p>
-  <% } else if ((auditEvents || []).length === 0) { %>
-    <p class="muted">No history entries yet.</p>
-  <% } else { %>
-    <div class="activity-list">
-      <% (auditEvents || []).forEach((event) => { %>
-        <article class="activity-item">
-          <div class="activity-item-header">
-            <strong><%= event.summary %></strong>
-            <span class="badge"><%= event.eventType %></span>
-          </div>
-          <div class="muted">
-            <%= event.actorDisplay || 'System' %>
-            <% if (event.createdAt) { %> · <%= new Date(event.createdAt).toLocaleString() %><% } %>
-          </div>
-        </article>
-      <% }) %>
+<section class="card document-section-card">
+  <details class="document-section-toggle" data-section-key="audit-history">
+    <summary class="document-section-summary">
+      <span class="document-section-title">Audit Trail / History</span>
+    </summary>
+    <div class="document-section-body">
+      <p class="muted">This is the document-level audit trail in V1. It records workflow events, form changes, journal changes and attachment activity.</p>
+      <% if (!hasDocumentAuditTrail) { %>
+        <p class="muted">Audit trail is unavailable until the DB migration is applied.</p>
+      <% } else if ((auditEvents || []).length === 0) { %>
+        <p class="muted">No history entries yet.</p>
+      <% } else { %>
+        <div class="journal-wrapper">
+          <table class="document-history-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Actor</th>
+                <th>Type</th>
+                <th>Summary</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% (auditEvents || []).forEach((event) => { %>
+                <tr>
+                  <td><%= event.createdAt ? new Date(event.createdAt).toLocaleString() : '—' %></td>
+                  <td><%= event.actorDisplay || 'System' %></td>
+                  <td><span class="badge"><%= event.eventType %></span></td>
+                  <td><%= event.summary %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      <% } %>
     </div>
-  <% } %>
+  </details>
 </section>
 <% if (errorMessage) { %>
   <div class="card error-card">
@@ -311,6 +378,59 @@
     var url = submitter.getAttribute('formaction') || form.getAttribute('action') || '';
     console.log('[fp] submit action ' + actionKey + ' kind=' + kind + ' url=' + url);
   });
+
+  document.addEventListener('click', function (event) {
+    var target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    var summaryAction = target.closest('[data-summary-action="true"]');
+    if (!(summaryAction instanceof HTMLElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (summaryAction instanceof HTMLButtonElement) {
+      summaryAction.form?.requestSubmit(summaryAction);
+    }
+  });
+
+  (function () {
+    var docKey = 'fp-document-section:' + <%- JSON.stringify(String(document.id || '')) %> + ':';
+    var detailsNodes = Array.prototype.slice.call(document.querySelectorAll('details[data-section-key]'));
+
+    function storageKey(key) {
+      return docKey + key;
+    }
+
+    function closeChildSections(parent) {
+      Array.prototype.slice.call(parent.querySelectorAll('details[data-section-key]')).forEach(function (child) {
+        if (!(child instanceof HTMLDetailsElement) || child === parent) return;
+        child.open = false;
+        var childKey = child.getAttribute('data-section-key');
+        if (childKey) {
+          window.localStorage.setItem(storageKey(childKey), 'closed');
+        }
+      });
+    }
+
+    detailsNodes.forEach(function (node) {
+      if (!(node instanceof HTMLDetailsElement)) return;
+      var key = node.getAttribute('data-section-key');
+      if (!key) return;
+      var saved = window.localStorage.getItem(storageKey(key));
+      if (saved === 'open') {
+        node.open = true;
+      } else if (saved === 'closed') {
+        node.open = false;
+      } else if (node.open) {
+        window.localStorage.setItem(storageKey(key), 'open');
+      }
+
+      node.addEventListener('toggle', function () {
+        window.localStorage.setItem(storageKey(key), node.open ? 'open' : 'closed');
+        if (!node.open) {
+          closeChildSections(node);
+        }
+      });
+    });
+  })();
 
   (function () {
     var input = document.getElementById('attachment-upload-input');

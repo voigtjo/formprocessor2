@@ -2,6 +2,8 @@ import { eq } from 'drizzle-orm';
 import { fpMacros } from '../db/schema.js';
 import { resolveApiBaseUrl, resolveApiCatalogEntry } from './api-catalog.js';
 import { normalizeDocumentStatus } from '../domain/status-model.js';
+import { executeConnectorOperation, resolveConnectorOperation } from '../connectors/registry.js';
+import type { ConnectorCredentials } from '../connectors/types.js';
 import {
   macroLegacyNameToRef,
   macroRegistryByRef,
@@ -16,6 +18,7 @@ export type ActionContext = {
   data: Record<string, unknown>;
   external: Record<string, unknown>;
   snapshot: Record<string, unknown>;
+  integration: Record<string, unknown>;
   vars: Record<string, unknown>;
 };
 
@@ -52,7 +55,8 @@ export type ActionStep =
     }
   | {
       type: 'callApi';
-      apiRef: string;
+      operationRef?: string;
+      apiRef?: string;
       method?: string;
       request?: unknown;
       body?: unknown;
@@ -60,13 +64,15 @@ export type ActionStep =
     }
   | {
       type: 'api';
-      apiRef: string;
+      operationRef?: string;
+      apiRef?: string;
       method?: string;
       requestMapping?: unknown;
       responseMapping?: {
         data?: Record<string, string>;
         external?: Record<string, string>;
         snapshot?: Record<string, string>;
+        integration?: Record<string, string>;
         status?: string;
       } & Record<string, unknown>;
       successMessage?: string;
@@ -94,12 +100,14 @@ export type ActionExecutionResult = {
   dataJson: Record<string, unknown>;
   externalRefsJson: Record<string, unknown>;
   snapshotsJson: Record<string, unknown>;
+  integrationContextJson: Record<string, unknown>;
   macroLogs?: Array<{
     ref: string;
     patchKeys: {
       data: string[];
       external: string[];
       snapshot: string[];
+      integration: string[];
       status?: string;
     };
   }>;
@@ -161,11 +169,13 @@ function resolveToken(token: string, context: ActionContext) {
         ? context.data
         : scope === 'external'
           ? context.external
-          : scope === 'snapshot'
-            ? context.snapshot
-            : scope === 'vars'
-              ? context.vars
-            : undefined;
+            : scope === 'snapshot'
+              ? context.snapshot
+              : scope === 'integration'
+                ? context.integration
+              : scope === 'vars'
+                ? context.vars
+                : undefined;
 
   if (!source) {
     throw new Error(`Unsupported interpolation scope: ${scope}`);
@@ -254,7 +264,11 @@ async function resolveApiInvocation(
       body: unknown;
     } {
   if (step.type === 'callApi' || step.type === 'api') {
-    const entry = await resolveApiCatalogEntry(step.apiRef, runtimeDb);
+    const apiRef = typeof step.apiRef === 'string' ? step.apiRef.trim() : '';
+    if (!apiRef) {
+      throw new Error('Legacy apiRef bridge is missing for custom API invocation');
+    }
+    const entry = await resolveApiCatalogEntry(apiRef, runtimeDb);
     const requestBody = step.type === 'api' ? step.requestMapping : (step.request ?? step.body);
     return {
       source: 'template-api',
@@ -275,14 +289,122 @@ async function resolveApiInvocation(
   };
 }
 
+function resolveOperationReference(step: Extract<ActionStep, { type: 'callApi' | 'api' }>) {
+  const operationRef = typeof step.operationRef === 'string' ? step.operationRef.trim() : '';
+  if (operationRef) return operationRef;
+  const apiRef = typeof step.apiRef === 'string' ? step.apiRef.trim() : '';
+  if (apiRef) return apiRef;
+  throw new Error(`${step.type} step is missing operationRef`);
+}
+
 async function executeApiAction(
   step: ApiActionStep,
   context: ActionContext,
   erpBaseUrl: string,
   fetchImpl: typeof fetch,
   initialDocStatus: string,
-  runtimeDb?: unknown
+  runtimeDb?: unknown,
+  connectorRuntime?: {
+    credentials?: Record<string, ConnectorCredentials | undefined>;
+    env?: Record<string, string | undefined>;
+  }
 ) {
+  const connectorOperation =
+    step.type === 'callApi' || step.type === 'api' ? resolveConnectorOperation(resolveOperationReference(step)) : null;
+  if (connectorOperation) {
+    const requestPayload = step.type === 'api' ? step.requestMapping : (step.request ?? step.body);
+    const resolvedInput = interpolateValue(requestPayload ?? {}, context);
+    const ref = resolveOperationReference(step);
+    const connectorResult = await executeConnectorOperation({
+      ref,
+      input: resolvedInput,
+      runtime: {
+        defaultErpBaseUrl: erpBaseUrl,
+        fetchImpl,
+        credentials: connectorRuntime?.credentials,
+        env: connectorRuntime?.env,
+        context: {
+          document: {
+            id: context.doc.id,
+            status: context.doc.status
+          },
+          data: { ...context.data },
+          external: { ...context.external },
+          snapshot: { ...context.snapshot },
+          integration: { ...context.integration }
+        }
+      }
+    });
+    const responsePayload =
+      connectorResult.output && typeof connectorResult.output === 'object'
+        ? (connectorResult.output as Record<string, unknown>)
+        : undefined;
+    const patch: {
+      dataJson?: Record<string, unknown>;
+      externalRefsJson?: Record<string, unknown>;
+      snapshotsJson?: Record<string, unknown>;
+      integrationContextJson?: Record<string, unknown>;
+      status?: string;
+    } = {};
+
+    if (step.type === 'api' && responsePayload && step.responseMapping && typeof step.responseMapping === 'object') {
+      const mappedPatch = applyApiResponseMapping(step.responseMapping, responsePayload);
+      if (Object.keys(mappedPatch.dataJson).length > 0) patch.dataJson = mappedPatch.dataJson;
+      if (Object.keys(mappedPatch.externalRefsJson).length > 0) patch.externalRefsJson = mappedPatch.externalRefsJson;
+      if (Object.keys(mappedPatch.snapshotsJson).length > 0) patch.snapshotsJson = mappedPatch.snapshotsJson;
+      if (typeof mappedPatch.status === 'string' && mappedPatch.status.trim().length > 0) {
+        patch.status = mappedPatch.status;
+      }
+    }
+    if (connectorResult.patch?.dataJson) {
+      patch.dataJson = {
+        ...(patch.dataJson ?? {}),
+        ...connectorResult.patch.dataJson
+      };
+    }
+    if (connectorResult.patch?.externalRefsJson) {
+      patch.externalRefsJson = {
+        ...(patch.externalRefsJson ?? {}),
+        ...connectorResult.patch.externalRefsJson
+      };
+    }
+    if (connectorResult.patch?.snapshotsJson) {
+      patch.snapshotsJson = {
+        ...(patch.snapshotsJson ?? {}),
+        ...connectorResult.patch.snapshotsJson
+      };
+    }
+    if (connectorResult.patch?.integrationContextJson) {
+      patch.integrationContextJson = {
+        ...(patch.integrationContextJson ?? {}),
+        ...connectorResult.patch.integrationContextJson
+      };
+    }
+    if (!patch.status && typeof connectorResult.patch?.status === 'string' && connectorResult.patch.status.trim().length > 0) {
+      patch.status = connectorResult.patch.status;
+    }
+
+    const message =
+      step.type === 'api' &&
+      typeof step.successMessage === 'string' &&
+      step.successMessage.trim().length > 0 &&
+      responsePayload
+        ? interpolateResponseString(step.successMessage, responsePayload)
+        : undefined;
+
+    console.info('[fp] connector action executed', {
+      source: 'ts-connector',
+      connector: connectorOperation.connector.key,
+      operation: connectorOperation.ref
+    });
+
+    return {
+      ...(message ? { message } : {}),
+      patch,
+      responsePayload
+    };
+  }
+
   const invocation = await resolveApiInvocation(step, context, runtimeDb);
   const method = invocation.method;
   const path = invocation.path;
@@ -337,6 +459,7 @@ async function executeApiAction(
     dataJson?: Record<string, unknown>;
     externalRefsJson?: Record<string, unknown>;
     snapshotsJson?: Record<string, unknown>;
+    integrationContextJson?: Record<string, unknown>;
     status?: string;
   } = {};
 
@@ -403,21 +526,30 @@ function applyApiResponseMapping(mapping: Record<string, unknown>, responsePaylo
     dataJson: {} as Record<string, unknown>,
     externalRefsJson: {} as Record<string, unknown>,
     snapshotsJson: {} as Record<string, unknown>,
+    integrationContextJson: {} as Record<string, unknown>,
     status: undefined as string | undefined
   };
 
   const scopedDataPatch = applyApiMappingScope(mapping.data as Record<string, string> | undefined, responsePayload);
   const scopedExternalPatch = applyApiMappingScope(mapping.external as Record<string, string> | undefined, responsePayload);
   const scopedSnapshotPatch = applyApiMappingScope(mapping.snapshot as Record<string, string> | undefined, responsePayload);
+  const scopedIntegrationPatch = applyApiMappingScope(mapping.integration as Record<string, string> | undefined, responsePayload);
   Object.assign(patch.dataJson, scopedDataPatch);
   Object.assign(patch.externalRefsJson, scopedExternalPatch);
   Object.assign(patch.snapshotsJson, scopedSnapshotPatch);
+  Object.assign(patch.integrationContextJson, scopedIntegrationPatch);
   if (typeof mapping.status === 'string' && mapping.status.trim().length > 0) {
     patch.status = String(resolveMappingValue(mapping.status, responsePayload));
   }
 
   for (const [targetPath, sourcePath] of Object.entries(mapping)) {
-    if (targetPath === 'data' || targetPath === 'external' || targetPath === 'snapshot' || targetPath === 'status') {
+    if (
+      targetPath === 'data' ||
+      targetPath === 'external' ||
+      targetPath === 'snapshot' ||
+      targetPath === 'integration' ||
+      targetPath === 'status'
+    ) {
       continue;
     }
     if (typeof sourcePath !== 'string') continue;
@@ -432,6 +564,10 @@ function applyApiResponseMapping(mapping: Record<string, unknown>, responsePaylo
     }
     if (targetPath.startsWith('snapshot.')) {
       patch.snapshotsJson[targetPath.slice('snapshot.'.length)] = value;
+      continue;
+    }
+    if (targetPath.startsWith('integration.')) {
+      patch.integrationContextJson[targetPath.slice('integration.'.length)] = value;
       continue;
     }
     if (targetPath === 'status') {
@@ -518,6 +654,8 @@ function resolveScopedValue(actionContext: ActionContext, from: string) {
         ? actionContext.external
         : scope === 'snapshot'
           ? actionContext.snapshot
+          : scope === 'integration'
+            ? actionContext.integration
           : scope === 'doc'
             ? (actionContext.doc as unknown as Record<string, unknown>)
             : scope === 'vars'
@@ -550,6 +688,8 @@ function writeScopedValue(actionContext: ActionContext, to: string, value: unkno
         ? actionContext.external
         : scope === 'snapshot'
           ? actionContext.snapshot
+          : scope === 'integration'
+            ? actionContext.integration
           : scope === 'vars'
             ? actionContext.vars
             : undefined;
@@ -663,10 +803,11 @@ function applyTemplateActionStep(step: TemplateActionStep, actionContext: Action
 }
 
 function applyMacroResult(
-  result: MacroResult | void,
+  result: (MacroResult & { integrationContextJson?: Record<string, unknown> }) | void,
   nextData: Record<string, unknown>,
   nextExternal: Record<string, unknown>,
-  nextSnapshot: Record<string, unknown>
+  nextSnapshot: Record<string, unknown>,
+  nextIntegration: Record<string, unknown>
 ) {
   if (!result) return;
 
@@ -679,17 +820,22 @@ function applyMacroResult(
   if (result.snapshotsJson) {
     Object.assign(nextSnapshot, result.snapshotsJson);
   }
+  if (result.integrationContextJson) {
+    Object.assign(nextIntegration, result.integrationContextJson);
+  }
 }
 
 function applyMacroPatch(
-  patch: MacroPatchContext,
+  patch: MacroPatchContext & { integrationContextJson?: Record<string, unknown> },
   nextData: Record<string, unknown>,
   nextExternal: Record<string, unknown>,
-  nextSnapshot: Record<string, unknown>
+  nextSnapshot: Record<string, unknown>,
+  nextIntegration: Record<string, unknown>
 ) {
   Object.assign(nextData, patch.dataJson);
   Object.assign(nextExternal, patch.externalRefsJson);
   Object.assign(nextSnapshot, patch.snapshotsJson);
+  Object.assign(nextIntegration, patch.integrationContextJson ?? {});
 }
 
 function resolveMacroRef(step: Extract<ActionStep, { type: 'macro' }>) {
@@ -808,10 +954,11 @@ async function executeLegacyMacroAction(params: {
   const macroName = parsed?.[2] ?? macroRef;
   const macroVersion = parsed?.[3] ? Number(parsed[3]) : null;
 
-  const macroPatch: MacroPatchContext = {
+  const macroPatch: MacroPatchContext & { integrationContextJson?: Record<string, unknown> } = {
     dataJson: {},
     externalRefsJson: {},
-    snapshotsJson: {}
+    snapshotsJson: {},
+    integrationContextJson: {}
   };
   const erpPost = async <T = unknown>(path: string, body: unknown) => {
     const url = new URL(path, params.erpBaseUrl).toString();
@@ -940,6 +1087,10 @@ async function executeCompositeAction(params: {
   context: ActionContext;
   erpBaseUrl: string;
   fetchImpl?: typeof fetch;
+  connectorRuntime?: {
+    credentials?: Record<string, ConnectorCredentials | undefined>;
+    env?: Record<string, string | undefined>;
+  };
   macroContext?: {
     db: unknown;
     templateJson: unknown;
@@ -965,6 +1116,7 @@ async function executeCompositeAction(params: {
   const nextData = { ...params.context.data };
   const nextExternal = { ...params.context.external };
   const nextSnapshot = { ...params.context.snapshot };
+  const nextIntegration = { ...params.context.integration };
   const macroLogs: NonNullable<ActionExecutionResult['macroLogs']> = [];
   let nextStatus = params.context.doc.status;
   let resultMessage: string | undefined;
@@ -974,6 +1126,7 @@ async function executeCompositeAction(params: {
     data: nextData,
     external: nextExternal,
     snapshot: nextSnapshot,
+    integration: nextIntegration,
     vars: {}
   };
 
@@ -1007,11 +1160,13 @@ async function executeCompositeAction(params: {
         params.erpBaseUrl,
         fetchImpl,
         params.context.doc.status,
-        params.macroContext?.db
+        params.macroContext?.db,
+        params.connectorRuntime
       );
       if (apiResult?.patch?.dataJson) Object.assign(nextData, apiResult.patch.dataJson);
       if (apiResult?.patch?.externalRefsJson) Object.assign(nextExternal, apiResult.patch.externalRefsJson);
       if (apiResult?.patch?.snapshotsJson) Object.assign(nextSnapshot, apiResult.patch.snapshotsJson);
+      if (apiResult?.patch?.integrationContextJson) Object.assign(nextIntegration, apiResult.patch.integrationContextJson);
       if (typeof apiResult?.patch?.status === 'string' && apiResult.patch.status.trim().length > 0) {
         nextStatus = normalizeDocumentStatus(apiResult.patch.status);
         actionContext.doc.status = nextStatus;
@@ -1043,8 +1198,8 @@ async function executeCompositeAction(params: {
       const macroPatch = legacyMacroResult.macroPatch;
       const macroResult = legacyMacroResult.macroResult;
 
-      applyMacroPatch(macroPatch, nextData, nextExternal, nextSnapshot);
-      applyMacroResult(macroResult, nextData, nextExternal, nextSnapshot);
+      applyMacroPatch(macroPatch, nextData, nextExternal, nextSnapshot, nextIntegration);
+      applyMacroResult(macroResult, nextData, nextExternal, nextSnapshot, nextIntegration);
       if (typeof macroResult?.message === 'string' && macroResult.message.trim().length > 0) {
         resultMessage = macroResult.message.trim();
       }
@@ -1054,6 +1209,7 @@ async function executeCompositeAction(params: {
           data: Object.keys(macroPatch.dataJson),
           external: Object.keys(macroPatch.externalRefsJson),
           snapshot: Object.keys(macroPatch.snapshotsJson),
+          integration: Object.keys(macroPatch.integrationContextJson ?? {}),
           ...(macroPatch.status ? { status: macroPatch.status } : {})
         }
       });
@@ -1079,6 +1235,7 @@ async function executeCompositeAction(params: {
     dataJson: nextData,
     externalRefsJson: nextExternal,
     snapshotsJson: nextSnapshot,
+    integrationContextJson: nextIntegration,
     macroLogs
   };
 }
@@ -1088,6 +1245,10 @@ export async function executeActionDefinition(params: {
   context: ActionContext;
   erpBaseUrl: string;
   fetchImpl?: typeof fetch;
+  connectorRuntime?: {
+    credentials?: Record<string, ConnectorCredentials | undefined>;
+    env?: Record<string, string | undefined>;
+  };
   macroContext?: {
     db: unknown;
     templateJson: unknown;

@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { resolveApiCatalogEntry } from './actions/api-catalog.js';
 import { resolveServiceBaseUrl } from './services/service-registry.js';
 import { executeIntegrationRequest } from './core/integration-client.js';
+import { resolveConnectorOperation } from './connectors/registry.js';
+import { resolveConnectorBaseUrl } from './connectors/runtime.js';
 
 const templateTokenRegex = /\{\{external\.([a-zA-Z0-9_]+)\}\}/g;
 const templateTokenDetectRegex = /\{\{external\.[a-zA-Z0-9_]+\}\}/;
@@ -100,7 +102,7 @@ export function normalizeLookupSource(field: any): LookupSource {
   const lookup = field?.lookup;
   // Legacy fallback: historical templates used `lookup.endpoint` instead of `source`.
   if (!lookup?.endpoint || typeof lookup.endpoint !== 'string') {
-    throw new Error('Lookup field source is missing (use apiRef as primary model)');
+    throw new Error('Lookup field source is missing (use operationRef as primary model)');
   }
 
   const endpointUrl = new URL(lookup.endpoint, 'http://placeholder.local');
@@ -129,19 +131,66 @@ function inferLookupService(baseUrl: string | undefined) {
 }
 
 export async function resolveLookupSource(field: any, context?: LookupResolveContext): Promise<LookupSource> {
-  // Primary model: lookup fields should use apiRef.
+  // Primary model: lookup fields should use operationRef.
   // Legacy compatibility (fallback only): source / lookup.endpoint.
-  const apiRef = typeof field?.apiRef === 'string' ? field.apiRef.trim() : '';
-  if (!apiRef) {
+  const operationRef =
+    typeof field?.operationRef === 'string' && field.operationRef.trim().length > 0
+      ? field.operationRef.trim()
+      : typeof field?.apiRef === 'string'
+        ? field.apiRef.trim()
+        : '';
+  if (!operationRef) {
     return normalizeLookupSource(field);
   }
 
+  const connectorOperation = resolveConnectorOperation(operationRef);
+  if (connectorOperation) {
+    if (connectorOperation.metadata.method !== 'GET') {
+      throw new Error(`Lookup operationRef must use GET: ${operationRef}`);
+    }
+
+    const rawQuery = connectorOperation.metadata.requestShape?.query;
+    const query: Record<string, string> = {};
+    if (rawQuery && typeof rawQuery === 'object' && !Array.isArray(rawQuery)) {
+      for (const [key, value] of Object.entries(rawQuery)) {
+        query[key] = normalizeQueryValue(value);
+      }
+    }
+
+    const baseUrl =
+      connectorOperation.connector.baseUrl.source === 'service-registry'
+        ? undefined
+        : resolveConnectorBaseUrl(connectorOperation.connector, {
+            defaultErpBaseUrl: process.env.FP_ERP_BASE_URL ?? 'http://localhost:3001',
+            env: process.env as Record<string, string | undefined>
+          });
+
+    return sourceSchema.parse({
+      service:
+        connectorOperation.connector.baseUrl.source === 'service-registry'
+          ? 'erp'
+          : inferLookupService(baseUrl),
+      method: 'GET',
+      path: connectorOperation.metadata.path,
+      baseUrl,
+      query,
+      valueField: field?.valueField,
+      labelField: field?.labelField,
+      valueKey: field?.valueKey ?? connectorOperation.metadata.lookup?.valueKey,
+      labelKey: field?.labelKey ?? connectorOperation.metadata.lookup?.labelKey
+    });
+  }
+
+  const apiRef = typeof field?.apiRef === 'string' ? field.apiRef.trim() : '';
+  if (!apiRef) {
+    throw new Error(`Lookup operationRef is not registered: ${operationRef}`);
+  }
   const entry = await resolveApiCatalogEntry(apiRef, context?.db);
   const method = String(entry.method ?? 'GET')
     .trim()
     .toUpperCase();
   if (method !== 'GET') {
-    throw new Error(`Lookup apiRef must use GET: ${apiRef}`);
+    throw new Error(`Lookup operationRef must use GET: ${operationRef}`);
   }
 
   const requestSchema = entry.requestSchemaJson;

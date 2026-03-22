@@ -790,9 +790,9 @@
 
   function resolvePreviewColumnWidthStyle(width) {
     var asNumber = typeof width === 'number' ? width : Number(String(width || '').trim());
-    if (!Number.isFinite(asNumber)) return '--col-span:12;--col-basis:100%;';
+    if (!Number.isFinite(asNumber)) return 'grid-column:span 12;--col-span:12;--col-basis:100%;';
     var clamped = Math.max(1, Math.min(12, Math.round(asNumber)));
-    return '--col-span:' + clamped + ';--col-basis:' + ((clamped / 12) * 100) + '%;';
+    return 'grid-column:span ' + clamped + ';--col-span:' + clamped + ';--col-basis:' + ((clamped / 12) * 100) + '%;';
   }
 
   function renderPreviewOptions(options, inputType) {
@@ -893,7 +893,7 @@
   }
 
   function renderCellMiniPreview(cell, state) {
-    return '<div class="builder-canvas-cell-preview">' + renderPreviewCell(cell, state) + '</div>';
+    return '<div class="builder-canvas-cell-preview builder-canvas-cell-preview--' + escapeHtml(cell.contentType) + '">' + renderPreviewCell(cell, state) + '</div>';
   }
 
   function getSelectedRowIndex(selection) {
@@ -1156,14 +1156,14 @@
 
   function renderFormCell(rowIndex, cell, cellIndex, state, readonly, selected) {
     return '' +
-      '<article class="builder-subcard builder-cell-card' + (selected ? ' is-selected' : '') + '">' +
-      '<button class="builder-canvas-select" type="button" data-builder-select-cell="' + rowIndex + '.' + cellIndex + '">' +
+      '<article class="builder-subcard builder-cell-card builder-cell-card--' + escapeHtml(cell.contentType) + (selected ? ' is-selected' : '') + '">' +
+      '<div class="builder-canvas-select" role="button" tabindex="0" data-builder-select-cell="' + rowIndex + '.' + cellIndex + '">' +
           '<div class="builder-cell-badge-row">' +
           '<span class="builder-cell-badge">Cell ' + (cellIndex + 1) + '</span>' +
           '<span class="builder-cell-meta">' + escapeHtml(cell.contentType) + ' · ' + escapeHtml(cell.width) + '/12 · ' + escapeHtml(cell.align) + '</span>' +
         '</div>' +
         renderCellMiniPreview(cell, state) +
-      '</button>' +
+      '</div>' +
       '</article>';
   }
 
@@ -1181,7 +1181,7 @@
       '</div>' +
       '<div class="builder-canvas-row" style="min-height:' + escapeHtml(Math.max(48, Number(row.height || 80))) + 'px">' + (row.cells || []).map(function (cell, cellIndex) {
         var isCellSelected = selection && selection.kind === 'cell' && selection.rowIndex === rowIndex && selection.cellIndex === cellIndex;
-        return '<div class="builder-canvas-col" style="' + resolvePreviewColumnWidthStyle(cell.width) + '">' +
+        return '<div class="builder-canvas-col builder-canvas-col--' + escapeHtml(cell.contentType) + '" style="' + resolvePreviewColumnWidthStyle(cell.width) + '">' +
           renderFormCell(rowIndex, cell, cellIndex, state, readonly, isCellSelected) +
         '</div>';
       }).join('') + '</div>' +

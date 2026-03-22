@@ -56,6 +56,7 @@ import {
   type EditorSubmissionState,
   type ApproverDecisionState
 } from '../domain/workflow-runtime.js';
+import { executeWorkflowHookEffects } from '../domain/workflow-hooks.js';
 
 type UiRouteOptions = {
   db: FpDb;
@@ -400,6 +401,8 @@ type DocumentAuditEventType =
   | 'rejected'
   | 'status_changed'
   | 'action_executed'
+  | 'workflow_hook_executed'
+  | 'workflow_hook_failed'
   | 'attachment_uploaded'
   | 'attachment_removed'
   | 'journal_row_added'
@@ -910,7 +913,8 @@ const workflowJsonSchema = z.object({
   order: z.array(z.string()).optional(),
   states: z.record(z.any()).optional(),
   semantics: z.record(z.any()).optional(),
-  actorModel: z.record(z.any()).optional()
+  actorModel: z.record(z.any()).optional(),
+  hooks: z.record(z.any()).optional()
 });
 
 function parseWorkflowJson(raw: unknown): WorkflowRuntimeModel {
@@ -923,7 +927,8 @@ function parseWorkflowJson(raw: unknown): WorkflowRuntimeModel {
     initialStatus: parsed.data.initialStatus,
     states: parsed.data.states,
     semantics: parsed.data.semantics as Record<string, unknown> | undefined,
-    actorModel: parsed.data.actorModel as Record<string, unknown> | undefined
+    actorModel: parsed.data.actorModel as Record<string, unknown> | undefined,
+    hooks: parsed.data.hooks
   });
 }
 
@@ -1964,11 +1969,20 @@ export function resolveEditableFieldKeys(
   const fallback = allEditableFieldKeys(templateJson);
   const workflowState = resolveWorkflowFieldAccessState(workflowRuntime, status);
   const state = Object.keys(workflowState).length > 0 ? workflowState : resolveTemplateFieldAccessState(templateJson, status);
+  const readonly = new Set(
+    Array.isArray(state?.readonly)
+      ? state.readonly.filter((key: unknown): key is string => typeof key === 'string')
+      : []
+  );
   const configured = Array.isArray(state?.editable) ? state.editable : undefined;
-  if (!configured) return fallback;
+  const fallbackEditable = fallback.filter((key) => !readonly.has(key));
+  if (!configured) return fallbackEditable;
 
   const fieldKeys = new Set(Object.keys(templateJson.fields ?? {}));
-  return configured.filter((key: unknown): key is string => typeof key === 'string' && fieldKeys.has(key));
+  const explicitEditable = configured.filter(
+    (key: unknown): key is string => typeof key === 'string' && fieldKeys.has(key) && !readonly.has(key)
+  );
+  return Array.from(new Set([...explicitEditable, ...fallbackEditable]));
 }
 
 export function applyEditableDataUpdate(
@@ -1984,6 +1998,10 @@ export function applyEditableDataUpdate(
     const formKey = `data:${key}`;
     const inputType = resolveEditableInputType(field);
     if (inputType === 'checkbox') {
+      next[key] = resolveEditableFormValue(form, field, key);
+      continue;
+    }
+    if (inputType === 'checkboxGroup') {
       next[key] = resolveEditableFormValue(form, field, key);
       continue;
     }
@@ -2415,7 +2433,12 @@ function buildLegacyWorkflowRuntime(templateJson: TemplateJson): WorkflowRuntime
     initialStatus,
     states,
     semantics: {},
-    actorModel: {}
+    actorModel: {},
+    hooks: {
+      onTransition: [],
+      onEnterState: [],
+      onWorkflowAction: []
+    }
   };
 }
 
@@ -2824,6 +2847,7 @@ async function loadDocumentById(db: FpDb, id: string, withActorColumns: boolean,
         : {}),
       dataJson: fpDocuments.dataJson,
       externalRefsJson: fpDocuments.externalRefsJson,
+      integrationContextJson: fpDocuments.integrationContextJson,
       snapshotsJson: fpDocuments.snapshotsJson,
       createdAt: fpDocuments.createdAt,
       updatedAt: fpDocuments.updatedAt
@@ -5628,6 +5652,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           : {}),
         dataJson: splitCreate.dataJson,
         externalRefsJson: externalRefs,
+        integrationContextJson: {},
         snapshotsJson: snapshots
       })
       .returning({ id: fpDocuments.id });
@@ -6604,7 +6629,9 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           doc: { id: document.id, status: normalizedDocumentStatus },
           data: actionDataContext,
           external: ((document.externalRefsJson ?? {}) as Record<string, unknown>) ?? {},
-          snapshot: ((document.snapshotsJson ?? {}) as Record<string, unknown>) ?? {}
+          snapshot: ((document.snapshotsJson ?? {}) as Record<string, unknown>) ?? {},
+          integration: ((document.integrationContextJson ?? {}) as Record<string, unknown>) ?? {},
+          vars: {}
         },
         erpBaseUrl,
         macroContext: {
@@ -6632,14 +6659,18 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       });
 
       let persistedNextStatus = normalizeDocumentStatus(result.status);
+      let nextEditorSubmissions = currentEditorSubmissions.map((item) => ({ ...item }));
+      let nextApproverDecisions = currentApproverDecisions.map((item) => ({ ...item }));
+      let persistedDataJson = sanitizeStatusSourceOfTruthData(result.dataJson);
+      let persistedExternalRefsJson = sanitizeStatusSourceOfTruthExternalRefs(result.externalRefsJson);
+      let persistedSnapshotsJson = result.snapshotsJson;
+      let persistedIntegrationContextJson = ((result.integrationContextJson ?? {}) as Record<string, unknown>) ?? {};
       await db.transaction(async (tx) => {
         const baseActionResultData = sanitizeStatusSourceOfTruthData(result.dataJson);
         const splitActionResult = hasDocumentActorColumns
           ? splitDocumentActorColumns(baseActionResultData)
           : { dataJson: baseActionResultData, editorUserId: undefined, approverUserId: undefined };
         let nextStatus = result.status;
-        let nextEditorSubmissions = currentEditorSubmissions.map((item) => ({ ...item }));
-        let nextApproverDecisions = currentApproverDecisions.map((item) => ({ ...item }));
         if (supportsMultiAssignments && isSubmitAction && currentUser) {
           await tx
             .update(fpDocumentSubmissions)
@@ -6701,22 +6732,113 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
           }
         }
         persistedNextStatus = normalizeDocumentStatus(nextStatus);
+        persistedDataJson = splitActionResult.dataJson;
+        persistedExternalRefsJson = sanitizeStatusSourceOfTruthExternalRefs(result.externalRefsJson);
+        persistedSnapshotsJson = result.snapshotsJson;
         await tx
           .update(fpDocuments)
           .set({
             status: nextStatus,
-            dataJson: splitActionResult.dataJson,
+            dataJson: persistedDataJson,
             ...(hasDocumentActorColumns && splitActionResult.editorUserId !== undefined
               ? { editorUserId: splitActionResult.editorUserId, assigneeUserId: splitActionResult.editorUserId }
               : {}),
             ...(hasDocumentActorColumns && splitActionResult.approverUserId !== undefined
               ? { approverUserId: splitActionResult.approverUserId, reviewerUserId: splitActionResult.approverUserId }
               : {}),
-            externalRefsJson: sanitizeStatusSourceOfTruthExternalRefs(result.externalRefsJson),
-            snapshotsJson: result.snapshotsJson
+            externalRefsJson: persistedExternalRefsJson,
+            integrationContextJson: persistedIntegrationContextJson,
+            snapshotsJson: persistedSnapshotsJson
           })
           .where(eq(fpDocuments.id, document.id));
       });
+      const workflowHookLogs: Array<{
+        trigger: 'transition' | 'enterState' | 'workflowAction';
+        success: boolean;
+        operationRef: string;
+        description?: string;
+        message?: string;
+        error?: string;
+      }> = [];
+      if (persistedNextStatus !== normalizedDocumentStatus) {
+        const hookResult = await executeWorkflowHookEffects({
+          workflow: workflowRuntime,
+          trigger: {
+            type: 'transition',
+            fromStatus: normalizedDocumentStatus,
+            toStatus: persistedNextStatus
+          },
+          context: {
+            doc: { id: document.id, status: persistedNextStatus },
+            data: persistedDataJson,
+            external: persistedExternalRefsJson,
+            snapshot: persistedSnapshotsJson,
+            integration: persistedIntegrationContextJson,
+            vars: {}
+          },
+          erpBaseUrl
+        });
+        persistedDataJson = sanitizeStatusSourceOfTruthData(hookResult.dataJson);
+        persistedExternalRefsJson = sanitizeStatusSourceOfTruthExternalRefs(hookResult.externalRefsJson);
+        persistedSnapshotsJson = hookResult.snapshotsJson;
+        persistedIntegrationContextJson = hookResult.integrationContextJson;
+        workflowHookLogs.push(...hookResult.logs);
+        const enterStateHookResult = await executeWorkflowHookEffects({
+          workflow: workflowRuntime,
+          trigger: {
+            type: 'enterState',
+            state: persistedNextStatus
+          },
+          context: {
+            doc: { id: document.id, status: persistedNextStatus },
+            data: persistedDataJson,
+            external: persistedExternalRefsJson,
+            snapshot: persistedSnapshotsJson,
+            integration: persistedIntegrationContextJson,
+            vars: {}
+          },
+          erpBaseUrl
+        });
+        persistedDataJson = sanitizeStatusSourceOfTruthData(enterStateHookResult.dataJson);
+        persistedExternalRefsJson = sanitizeStatusSourceOfTruthExternalRefs(enterStateHookResult.externalRefsJson);
+        persistedSnapshotsJson = enterStateHookResult.snapshotsJson;
+        persistedIntegrationContextJson = enterStateHookResult.integrationContextJson;
+        workflowHookLogs.push(...enterStateHookResult.logs);
+      }
+      if (actionKey) {
+        const hookResult = await executeWorkflowHookEffects({
+          workflow: workflowRuntime,
+          trigger: {
+            type: 'workflowAction',
+            action: actionKey
+          },
+          context: {
+            doc: { id: document.id, status: persistedNextStatus },
+            data: persistedDataJson,
+            external: persistedExternalRefsJson,
+            snapshot: persistedSnapshotsJson,
+            integration: persistedIntegrationContextJson,
+            vars: {}
+          },
+          erpBaseUrl
+        });
+        persistedDataJson = sanitizeStatusSourceOfTruthData(hookResult.dataJson);
+        persistedExternalRefsJson = sanitizeStatusSourceOfTruthExternalRefs(hookResult.externalRefsJson);
+        persistedSnapshotsJson = hookResult.snapshotsJson;
+        persistedIntegrationContextJson = hookResult.integrationContextJson;
+        workflowHookLogs.push(...hookResult.logs);
+      }
+      if (workflowHookLogs.length > 0) {
+        await db
+          .update(fpDocuments)
+          .set({
+            dataJson: persistedDataJson,
+            externalRefsJson: persistedExternalRefsJson,
+            integrationContextJson: persistedIntegrationContextJson,
+            snapshotsJson: persistedSnapshotsJson
+          })
+          .where(eq(fpDocuments.id, document.id));
+      }
       if (hasDocumentAuditTrail) {
         if (isSubmitAction) {
           await recordDocumentAuditEvent({
@@ -6789,6 +6911,30 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
               actionKey,
               fromStatus: normalizedDocumentStatus,
               toStatus: persistedNextStatus
+            },
+            auditGateway
+          });
+        }
+        for (const hookLog of workflowHookLogs) {
+          await recordDocumentAuditEvent({
+            db,
+            request,
+            documentId: document.id,
+            eventType: hookLog.success ? 'workflow_hook_executed' : 'workflow_hook_failed',
+            summary: hookLog.success
+              ? `Workflow hook executed: ${hookLog.operationRef}.`
+              : `Workflow hook failed: ${hookLog.operationRef}${hookLog.error ? ` (${hookLog.error})` : ''}.`,
+            detail: {
+              operationRef: hookLog.operationRef,
+              description: hookLog.description ?? null,
+              message: hookLog.message ?? null,
+              error: hookLog.error ?? null,
+              trigger:
+                hookLog.trigger === 'transition'
+                  ? { type: 'transition', fromStatus: normalizedDocumentStatus, toStatus: persistedNextStatus }
+                  : hookLog.trigger === 'workflowAction'
+                    ? { type: 'workflowAction', action: actionKey }
+                    : { type: 'enterState', state: persistedNextStatus }
             },
             auditGateway
           });

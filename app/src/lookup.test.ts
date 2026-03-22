@@ -122,7 +122,7 @@ describe('lookup url handling', () => {
     const resolved = await resolveLookupSource(
       {
         kind: 'lookup',
-        apiRef: 'customers.listValid',
+        apiRef: 'bridge.customersListValid',
         valueKey: 'id',
         labelKey: 'name'
       },
@@ -133,7 +133,7 @@ describe('lookup url handling', () => {
               where: () => ({
                 limit: async () => [
                   {
-                    key: 'customers.listValid',
+                    key: 'bridge.customersListValid',
                     name: 'Customers',
                     description: null,
                     state: 'active',
@@ -155,6 +155,17 @@ describe('lookup url handling', () => {
     expect(resolved.path).toBe('/api/customers');
     expect(resolved.query).toEqual({ valid: 'true' });
     expect(resolved.baseUrl).toBe('http://localhost:3001');
+  });
+
+  it('resolves lookup source via ts connector registry without runtime db', async () => {
+    const resolved = await resolveLookupSource({
+      kind: 'lookup',
+      apiRef: 'customers.listValid'
+    });
+
+    expect(resolved.path).toBe('/api/customers');
+    expect(resolved.query).toEqual({ valid: 'true' });
+    expect(resolved.service).toBe('erp');
   });
 
   it('interpolates external placeholder in query and keeps fixed params', () => {

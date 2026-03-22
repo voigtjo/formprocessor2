@@ -1,6 +1,7 @@
 import { resolveServiceBaseUrl } from '../services/service-registry.js';
 import { eq } from 'drizzle-orm';
 import { fpApis } from '../db/schema.js';
+import { resolveConnectorOperation, toApiCatalogEntry } from '../connectors/registry.js';
 
 /**
  * Transition architecture note:
@@ -106,6 +107,13 @@ async function resolveApiCatalogEntryFromDb(db: unknown, apiRef: string): Promis
 export async function resolveApiCatalogEntry(apiRef: string, db?: unknown): Promise<ApiCatalogEntry> {
   const normalized = String(apiRef ?? '').trim();
   if (!normalized) throw new Error('callApi step requires apiRef');
+  const connectorOperation = resolveConnectorOperation(normalized);
+  if (connectorOperation) {
+    return toApiCatalogEntry(connectorOperation, {
+      defaultErpBaseUrl: process.env.FP_ERP_BASE_URL ?? 'http://localhost:3001',
+      env: process.env as Record<string, string | undefined>
+    });
+  }
   const fromDb = db ? await resolveApiCatalogEntryFromDb(db, normalized) : null;
   if (fromDb) return fromDb;
 

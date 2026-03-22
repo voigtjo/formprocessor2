@@ -6,6 +6,44 @@ export type WorkflowStateConfig = {
   readonly?: string[];
 };
 
+export type WorkflowHookEffect = {
+  operationRef: string;
+  apiRef?: string;
+  request?: unknown;
+  responseMapping?: {
+    data?: Record<string, string>;
+    external?: Record<string, string>;
+    snapshot?: Record<string, string>;
+    integration?: Record<string, string>;
+    status?: string;
+  } & Record<string, unknown>;
+  successMessage?: string;
+  failureMessage?: string;
+  description?: string;
+};
+
+export type WorkflowTransitionHook = {
+  from?: string[];
+  to: string[];
+  effects: WorkflowHookEffect[];
+};
+
+export type WorkflowEnterStateHook = {
+  state: string[];
+  effects: WorkflowHookEffect[];
+};
+
+export type WorkflowActionHook = {
+  action: string[];
+  effects: WorkflowHookEffect[];
+};
+
+export type WorkflowHooksConfig = {
+  onTransition: WorkflowTransitionHook[];
+  onEnterState: WorkflowEnterStateHook[];
+  onWorkflowAction: WorkflowActionHook[];
+};
+
 export type WorkflowRuntimeModel = {
   ref: string;
   name: string;
@@ -14,6 +52,7 @@ export type WorkflowRuntimeModel = {
   states: Record<string, WorkflowStateConfig>;
   semantics: Record<string, unknown>;
   actorModel: Record<string, unknown>;
+  hooks: WorkflowHooksConfig;
 };
 
 export type EditorSubmissionState = {
@@ -58,6 +97,102 @@ function normalizeUniqueStatuses(values: unknown) {
   return out;
 }
 
+function normalizeStatusList(values: unknown) {
+  if (Array.isArray(values)) {
+    const out: string[] = [];
+    for (const value of values) {
+      const normalized = normalizeDocumentStatus(value);
+      if (!out.includes(normalized)) out.push(normalized);
+    }
+    return out;
+  }
+  if (values !== undefined && values !== null && String(values).trim().length > 0) {
+    return [normalizeDocumentStatus(values)];
+  }
+  return [];
+}
+
+function normalizeHookEffects(values: unknown): WorkflowHookEffect[] {
+  if (!Array.isArray(values)) return [];
+  return values.flatMap((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const record = value as Record<string, unknown>;
+    const operationRef = typeof record.operationRef === 'string' ? record.operationRef.trim() : '';
+    const apiRef = typeof record.apiRef === 'string' ? record.apiRef.trim() : '';
+    const resolvedRef = operationRef || apiRef;
+    if (!resolvedRef) return [];
+    return [
+      {
+        operationRef: resolvedRef,
+        ...(apiRef ? { apiRef } : {}),
+        ...(record.request !== undefined ? { request: record.request } : {}),
+        ...(record.responseMapping && typeof record.responseMapping === 'object' && !Array.isArray(record.responseMapping)
+          ? { responseMapping: record.responseMapping as WorkflowHookEffect['responseMapping'] }
+          : {}),
+        ...(typeof record.successMessage === 'string' && record.successMessage.trim().length > 0
+          ? { successMessage: record.successMessage.trim() }
+          : {}),
+        ...(typeof record.failureMessage === 'string' && record.failureMessage.trim().length > 0
+          ? { failureMessage: record.failureMessage.trim() }
+          : {}),
+        ...(typeof record.description === 'string' && record.description.trim().length > 0
+          ? { description: record.description.trim() }
+          : {})
+      }
+    ];
+  });
+}
+
+function normalizeTransitionHooks(values: unknown): WorkflowTransitionHook[] {
+  if (!Array.isArray(values)) return [];
+  return values.flatMap((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const record = value as Record<string, unknown>;
+    const to = normalizeStatusList(record.to);
+    const effects = normalizeHookEffects(record.effects);
+    if (to.length === 0 || effects.length === 0) return [];
+    const from = normalizeStatusList(record.from);
+    return [{ ...(from.length > 0 ? { from } : {}), to, effects }];
+  });
+}
+
+function normalizeEnterStateHooks(values: unknown): WorkflowEnterStateHook[] {
+  if (!Array.isArray(values)) return [];
+  return values.flatMap((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const record = value as Record<string, unknown>;
+    const state = normalizeStatusList(record.state);
+    const effects = normalizeHookEffects(record.effects);
+    if (state.length === 0 || effects.length === 0) return [];
+    return [{ state, effects }];
+  });
+}
+
+function normalizeActionHooks(values: unknown): WorkflowActionHook[] {
+  if (!Array.isArray(values)) return [];
+  return values.flatMap((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const record = value as Record<string, unknown>;
+    const action = Array.isArray(record.action)
+      ? record.action.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+      : typeof record.action === 'string' && record.action.trim().length > 0
+        ? [record.action.trim()]
+        : [];
+    const effects = normalizeHookEffects(record.effects);
+    if (action.length === 0 || effects.length === 0) return [];
+    return [{ action: Array.from(new Set(action)), effects }];
+  });
+}
+
+function normalizeWorkflowHooks(values: unknown): WorkflowHooksConfig {
+  const record = values && typeof values === 'object' && !Array.isArray(values) ? (values as Record<string, unknown>) : {};
+  return {
+    onTransition: normalizeTransitionHooks(record.onTransition),
+    onEnterState: normalizeEnterStateHooks(record.onEnterState),
+    onWorkflowAction: normalizeActionHooks(record.onWorkflowAction)
+  };
+}
+
 export function normalizeWorkflowRuntimeModel(raw: {
   ref?: string;
   name?: string;
@@ -66,6 +201,7 @@ export function normalizeWorkflowRuntimeModel(raw: {
   states?: Record<string, unknown>;
   semantics?: Record<string, unknown>;
   actorModel?: Record<string, unknown>;
+  hooks?: unknown;
 }): WorkflowRuntimeModel {
   const statesRaw = raw.states ?? {};
   const states = Object.entries(statesRaw).reduce(
@@ -99,7 +235,8 @@ export function normalizeWorkflowRuntimeModel(raw: {
     initialStatus: normalizeDocumentStatus(raw.initialStatus ?? 'created'),
     states,
     semantics: raw.semantics ?? {},
-    actorModel: raw.actorModel ?? {}
+    actorModel: raw.actorModel ?? {},
+    hooks: normalizeWorkflowHooks(raw.hooks)
   };
 }
 

@@ -1,4 +1,7 @@
 import Fastify from 'fastify';
+import ejs from 'ejs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildV1CustomerOrderTemplateJson,
@@ -6,6 +9,8 @@ import {
   buildV1MinimalEvidenceTemplateJson
 } from './test-template-fixtures.js';
 import { uiRoutes } from './ui.js';
+
+const viewsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../views/documents');
 
 function createMockDb() {
   const insertValuesSpy = vi.fn();
@@ -63,6 +68,78 @@ describe('documents create route', () => {
     expect(res.body).toContain('Customer Order (co)');
 
     await app.close();
+  });
+
+  it('renders document detail sections as collapsed summaries with compact audit table', async () => {
+    const html = await ejs.renderFile(path.join(viewsDir, 'detail.ejs'), {
+      document: {
+        id: '919abb78-0fc8-415c-83ec-3ae12a5fe6d8',
+        status: 'submitted',
+        templateVersion: 1
+      },
+      template: {
+        key: 'customer-order-test',
+        name: 'Customer Order Test',
+        workflowRef: 'evidence.group-submit.v1'
+      },
+      workflowRuntime: { ref: 'evidence.group-submit.v1' },
+      groupName: 'Operations',
+      workflowTimeline: ['created', 'assigned', 'submitted', 'approved'],
+      workflowHint: 'Waiting for one approver.',
+      assignmentEditorName: 'Alice',
+      assignmentApproverName: 'Bob',
+      useMultiAssignments: true,
+      assignedEditorsDetailed: [{ id: 'u1', name: 'Alice', username: 'alice', submissionStatus: 'submitted' }],
+      assignedApprovers: [{ id: 'u2', name: 'Bob', username: 'bob', approvalStatus: 'pending' }],
+      attachmentCount: 2,
+      journalSummaries: [{ label: 'Checks', rowCount: 3 }],
+      openWorkItems: ['Waiting for approval.'],
+      workflowEvaluation: {
+        submissionState: 'complete',
+        approvalState: 'partial',
+        submitMode: 'individual',
+        approvalMode: 'individual'
+      },
+      submittedEditorCount: 1,
+      approvedApproverCount: 0,
+      rejectedApproverCount: 0,
+      processButtons: [{ key: 'submit', label: 'Submit' }],
+      templateActionButtons: [{ key: 'create_customer_order', label: 'Create Customer Order' }],
+      hasDocumentActorColumns: true,
+      assignmentGroupId: 'group-1',
+      hasAnyAssignments: true,
+      assignmentsOpen: false,
+      assignmentEditorCandidates: [],
+      assignmentApproverCandidates: [],
+      assignmentEditorHint: '',
+      assignmentApproverHint: '',
+      layoutHtml: '<div>Form</div>',
+      hasDocumentAttachments: true,
+      attachments: [],
+      hasDocumentAuditTrail: true,
+      auditEvents: [
+        {
+          eventType: 'submitted',
+          actorDisplay: 'Alice',
+          summary: 'Alice submitted their contribution.',
+          createdAt: new Date('2026-03-22T09:41:34Z')
+        }
+      ],
+      errorMessage: '',
+      successMessage: ''
+    }, {
+      async: true,
+      views: [viewsDir]
+    });
+
+    expect(html).toContain('<span class="document-section-title">Work Summary</span>');
+    expect(html).toContain('<span class="document-section-title">Actions</span>');
+    expect(html).toContain('<span class="document-section-title">Assignments</span>');
+    expect(html).toContain('<span class="document-section-title">Audit Trail / History</span>');
+    expect(html).toContain('<span class="document-section-meta"><span class="badge badge-status">submitted</span></span>');
+    expect(html).toContain('<span class="document-section-meta">Alice: Editor · Bob: Approver</span>');
+    expect(html).toContain('<table class="document-history-table">');
+    expect(html).not.toContain('<details class="document-section-toggle" open>');
   });
 
   it('POST /documents without templateId returns 400 and does not insert', async () => {

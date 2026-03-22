@@ -749,6 +749,169 @@ describe('workflow action execution', () => {
     await app.close();
   });
 
+  it('executes workflow transition hooks on submitted to approved', async () => {
+    let currentStatus = 'submitted';
+    let currentDataJson: Record<string, unknown> = {
+      customer_order_number: 'CO-2026-0901'
+    };
+    let currentExternalRefsJson: Record<string, unknown> = {
+      customer_id: '99999999-0000-0000-0000-000000000001',
+      customer_order_id: 'order-1'
+    };
+    let currentSnapshotsJson: Record<string, unknown> = {};
+
+    const template = {
+      id: '00000000-0000-0000-0000-0000000000af',
+      key: 'customer-order-hook-test',
+      name: 'Customer Order Hook Test',
+      workflowRef: 'customer-order.group-submit.v1',
+      templateJson: buildV1CustomerOrderTemplateJson()
+    };
+
+    const db = {
+      query: {
+        fpDocuments: {
+          findFirst: async () => ({
+            id: '00000000-0000-0000-0000-0000000000ad',
+            templateId: template.id,
+            status: currentStatus,
+            approverUserId: '00000000-0000-0000-0000-0000000000a1',
+            editorUserId: '00000000-0000-0000-0000-0000000000e1',
+            dataJson: currentDataJson,
+            externalRefsJson: currentExternalRefsJson,
+            snapshotsJson: currentSnapshotsJson
+          })
+        },
+        fpTemplates: {
+          findFirst: async () => template
+        },
+        fpTemplateAssignments: {
+          findMany: async () => []
+        }
+      },
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: async () => [{
+                id: 'wf-hook-1',
+                key: 'customer-order.group-submit.v1',
+                name: 'Customer Order Group Submit',
+                state: 'active',
+                version: 1,
+                workflowJson: {
+                  order: ['created', 'assigned', 'submitted', 'approved', 'archived'],
+                  initialStatus: 'created',
+                  states: {
+                    created: { buttons: ['assign'] },
+                    assigned: { buttons: ['submit'] },
+                    submitted: { buttons: ['approve'] },
+                    approved: { buttons: ['archive'] },
+                    archived: { buttons: [] }
+                  },
+                  hooks: {
+                    onTransition: [
+                      {
+                        from: 'submitted',
+                        to: 'approved',
+                        effects: [
+                          {
+                            operationRef: 'customerOrders.setStatusFromContext',
+                            apiRef: 'customerOrders.setStatus',
+                            request: {
+                              status: 'approved'
+                            },
+                            responseMapping: {
+                              snapshot: {
+                                customer_order_sync_ok: 'ok'
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }]
+            })
+          })
+        })
+      })),
+      transaction: async (cb: (tx: any) => Promise<void>) => {
+        const tx = {
+          update: () => ({
+            set: (values: any) => ({
+              where: async () => {
+                if (typeof values.status === 'string') currentStatus = values.status;
+                if (values.dataJson && typeof values.dataJson === 'object') currentDataJson = values.dataJson;
+                if (values.externalRefsJson && typeof values.externalRefsJson === 'object') {
+                  currentExternalRefsJson = values.externalRefsJson;
+                }
+                if (values.snapshotsJson && typeof values.snapshotsJson === 'object') {
+                  currentSnapshotsJson = values.snapshotsJson;
+                }
+              }
+            })
+          })
+        };
+        await cb(tx);
+      },
+      update: () => ({
+        set: (values: any) => ({
+          where: async () => {
+            if (values.dataJson && typeof values.dataJson === 'object') currentDataJson = values.dataJson;
+            if (values.externalRefsJson && typeof values.externalRefsJson === 'object') {
+              currentExternalRefsJson = values.externalRefsJson;
+            }
+            if (values.snapshotsJson && typeof values.snapshotsJson === 'object') {
+              currentSnapshotsJson = values.snapshotsJson;
+            }
+          }
+        })
+      })
+    };
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('/api/customer-orders/order-1') && method === 'GET') {
+        return new Response(JSON.stringify({ id: 'order-1', order_number: 'O-123', status: 'received' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      expect(url).toContain('/api/customer-orders/order-1/status');
+      expect(method).toBe('PATCH');
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+
+    const app = Fastify();
+    await app.register(uiRoutes, {
+      db: db as any,
+      erpBaseUrl: 'http://localhost:3001',
+      hasDocumentMultiAssignments: false,
+      hasDocumentAuditTrail: false
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/documents/00000000-0000-0000-0000-0000000000ad/action/approve',
+      payload: {}
+    });
+
+    expect(res.statusCode).toBe(303);
+    expect(currentStatus).toBe('approved');
+    expect(currentSnapshotsJson.customer_order_sync_ok).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+
+    vi.unstubAllGlobals();
+    await app.close();
+  });
+
   it('setStatus updates fp_documents.status and does not persist data_json.status', async () => {
     const mock = createMockDb();
     const app = Fastify();

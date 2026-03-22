@@ -98,4 +98,56 @@ describe('document save data merge', () => {
       { finding: 'Label missing', closed: true }
     ]);
   });
+
+  it('stores checkboxGroup selections as an array', () => {
+    const templateJson = {
+      fields: {
+        fulfillment_flags: {
+          kind: 'editable',
+          control: 'checkboxGroup',
+          options: [
+            { value: 'expedite', label: 'Expedite' },
+            { value: 'gift', label: 'Gift wrap' }
+          ]
+        }
+      }
+    } as any;
+
+    const next = applyEditableDataUpdate(
+      templateJson,
+      {},
+      {
+        'data:fulfillment_flags': ['expedite', 'gift']
+      },
+      ['fulfillment_flags']
+    );
+
+    expect(next.fulfillment_flags).toEqual(['expedite', 'gift']);
+  });
+
+  it('stores checkboxGroup single selection from form post string', () => {
+    const templateJson = {
+      fields: {
+        fulfillment_flags: {
+          kind: 'editable',
+          control: 'checkboxGroup',
+          options: [
+            { value: 'expedite', label: 'Expedite' },
+            { value: 'gift', label: 'Gift wrap' }
+          ]
+        }
+      }
+    } as any;
+
+    const next = applyEditableDataUpdate(
+      templateJson,
+      {},
+      {
+        'data:fulfillment_flags': 'expedite'
+      },
+      ['fulfillment_flags']
+    );
+
+    expect(next.fulfillment_flags).toEqual(['expedite']);
+  });
 });

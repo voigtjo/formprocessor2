@@ -1,0 +1,24 @@
+{
+  "type": "approved",
+  "subject": "Document approved: 037f449d",
+  "body": "Document 037f449d was approved.\n\nOpen document: http://localhost:3000/documents/037f449d-f097-4521-b92b-be57fe3af13b",
+  "recipientUserIds": [
+    "dff92c39-939d-46a9-afb1-2836fb925360"
+  ],
+  "recipients": [
+    {
+      "userId": "dff92c39-939d-46a9-afb1-2836fb925360",
+      "displayName": "Alice",
+      "email": "alice@example.local"
+    }
+  ],
+  "entityType": "document",
+  "entityId": "037f449d-f097-4521-b92b-be57fe3af13b",
+  "linkUrl": "http://localhost:3000/documents/037f449d-f097-4521-b92b-be57fe3af13b",
+  "tenantKey": "default",
+  "meta": {
+    "actionKey": "approve",
+    "status": "approved"
+  },
+  "createdAt": "2026-03-22T22:06:23.775Z"
+}

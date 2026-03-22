@@ -5,6 +5,7 @@ import {
   resolveNextStatus,
   type WorkflowRuntimeModel
 } from './workflow-runtime.js';
+import { resolveWorkflowHookEffects } from './workflow-hooks.js';
 
 function createProductionWorkflow(): WorkflowRuntimeModel {
   return normalizeWorkflowRuntimeModel({
@@ -155,5 +156,54 @@ describe('workflow runtime', () => {
     });
     expect(assigned.visibleButtons).toEqual(['approve']);
     expect(assigned.nextStatusByAction.approve).toBe('approved');
+  });
+
+  it('normalizes workflow hooks and resolves matching transition hooks', () => {
+    const workflow = normalizeWorkflowRuntimeModel({
+      order: ['created', 'assigned', 'submitted', 'approved'],
+      hooks: {
+        onTransition: [
+          {
+            from: 'submitted',
+            to: 'approved',
+            effects: [
+              {
+                operationRef: 'customerOrders.setStatusFromContext',
+                apiRef: 'customerOrders.setStatus',
+                request: { status: 'approved' }
+              }
+            ]
+          }
+        ],
+        onWorkflowAction: [
+          {
+            action: 'approve',
+            effects: [{ operationRef: 'notifications.sendApprovalNotice', apiRef: 'notifications.sendApprovalNotice' }]
+          }
+        ]
+      }
+    });
+
+    expect(workflow.hooks.onTransition).toHaveLength(1);
+    expect(workflow.hooks.onWorkflowAction).toHaveLength(1);
+
+    const transitionEffects = resolveWorkflowHookEffects({
+      workflow,
+      trigger: {
+        type: 'transition',
+        fromStatus: 'submitted',
+        toStatus: 'approved'
+      }
+    });
+    expect(transitionEffects.map((item) => item.operationRef)).toEqual(['customerOrders.setStatusFromContext']);
+
+    const actionEffects = resolveWorkflowHookEffects({
+      workflow,
+      trigger: {
+        type: 'workflowAction',
+        action: 'approve'
+      }
+    });
+    expect(actionEffects.map((item) => item.operationRef)).toEqual(['notifications.sendApprovalNotice']);
   });
 });

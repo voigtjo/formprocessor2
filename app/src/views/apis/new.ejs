@@ -8,7 +8,13 @@
   </div>
 <% } %>
 
-<form method="post" action="/apis" class="card">
+<section class="editor-workspace">
+  <div class="card editor-help">
+    <h2>API Bridge</h2>
+    <p>Create a bridge-level <code>apiRef</code> here when a template action or workflow hook should call an integration by reference. The runtime can map this onto local TS operations.</p>
+  </div>
+
+<form method="post" action="/apis" class="card editor-form">
   <div class="row">
     <div class="col col-6">
       <label for="key">Key</label>
@@ -54,12 +60,13 @@
     </div>
   </div>
 
-  <div class="row"><div class="col"><label for="request_schema_json">request_schema_json</label><textarea id="request_schema_json" name="request_schema_json" rows="6"><%= form?.request_schema_json ?? '' %></textarea></div></div>
-  <div class="row"><div class="col"><label for="response_schema_json">response_schema_json</label><textarea id="response_schema_json" name="response_schema_json" rows="6"><%= form?.response_schema_json ?? '' %></textarea></div></div>
-  <div class="row"><div class="col"><label for="handler_code">handler_code (optional)</label><textarea id="handler_code" name="handler_code" rows="6"><%= form?.handler_code ?? '' %></textarea></div></div>
+  <div class="row"><div class="col col-12"><label for="request_schema_json">request_schema_json</label><textarea id="request_schema_json" name="request_schema_json" rows="18" data-json-editor="true"><%= form?.request_schema_json ?? '' %></textarea></div></div>
+  <div class="row"><div class="col col-12"><label for="response_schema_json">response_schema_json</label><textarea id="response_schema_json" name="response_schema_json" rows="14" data-json-editor="true"><%= form?.response_schema_json ?? '' %></textarea></div></div>
+  <div class="row"><div class="col col-12"><label for="handler_code">handler_code (optional)</label><textarea id="handler_code" name="handler_code" rows="14" data-code-editor="true"><%= form?.handler_code ?? '' %></textarea></div></div>
 
   <div class="actions">
     <button class="btn btn-primary" type="submit">Create API</button>
     <a class="btn btn-secondary" href="/apis">Back</a>
   </div>
 </form>
+</section>
