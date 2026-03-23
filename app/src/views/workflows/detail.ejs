@@ -12,6 +12,57 @@
 </div>
 
 <div class="card">
+  <h3 class="card-title">Hook Operations</h3>
+  <p class="muted">This is the visible link between workflow events and integration execution. Hooks define when something runs. The referenced TypeScript operation defines what technically happens.</p>
+  <% if (!hookOperations || hookOperations.length === 0) { %>
+    <p class="muted">No workflow hooks configured.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Trigger</th>
+          <th>operationRef</th>
+          <th>Bridge apiRef</th>
+          <th>Auth</th>
+          <th>Handler / Module</th>
+          <th>Writes Context</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% hookOperations.forEach((item) => { %>
+          <tr>
+            <td><strong><%= item.triggerType %></strong> · <%= item.triggerLabel %></td>
+            <td><code><%= item.operationRef %></code></td>
+            <td>
+              <% if (item.apiRef) { %>
+                <code><%= item.apiRef %></code>
+              <% } else { %>
+                —
+              <% } %>
+            </td>
+            <td>
+              <% if (item.operation) { %>
+                <code><%= item.operation.authType %></code>
+              <% } else { %>
+                <span class="muted">missing</span>
+              <% } %>
+            </td>
+            <td>
+              <% if (item.operation) { %>
+                <code><%= item.operation.modulePath %></code>
+              <% } else { %>
+                <span class="muted">missing</span>
+              <% } %>
+            </td>
+            <td><%= item.responseTargets && item.responseTargets.length > 0 ? item.responseTargets.join(', ') : '—' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<div class="card">
   <h3 class="card-title">Used In Templates</h3>
   <% if (!templatesUsingWorkflow || templatesUsingWorkflow.length === 0) { %>
     <p class="muted">No templates reference this workflow.</p>

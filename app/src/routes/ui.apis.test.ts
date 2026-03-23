@@ -25,16 +25,14 @@ function createMockDb(initialApis: ApiRow[] = []) {
   return {
     query: {
       fpApis: {
-        findFirst: vi.fn(async (args?: { where?: unknown }) => {
-          const id = String((args?.where as any)?.right?.value ?? '');
-          return apis.find((item) => item.id === id) ?? null;
-        })
+        findFirst: vi.fn(async () => apis[0] ?? null)
       }
     },
     select: vi.fn(() => ({
       from: (table: unknown) => {
         if (table === fpApis) {
           return {
+            orderBy: async () => [...apis].sort((a, b) => a.key.localeCompare(b.key)),
             where: () => ({
               orderBy: async () => [...apis].sort((a, b) => a.key.localeCompare(b.key))
             })
@@ -107,9 +105,50 @@ describe('apis routes', () => {
 
     const res = await app.inject({ method: 'GET', url: '/apis' });
     expect(res.statusCode).toBe(200);
-    const payload = res.json() as { apis: Array<{ key: string }> };
+    const payload = res.json() as {
+      apis: Array<{ key: string; hasTsOperation?: boolean; tsOperationRef?: string | null }>;
+      operations: Array<{ ref: string; authType: string; modulePath: string }>;
+    };
     expect(payload.apis).toHaveLength(1);
     expect(payload.apis[0]?.key).toBe('customers.listValid');
+    expect(payload.apis[0]?.hasTsOperation).toBe(true);
+    expect(payload.apis[0]?.tsOperationRef).toBe('customers.listValid');
+    expect(payload.operations.some((item) => item.ref === 'customerOrders.setStatusFromContext')).toBe(true);
+    expect(payload.operations.some((item) => item.authType === 'bearerToken')).toBe(true);
+    await app.close();
+  });
+
+  it('shows matching TS operation on API detail', async () => {
+    const db = createMockDb([
+      {
+        id: '00000000-0000-0000-0000-0000000000a1',
+        key: 'customers.listValid',
+        name: 'List Customers',
+        description: null,
+        state: 'active',
+        method: 'GET',
+        baseUrl: 'http://localhost:3001',
+        path: '/api/customers',
+        requestSchemaJson: { query: { valid: true } },
+        responseSchemaJson: null,
+        handlerCode: null,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      }
+    ]);
+    const app = Fastify();
+    app.decorateReply('renderPage', async function renderPage(_view: string, data: Record<string, unknown> = {}) {
+      this.type('application/json').send(data);
+    });
+    await app.register(uiRoutes, { db: db as any, erpBaseUrl: 'http://localhost:3001' });
+
+    const res = await app.inject({ method: 'GET', url: '/apis/00000000-0000-0000-0000-0000000000a1' });
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { connectorOperation: { ref: string; authType: string; modulePath: string } | null };
+    expect(payload.connectorOperation?.ref).toBe('customers.listValid');
+    expect(payload.connectorOperation?.authType).toBe('none');
+    expect(payload.connectorOperation?.modulePath).toContain('erp-sim/customers.ts');
+
     await app.close();
   });
 

@@ -78,13 +78,23 @@ describe('template document data view', () => {
       const firstValues = Array.isArray(firstRow.values)
         ? (firstRow.values as Array<{ value: string }>).map((item) => item.value).join(', ')
         : '';
+      const usedOperations = Array.isArray(data.usedOperations)
+        ? (data.usedOperations as Array<{ ref: string }>).map((item) => item.ref).join(', ')
+        : '';
+      const usedActions = Array.isArray(data.usedActions)
+        ? (data.usedActions as Array<{ actionKey: string; operationRefs?: string[] }>)
+            .map((item) => `${item.actionKey}:${(item.operationRefs ?? []).join('|')}`)
+            .join(', ')
+        : '';
       this.type('text/plain').send(
         [
           `columns=${columns}`,
           `status=${String(firstRow.status ?? '')}`,
           `editors=${Array.isArray(firstRow.editors) ? (firstRow.editors as string[]).join(', ') : ''}`,
           `approvers=${Array.isArray(firstRow.approvers) ? (firstRow.approvers as string[]).join(', ') : ''}`,
-          `values=${firstValues}`
+          `values=${firstValues}`,
+          `operations=${usedOperations}`,
+          `actions=${usedActions}`
         ].join('\n')
       );
     });
@@ -107,6 +117,8 @@ describe('template document data view', () => {
     expect(res.body).toContain('editors=Alice');
     expect(res.body).toContain('approvers=Bob');
     expect(res.body).toContain('values=Customer A, —, CO-42');
+    expect(res.body).toContain('operations=customerOrders.create, customers.listValid');
+    expect(res.body).toContain('actions=create_customer_order:customerOrders.create');
 
     await app.close();
   });

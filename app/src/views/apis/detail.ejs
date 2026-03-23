@@ -12,6 +12,20 @@
 </div>
 
 <div class="card">
+  <h3 class="card-title">Bridge / TS Resolution</h3>
+  <p class="muted">This page shows the bridge API record. Runtime execution prefers the matching TypeScript operation when one exists.</p>
+  <% if (connectorOperation) { %>
+    <p><strong>operationRef:</strong> <code><%= connectorOperation.ref %></code></p>
+    <p><strong>Connector:</strong> <%= connectorOperation.connectorName %> · <code><%= connectorOperation.connectorKey %></code></p>
+    <p><strong>Auth:</strong> <code><%= connectorOperation.authType %></code></p>
+    <p><strong>Handler / Module:</strong> <code><%= connectorOperation.modulePath %></code></p>
+    <p><strong>Usable in:</strong> <%= connectorOperation.usableIn.join(', ') %></p>
+  <% } else { %>
+    <p class="muted">No matching TypeScript operation is currently registered for this bridge API.</p>
+  <% } %>
+</div>
+
+<div class="card">
   <h3 class="card-title">JSON</h3>
   <p><strong>request_schema_json</strong></p>
   <pre><code><%= api.requestSchemaJson ? JSON.stringify(api.requestSchemaJson, null, 2) : 'null' %></code></pre>

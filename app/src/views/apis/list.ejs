@@ -5,6 +5,11 @@
   <a class="btn btn-primary" href="/apis/new">New API</a>
 </div>
 
+<div class="card">
+  <h3 class="card-title">Bridge vs. TypeScript Operations</h3>
+  <p class="muted">This page now shows two levels: bridge-level API records for legacy compatibility, and the current TypeScript operations resolved by <code>operationRef</code>. Workflows, form actions and lookups should move toward <code>operationRef</code> as the primary reference.</p>
+</div>
+
 <form method="get" action="/apis" class="row">
   <div class="col col-6">
     <label for="api-state-filter">State</label>
@@ -19,6 +24,8 @@
   </div>
 </form>
 
+<div class="card">
+<h3 class="card-title">API Bridge Records</h3>
 <table>
   <thead>
     <tr>
@@ -28,12 +35,13 @@
       <th>Base URL</th>
       <th>Path</th>
       <th>State</th>
+      <th>TS Operation</th>
       <th>Actions</th>
     </tr>
   </thead>
   <tbody>
     <% if (!apis || apis.length === 0) { %>
-      <tr><td colspan="7" class="muted">No APIs found.</td></tr>
+      <tr><td colspan="8" class="muted">No bridge APIs found.</td></tr>
     <% } %>
     <% (apis || []).forEach((api) => { %>
       <tr>
@@ -44,6 +52,13 @@
         <td><code><%= api.path %></code></td>
         <td><span class="badge"><%= api.state %></span></td>
         <td>
+          <% if (api.hasTsOperation) { %>
+            <code><%= api.tsOperationRef %></code>
+          <% } else { %>
+            <span class="muted">bridge only</span>
+          <% } %>
+        </td>
+        <td>
           <a href="/apis/<%= api.id %>">Open</a>
           · <a href="/apis/<%= api.id %>/edit">Edit</a>
         </td>
@@ -51,3 +66,48 @@
     <% }) %>
   </tbody>
 </table>
+</div>
+
+<div class="card">
+<h3 class="card-title">TypeScript Operations</h3>
+<table>
+  <thead>
+    <tr>
+      <th>operationRef</th>
+      <th>Name</th>
+      <th>Connector</th>
+      <th>Auth</th>
+      <th>Handler / Module</th>
+      <th>Usage</th>
+      <th>Bridge</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!operations || operations.length === 0) { %>
+      <tr><td colspan="7" class="muted">No TypeScript operations registered.</td></tr>
+    <% } %>
+    <% (operations || []).forEach((operation) => { %>
+      <tr>
+        <td><code><%= operation.ref %></code></td>
+        <td>
+          <strong><%= operation.name %></strong>
+          <% if (operation.description) { %>
+            <div class="muted"><%= operation.description %></div>
+          <% } %>
+        </td>
+        <td><%= operation.connectorName %> · <span class="muted"><%= operation.connectorTargetSystem %></span></td>
+        <td><code><%= operation.authType %></code></td>
+        <td><code><%= operation.modulePath %></code></td>
+        <td><%= operation.usableIn.join(', ') %></td>
+        <td>
+          <% if (operation.hasBridgeApi) { %>
+            <span class="badge">bridge</span>
+          <% } else { %>
+            <span class="muted">TS only</span>
+          <% } %>
+        </td>
+      </tr>
+    <% }) %>
+  </tbody>
+</table>
+</div>

@@ -69,6 +69,7 @@
           <th>Action</th>
           <th>Type</th>
           <th>Step Types</th>
+          <th>operationRefs</th>
           <th>API Refs</th>
         </tr>
       </thead>
@@ -78,6 +79,7 @@
             <td><code><%= action.actionKey %></code></td>
             <td><%= action.actionType %></td>
             <td><%= action.stepTypes && action.stepTypes.length > 0 ? action.stepTypes.join(', ') : '—' %></td>
+            <td><%= action.operationRefs && action.operationRefs.length > 0 ? action.operationRefs.join(', ') : '—' %></td>
             <td><%= action.apiRefs && action.apiRefs.length > 0 ? action.apiRefs.join(', ') : '—' %></td>
           </tr>
         <% }) %>
@@ -87,7 +89,42 @@
 </div>
 
 <div class="card">
-  <h3 class="card-title">Referenced APIs</h3>
+  <h3 class="card-title">Referenced TypeScript Operations</h3>
+  <% if (missingOperationRefs && missingOperationRefs.length > 0) { %>
+    <div class="error-card">
+      <strong>Warning:</strong> Missing operation refs: <%= missingOperationRefs.join(', ') %>
+    </div>
+  <% } %>
+  <% if (!usedOperations || usedOperations.length === 0) { %>
+    <p class="muted">No operationRefs referenced.</p>
+  <% } else { %>
+    <table>
+      <thead>
+        <tr>
+          <th>operationRef</th>
+          <th>Connector</th>
+          <th>Auth</th>
+          <th>Handler / Module</th>
+          <th>Usage</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% usedOperations.forEach((operation) => { %>
+          <tr>
+            <td><code><%= operation.ref %></code></td>
+            <td><%= operation.exists ? `${operation.connectorName} (${operation.connectorKey})` : 'missing' %></td>
+            <td><%= operation.exists ? operation.authType : '—' %></td>
+            <td><%= operation.exists ? operation.modulePath : '—' %></td>
+            <td><%= operation.exists ? operation.usableIn.join(', ') : '—' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Referenced Bridge APIs</h3>
   <% if (missingApiRefs && missingApiRefs.length > 0) { %>
     <div class="error-card">
       <strong>Warning:</strong> Missing API refs: <%= missingApiRefs.join(', ') %>
@@ -100,8 +137,8 @@
       <% usedApis.forEach((api) => { %>
         <li>
           <code><%= api.ref %></code>
-          <% if (api.exists && api.key) { %>
-            · <a href="/apis/<%= encodeURIComponent(api.key) %>"><%= api.name || api.key %></a>
+          <% if (api.exists && api.id) { %>
+            · <a href="/apis/<%= api.id %>"><%= api.name || api.key %></a>
           <% } else { %>
             · <span class="muted">missing</span>
           <% } %>
@@ -109,6 +146,11 @@
       <% }) %>
     </ul>
   <% } %>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Reference Case</h3>
+  <p class="muted">For <code>customer-order-test</code>, the visible integration path should be: lookup field via <code>customers.listValid</code>, form action via <code>customerOrders.create</code>, then workflow hook via <code>customerOrders.setStatusFromContext</code>. The hook reads persisted integration context written by the form action.</p>
 </div>
 
 <div class="actions">

@@ -25,6 +25,7 @@ import { ExternalCallError, executeActionDefinition } from '../actions/index.js'
 import { collectMacroRefsFromActionDefinition, isUiSafeActionDefinition, resolveActionType } from '../actions/policy.js';
 import { renderLayout } from '../render/layout.js';
 import { extractTemplateUsage } from '../template-analysis.js';
+import { listConnectorOperations, resolveConnectorOperation } from '../connectors/registry.js';
 import {
   normalizeRequiresValue,
   type PermissionName
@@ -57,6 +58,7 @@ import {
   type ApproverDecisionState
 } from '../domain/workflow-runtime.js';
 import { executeWorkflowHookEffects } from '../domain/workflow-hooks.js';
+import type { AnyConnectorOperationDefinition } from '../connectors/types.js';
 
 type UiRouteOptions = {
   db: FpDb;
@@ -1238,6 +1240,7 @@ function collectTemplateActionUsage(templateJson: TemplateJson) {
     actionKey: item.actionKey,
     actionType: item.actionType,
     stepTypes: item.stepTypes,
+    operationRefs: item.operationRefs,
     apiRefs: item.apiRefs,
     legacyMacro: item.hasLegacyMacro
   }));
@@ -1336,6 +1339,10 @@ function collectApiRefsFromTemplateJson(templateJson: unknown) {
   return extractTemplateUsage(templateJson).apiRefs;
 }
 
+function collectOperationRefsFromTemplateJson(templateJson: unknown) {
+  return extractTemplateUsage(templateJson).operationRefs;
+}
+
 function normalizeApiRefCandidates(input: string) {
   const raw = String(input ?? '').trim();
   if (!raw) return [];
@@ -1378,10 +1385,84 @@ async function loadTemplatesUsingApi(db: FpDb, apiKey: string) {
   return usedIn;
 }
 
+function resolveOperationModulePath(ref: string) {
+  switch (ref) {
+    case 'customers.listValid':
+      return 'src/connectors/erp-sim/customers.ts';
+    case 'products.listValid':
+      return 'src/connectors/erp-sim/products.ts';
+    case 'batches.create':
+      return 'src/connectors/erp-sim/batches.ts';
+    case 'customerOrders.create':
+    case 'customerOrders.setStatus':
+    case 'customerOrders.setStatusFromContext':
+      return 'src/connectors/erp-sim/customer-orders.ts';
+    case 'salesforce.accounts.listRecent':
+      return 'src/connectors/salesforce-sandbox/accounts.ts';
+    default:
+      return 'src/connectors/...';
+  }
+}
+
+function describeOperationUsage(operation: AnyConnectorOperationDefinition) {
+  if (operation.metadata.kind === 'lookup') return ['Lookup'];
+  return ['Action', 'Hook'];
+}
+
+function buildConnectorOperationView(operation: AnyConnectorOperationDefinition, bridgeApi?: { state?: string | null } | null) {
+  return {
+    ref: operation.ref,
+    name: operation.name,
+    description: operation.description ?? '',
+    connectorKey: operation.connector.key,
+    connectorName: operation.connector.name,
+    connectorTargetSystem: operation.connector.metadata?.targetSystem ?? 'External system',
+    authType: operation.connector.auth.type,
+    method: operation.metadata.method,
+    path: operation.metadata.path,
+    kind: operation.metadata.kind,
+    modulePath: resolveOperationModulePath(operation.ref),
+    usableIn: describeOperationUsage(operation),
+    hasBridgeApi: !!bridgeApi,
+    bridgeState: bridgeApi?.state ? normalizeApiState(bridgeApi.state) : null
+  };
+}
+
+async function loadOperationCatalogView(db: FpDb) {
+  const bridgeRows = await db
+    .select({
+      id: fpApis.id,
+      key: fpApis.key,
+      name: fpApis.name,
+      description: fpApis.description,
+      state: fpApis.state,
+      method: fpApis.method,
+      baseUrl: fpApis.baseUrl,
+      path: fpApis.path,
+      updatedAt: fpApis.updatedAt
+    })
+    .from(fpApis)
+    .orderBy(asc(fpApis.key));
+  const bridgeByKey = new Map(bridgeRows.map((row) => [row.key, row]));
+  const operations = listConnectorOperations().map((operation) =>
+    buildConnectorOperationView(operation, bridgeByKey.get(operation.ref) ?? null)
+  );
+  return {
+    bridgeApis: bridgeRows.map((row) => ({
+      ...row,
+      state: normalizeApiState(row.state),
+      method: normalizeApiMethod(row.method),
+      hasTsOperation: !!resolveConnectorOperation(row.key),
+      tsOperationRef: resolveConnectorOperation(row.key)?.ref ?? null
+    })),
+    operations
+  };
+}
+
 async function loadTemplateApiUsageView(db: FpDb, template: { templateJson: unknown }) {
   const refs = collectApiRefsFromTemplateJson(template.templateJson).sort((a, b) => a.localeCompare(b));
   if (refs.length === 0) {
-    return { usedApis: [] as Array<{ ref: string; key: string | null; name: string | null; state: string | null; exists: boolean }>, missingApiRefs: [] as string[] };
+    return { usedApis: [] as Array<{ ref: string; id: string | null; key: string | null; name: string | null; state: string | null; exists: boolean }>, missingApiRefs: [] as string[] };
   }
 
   const directKeys = refs.flatMap((item) => normalizeApiRefCandidates(item));
@@ -1389,6 +1470,7 @@ async function loadTemplateApiUsageView(db: FpDb, template: { templateJson: unkn
   const rows = uniqueKeys.length
     ? await db
         .select({
+          id: fpApis.id,
           key: fpApis.key,
           name: fpApis.name,
           state: fpApis.state
@@ -1404,6 +1486,7 @@ async function loadTemplateApiUsageView(db: FpDb, template: { templateJson: unkn
       .find(Boolean);
     return {
       ref,
+      id: match?.id ?? null,
       key: match?.key ?? null,
       name: match?.name ?? null,
       state: match?.state ?? null,
@@ -1412,6 +1495,96 @@ async function loadTemplateApiUsageView(db: FpDb, template: { templateJson: unkn
   });
   const missingApiRefs = usedApis.filter((item) => !item.exists).map((item) => item.ref);
   return { usedApis, missingApiRefs };
+}
+
+async function loadTemplateOperationUsageView(template: { templateJson: unknown }) {
+  const refs = collectOperationRefsFromTemplateJson(template.templateJson).sort((a, b) => a.localeCompare(b));
+  const usedOperations = refs.map((ref) => {
+    const operation = resolveConnectorOperation(ref);
+    return operation
+      ? {
+          ref,
+          exists: true,
+          ...buildConnectorOperationView(operation)
+        }
+      : {
+          ref,
+          exists: false,
+          name: null,
+          description: '',
+          connectorKey: null,
+          connectorName: null,
+          connectorTargetSystem: null,
+          authType: null,
+          method: null,
+          path: null,
+          kind: null,
+          modulePath: null,
+          usableIn: []
+        };
+  });
+  const missingOperationRefs = usedOperations.filter((item) => !item.exists).map((item) => item.ref);
+  return { usedOperations, missingOperationRefs };
+}
+
+function loadWorkflowHookUsageView(workflowRuntime: WorkflowRuntimeModel) {
+  const rows = [
+    ...workflowRuntime.hooks.onTransition.flatMap((hook) =>
+      hook.effects.map((effect) => ({
+        triggerType: 'transition',
+        triggerLabel: `${(hook.from ?? ['*']).join(', ')} -> ${hook.to.join(', ')}`,
+        operationRef: effect.operationRef,
+        apiRef: effect.apiRef ?? null,
+        responseTargets: [
+          ...(effect.responseMapping?.data ? ['data'] : []),
+          ...(effect.responseMapping?.external ? ['external'] : []),
+          ...(effect.responseMapping?.snapshot ? ['snapshot'] : []),
+          ...(effect.responseMapping?.integration ? ['integration'] : []),
+          ...(effect.responseMapping?.status ? ['status'] : [])
+        ],
+        description: effect.description ?? ''
+      }))
+    ),
+    ...workflowRuntime.hooks.onEnterState.flatMap((hook) =>
+      hook.effects.map((effect) => ({
+        triggerType: 'enterState',
+        triggerLabel: hook.state.join(', '),
+        operationRef: effect.operationRef,
+        apiRef: effect.apiRef ?? null,
+        responseTargets: [
+          ...(effect.responseMapping?.data ? ['data'] : []),
+          ...(effect.responseMapping?.external ? ['external'] : []),
+          ...(effect.responseMapping?.snapshot ? ['snapshot'] : []),
+          ...(effect.responseMapping?.integration ? ['integration'] : []),
+          ...(effect.responseMapping?.status ? ['status'] : [])
+        ],
+        description: effect.description ?? ''
+      }))
+    ),
+    ...workflowRuntime.hooks.onWorkflowAction.flatMap((hook) =>
+      hook.effects.map((effect) => ({
+        triggerType: 'workflowAction',
+        triggerLabel: hook.action.join(', '),
+        operationRef: effect.operationRef,
+        apiRef: effect.apiRef ?? null,
+        responseTargets: [
+          ...(effect.responseMapping?.data ? ['data'] : []),
+          ...(effect.responseMapping?.external ? ['external'] : []),
+          ...(effect.responseMapping?.snapshot ? ['snapshot'] : []),
+          ...(effect.responseMapping?.integration ? ['integration'] : []),
+          ...(effect.responseMapping?.status ? ['status'] : [])
+        ],
+        description: effect.description ?? ''
+      }))
+    )
+  ].map((row) => {
+    const operation = resolveConnectorOperation(row.operationRef);
+    return {
+      ...row,
+      operation: operation ? buildConnectorOperationView(operation) : null
+    };
+  });
+  return rows;
 }
 
 async function loadTemplateAssignmentView(db: FpDb, templateId: string) {
@@ -3875,28 +4048,12 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const selectedState = parsedQuery.success ? parsedQuery.data.state ?? 'active' : 'active';
     const whereState = selectedState === 'all' ? undefined : selectedState;
     try {
-      const rows = await db
-        .select({
-          id: fpApis.id,
-          key: fpApis.key,
-          name: fpApis.name,
-          description: fpApis.description,
-          state: fpApis.state,
-          method: fpApis.method,
-          baseUrl: fpApis.baseUrl,
-          path: fpApis.path,
-          updatedAt: fpApis.updatedAt
-        })
-        .from(fpApis)
-        .where(whereState ? eq(fpApis.state, whereState) : undefined)
-        .orderBy(asc(fpApis.key));
+      const catalog = await loadOperationCatalogView(db);
+      const rows = catalog.bridgeApis.filter((row) => (whereState ? row.state === whereState : true));
 
       await reply.renderPage('apis/list.ejs', {
-        apis: rows.map((row) => ({
-          ...row,
-          state: normalizeApiState(row.state),
-          method: normalizeApiMethod(row.method)
-        })),
+        apis: rows,
+        operations: catalog.operations,
         filters: {
           state: selectedState
         }
@@ -4035,12 +4192,14 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       return reply.status(404).send({ message: 'API not found' });
     }
     const templatesUsingApi = await loadTemplatesUsingApi(db, api.key);
+    const connectorOperation = resolveConnectorOperation(api.key);
     await reply.renderPage('apis/detail.ejs', {
       api: {
         ...api,
         state: normalizeApiState(api.state),
         method: normalizeApiMethod(api.method)
       },
+      connectorOperation: connectorOperation ? buildConnectorOperationView(connectorOperation, { state: api.state }) : null,
       templatesUsingApi,
       apiTest: {
         requestJson: buildApiTestExample(api.requestSchemaJson),
@@ -4438,6 +4597,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     const approvedApprovers = Math.max(0, Number.parseInt(getFormString(query, 'approvedApprovers') || '0', 10) || 0);
     const rejectedApprovers = Math.max(0, Number.parseInt(getFormString(query, 'rejectedApprovers') || '0', 10) || 0);
     const workflowRuntime = parseWorkflowJson(workflow.workflowJson);
+    const hookOperations = loadWorkflowHookUsageView(workflowRuntime);
     const simulation = {
       ...evaluateWorkflow({
         workflow: workflowRuntime,
@@ -4463,7 +4623,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
     await reply.renderPage('workflows/detail.ejs', {
       workflow,
       templatesUsingWorkflow,
-      simulation
+      simulation,
+      hookOperations
     });
   });
 
@@ -4673,6 +4834,7 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
             .sort((a: any, b: any) => Number(b.version ?? 0) - Number(a.version ?? 0))[0] ?? null
         : null;
     const apiUsageView = await loadTemplateApiUsageView(db, template);
+    const operationUsageView = await loadTemplateOperationUsageView(template);
     const actionUsage = safeCollectTemplateActionUsage(template.templateJson);
     const documentTableView = await loadTemplateDocumentTableView(db, template, {
       hasDocumentActorColumns,
@@ -4683,6 +4845,8 @@ export async function uiRoutes(app: FastifyInstance, opts: UiRouteOptions) {
       template,
       normalizedState: normalizeTemplateState(template.state),
       workflow,
+      usedOperations: operationUsageView.usedOperations,
+      missingOperationRefs: operationUsageView.missingOperationRefs,
       usedApis: apiUsageView.usedApis,
       missingApiRefs: apiUsageView.missingApiRefs,
       usedActions: actionUsage,
